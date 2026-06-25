@@ -13,6 +13,7 @@ pub mod footprint;
 pub mod metrics;
 pub mod params;
 pub mod progress;
+pub mod registry;
 pub mod result;
 pub mod traits;
 
@@ -23,5 +24,6 @@ pub use footprint::{Footprint, Level, Plot};
 pub use metrics::Metrics;
 pub use params::{Configurable, ParamRange, ParamSpec, ParamValue, Params};
 pub use progress::{ProgressHandle, ProgressSnapshot};
+pub use registry::Registry;
 pub use result::{BacktestResult, Trade, TradeReason};
 pub use traits::{DataSource, FootprintAggregator, Indicator, Strategy};
