@@ -148,6 +148,78 @@ function drawPrice(){
       i=j;
     }
   }
+  // Plot::VolumeProfile — ATAS-style: left = delta, right = volume
+  {
+    // Collect the LAST occurrence of each VP id in the visible range.
+    const vpMap = {};
+    for(let i=0;i<vis.length;i++){
+      for(const p of (vis[i].plots||[])){
+        if(p.kind==="VolumeProfile") vpMap[p.id] = {barIdx:i, span:p.span, levels:p.levels};
+      }
+    }
+    for(const id in vpMap){
+      const vp = vpMap[id];
+      const spanStart = Math.max(0, vp.barIdx - vp.span);
+      const spanEnd = vp.barIdx;
+      const x0 = L + spanStart * xStep;
+      const x1 = L + (spanEnd+1) * xStep;
+      const spanW = x1 - x0;
+      const midX = (x0 + x1) / 2;
+      // Shade the trend range
+      pctx.fillStyle = "rgba(100,116,139,0.06)";
+      pctx.fillRect(x0, T, spanW, ph);
+      // Find max volume and max |delta| for scaling
+      let maxVol = 0, maxDelta = 0;
+      for(const lv of vp.levels){
+        maxVol = Math.max(maxVol, lv.buy_vol + lv.sell_vol);
+        maxDelta = Math.max(maxDelta, Math.abs(lv.buy_vol - lv.sell_vol));
+      }
+      if(maxVol <= 0) continue;
+      const halfW = spanW * 0.45;
+      const tickPx = DATA.tick_size || 0.25;
+      const barH = Math.max(1, Math.min(ph / Math.max(1, vp.levels.length), (tickPx / (hi-lo)) * ph));
+      for(const lv of vp.levels){
+        const py = y(lv.price);
+        if(py < T || py > T+ph) continue;
+        // Right: total volume bar
+        const volW = (lv.buy_vol + lv.sell_vol) / maxVol * halfW;
+        pctx.fillStyle = "rgba(100,116,139,0.35)";
+        pctx.fillRect(midX, py - barH/2, volW, barH);
+        // Right: buy portion highlighted
+        const buyW = lv.buy_vol / maxVol * halfW;
+        pctx.fillStyle = "rgba(37,99,235,0.30)";
+        pctx.fillRect(midX, py - barH/2, buyW, barH);
+        // Left: delta bar
+        const delta = lv.buy_vol - lv.sell_vol;
+        if(maxDelta > 0){
+          const dW = Math.abs(delta) / maxDelta * halfW;
+          pctx.fillStyle = delta >= 0 ? "rgba(37,99,235,0.55)" : "rgba(232,131,42,0.55)";
+          pctx.fillRect(midX - dW, py - barH/2, dW, barH);
+        }
+      }
+      // POC line (max volume level)
+      let pocPrice = 0, pocVol = 0;
+      for(const lv of vp.levels){
+        const v = lv.buy_vol + lv.sell_vol;
+        if(v > pocVol){ pocVol = v; pocPrice = lv.price; }
+      }
+      if(pocVol > 0){
+        const pocY = y(pocPrice);
+        pctx.strokeStyle = "rgba(234,179,8,0.8)"; pctx.lineWidth = 1.5;
+        pctx.beginPath(); pctx.moveTo(x0, pocY); pctx.lineTo(x1, pocY); pctx.stroke();
+        pctx.lineWidth = 1;
+      }
+      // Bounding box around the VP
+      const vpPrices = vp.levels.map(lv => lv.price);
+      const vpYHi = y(Math.max(...vpPrices));
+      const vpYLo = y(Math.min(...vpPrices));
+      pctx.strokeStyle = "rgba(100,116,139,0.55)";
+      pctx.lineWidth = 1;
+      pctx.setLineDash([4, 3]);
+      pctx.strokeRect(x0, vpYHi - barH/2, x1 - x0, vpYLo - vpYHi + barH);
+      pctx.setLineDash([]);
+    }
+  }
   // grid + price axis
   pctx.strokeStyle=COLORS.grid; pctx.fillStyle=COLORS.axis; pctx.font="11px Segoe UI, Arial"; pctx.lineWidth=1;
   for(let i=0;i<=6;i++){ const yy=T+ph*i/6, pr=hi-(hi-lo)*i/6;
@@ -160,6 +232,45 @@ function drawPrice(){
     pctx.beginPath(); pctx.moveTo(x,y(b.high)); pctx.lineTo(x,y(b.low)); pctx.stroke();
     const oy=y(b.open), cy=y(b.close);
     pctx.fillRect(x-cw/2, Math.min(oy,cy), cw, Math.max(1,Math.abs(oy-cy))); }
+  // Plot::Line overlays — connect points with the same id across bars
+  {
+    const lines = {};
+    for(let i=0;i<vis.length;i++){
+      for(const p of (vis[i].plots||[])){
+        if(p.kind!=="Line") continue;
+        if(!lines[p.id]) lines[p.id] = {color:p.color, pts:[]};
+        lines[p.id].pts.push({x:L+i*xStep+xStep/2, y:y(p.value)});
+      }
+    }
+    for(const id in lines){
+      const ln = lines[id];
+      pctx.strokeStyle = ln.color; pctx.lineWidth = 1.2; pctx.setLineDash([6,3]);
+      pctx.beginPath();
+      for(let j=0;j<ln.pts.length;j++){
+        j===0 ? pctx.moveTo(ln.pts[j].x, ln.pts[j].y) : pctx.lineTo(ln.pts[j].x, ln.pts[j].y);
+      }
+      pctx.stroke(); pctx.setLineDash([]); pctx.lineWidth=1;
+      const last = ln.pts[ln.pts.length-1];
+      pctx.fillStyle = ln.color; pctx.font = "10px Segoe UI, Arial";
+      pctx.fillText(id, last.x+4, last.y+3);
+    }
+  }
+  // Plot::Marker overlays
+  for(let i=0;i<vis.length;i++){
+    for(const p of (vis[i].plots||[])){
+      if(p.kind!=="Marker") continue;
+      const mx = L+i*xStep+xStep/2, my = y(p.price);
+      pctx.fillStyle = p.color;
+      if(p.shape==="triangle_up"){
+        pctx.beginPath(); pctx.moveTo(mx,my-8); pctx.lineTo(mx-6,my+2); pctx.lineTo(mx+6,my+2); pctx.closePath(); pctx.fill();
+      } else if(p.shape==="triangle_down"){
+        pctx.beginPath(); pctx.moveTo(mx,my+8); pctx.lineTo(mx-6,my-2); pctx.lineTo(mx+6,my-2); pctx.closePath(); pctx.fill();
+      } else {
+        pctx.beginPath(); pctx.arc(mx,my,4,0,Math.PI*2); pctx.fill();
+      }
+      if(p.text){ pctx.font="9px Segoe UI, Arial"; pctx.fillText(p.text, mx+7, my+3); }
+    }
+  }
   // trade markers
   if(showTrades){
     for(const t of trades){
