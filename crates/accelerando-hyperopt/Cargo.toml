@@ -1,0 +1,11 @@
+[package]
+name = "accelerando-hyperopt"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Parallel, GPU-ready parameter search for Accelerando (freqtrade-style hyperopt)."
+
+[dependencies]
+accelerando-core = { workspace = true }
+rayon = { workspace = true }
+serde = { workspace = true }

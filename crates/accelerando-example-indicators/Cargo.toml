@@ -1,0 +1,9 @@
+[package]
+name = "accelerando-example-indicators"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Generic technical indicator adapters for Accelerando examples."
+
+[dependencies]
+accelerando-core = { workspace = true }

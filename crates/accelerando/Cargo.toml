@@ -1,0 +1,13 @@
+[package]
+name = "accelerando"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Accelerando facade crate: common API and built-in default registry."
+
+[dependencies]
+accelerando-core = { workspace = true }
+accelerando-example-sources = { workspace = true }
+accelerando-example-aggregators = { workspace = true }
+accelerando-example-indicators = { workspace = true }
+accelerando-example-strategy = { workspace = true }

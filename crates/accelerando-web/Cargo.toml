@@ -1,0 +1,11 @@
+[package]
+name = "accelerando-web"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Zero-build, Rust-served result viewer and studio page for Accelerando."
+
+[dependencies]
+accelerando-core = { workspace = true }
+serde_json = { workspace = true }
+tiny_http = { workspace = true }
