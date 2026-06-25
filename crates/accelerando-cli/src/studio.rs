@@ -11,6 +11,7 @@ use std::sync::{Arc, Mutex};
 
 use accelerando_core::{
     run_backtest_progress, BrokerConfig, ParamSpec, ParamValue, Params, Pipeline, ProgressHandle,
+    Registry,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -67,22 +68,24 @@ impl StudioConfig {
         }
     }
 
-    fn build_pipeline(&self, keep_footprints: bool) -> Result<Pipeline, String> {
-        let source = accelerando_sources::build(&self.data.adapter, &Params(self.data.params.clone()))
+    fn build_pipeline(&self, keep_footprints: bool, registry: &Registry) -> Result<Pipeline, String> {
+        let source = registry
+            .build_source(&self.data.adapter, &Params(self.data.params.clone()))
             .ok_or_else(|| format!("unknown data source: {}", self.data.adapter))?;
-        let aggregator =
-            accelerando_aggregators::build(&self.aggregator.adapter, &Params(self.aggregator.params.clone()))
-                .ok_or_else(|| format!("unknown aggregator: {}", self.aggregator.adapter))?;
+        let aggregator = registry
+            .build_aggregator(&self.aggregator.adapter, &Params(self.aggregator.params.clone()))
+            .ok_or_else(|| format!("unknown aggregator: {}", self.aggregator.adapter))?;
         let mut indicators = Vec::new();
         for ind in &self.indicator {
             indicators.push(
-                accelerando_indicators::build(&ind.adapter, &Params(ind.params.clone()))
+                registry
+                    .build_indicator(&ind.adapter, &Params(ind.params.clone()))
                     .ok_or_else(|| format!("unknown indicator: {}", ind.adapter))?,
             );
         }
-        let strategy =
-            accelerando_strategy::build(&self.strategy.adapter, &Params(self.strategy.params.clone()))
-                .ok_or_else(|| format!("unknown strategy: {}", self.strategy.adapter))?;
+        let strategy = registry
+            .build_strategy(&self.strategy.adapter, &Params(self.strategy.params.clone()))
+            .ok_or_else(|| format!("unknown strategy: {}", self.strategy.adapter))?;
         Ok(Pipeline {
             source,
             aggregator,
@@ -104,20 +107,20 @@ impl StudioConfig {
 
 /// A default seed config (first registered adapter of each kind, empty params). The form fills the
 /// inputs from the schema defaults; the user supplies the data file path.
-pub fn default_config() -> StudioConfig {
+pub fn default_config(registry: &Registry) -> StudioConfig {
     let stage = |adapter: &str| StudioStage {
         adapter: adapter.to_string(),
         params: BTreeMap::new(),
     };
     StudioConfig {
         keep_footprints: true,
-        data: stage(accelerando_sources::list().first().copied().unwrap_or("bookmap_csv")),
-        aggregator: stage(accelerando_aggregators::list().first().copied().unwrap_or("time")),
+        data: stage(registry.source_names().first().copied().unwrap_or("bookmap_csv")),
+        aggregator: stage(registry.aggregator_names().first().copied().unwrap_or("time")),
         indicator: vec![stage(
-            accelerando_indicators::list().first().copied().unwrap_or("whitesnake"),
+            registry.indicator_names().first().copied().unwrap_or("whitesnake"),
         )],
         strategy: stage(
-            accelerando_strategy::list().first().copied().unwrap_or("regime_follow"),
+            registry.strategy_names().first().copied().unwrap_or("regime_follow"),
         ),
         broker: BrokerCfg::default(),
     }
@@ -135,19 +138,22 @@ struct Studio {
     running: bool,
     error: Option<String>,
     runs_dir: PathBuf,
+    registry: Arc<Registry>,
 }
 
 /// Start the studio server (blocks). `seed` pre-fills the config form.
-pub fn serve(seed: StudioConfig, runs_dir: PathBuf, port: u16) -> Result<(), String> {
+pub fn serve(seed: StudioConfig, runs_dir: PathBuf, port: u16, registry: Arc<Registry>) -> Result<(), String> {
     std::fs::create_dir_all(&runs_dir).ok();
+    let schema = schema_json(&registry);
     let state = Arc::new(Mutex::new(Studio {
-        schema: schema_json(),
+        schema,
         config: seed,
         result_json: None,
         progress: ProgressHandle::new(),
         running: false,
         error: None,
         runs_dir,
+        registry: registry.clone(),
     }));
 
     let addr = format!("0.0.0.0:{port}");
@@ -227,10 +233,11 @@ fn start_backtest(state: &Arc<Mutex<Studio>>, body: &str) -> Resp {
     }
 
     let st = state.clone();
+    let registry = state.lock().unwrap().registry.clone();
     let progress = state.lock().unwrap().progress.clone();
     std::thread::spawn(move || {
         let outcome = cfg
-            .build_pipeline(cfg.keep_footprints)
+            .build_pipeline(cfg.keep_footprints, &registry)
             .map(|pl| run_backtest_progress(pl, Some(progress.clone())));
         let mut s = st.lock().unwrap();
         s.running = false;
@@ -357,7 +364,7 @@ fn list_runs(runs_dir: &Path) -> String {
 // Schema (adapters + their parameter specs) for the auto-generated config form.
 // ---------------------------------------------------------------------------------------------
 
-fn schema_json() -> String {
+fn schema_json(registry: &Registry) -> String {
     fn specs(names: &[&str], get: impl Fn(&str) -> Option<ParamSpec>) -> Vec<serde_json::Value> {
         names
             .iter()
@@ -365,10 +372,10 @@ fn schema_json() -> String {
             .collect()
     }
     json!({
-        "sources": specs(accelerando_sources::list(), accelerando_sources::spec),
-        "aggregators": specs(accelerando_aggregators::list(), accelerando_aggregators::spec),
-        "indicators": specs(accelerando_indicators::list(), accelerando_indicators::spec),
-        "strategies": specs(accelerando_strategy::list(), accelerando_strategy::spec),
+        "sources": specs(&registry.source_names(), |name| registry.source_spec(name)),
+        "aggregators": specs(&registry.aggregator_names(), |name| registry.aggregator_spec(name)),
+        "indicators": specs(&registry.indicator_names(), |name| registry.indicator_spec(name)),
+        "strategies": specs(&registry.strategy_names(), |name| registry.strategy_spec(name)),
     })
     .to_string()
 }

@@ -1,6 +1,6 @@
 # Accelerando
 
-**High-speed, pluggable footprint backtesting framework.** *The world has been accelerated.*
+**High-speed, pluggable footprint backtesting framework.** _The world has been accelerated._
 
 Accelerando turns any order-flow feed into footprints, runs causal indicators and strategies over
 them, simulates fills, and reports performance — then accelerates parameter search across all your
@@ -24,16 +24,26 @@ same definitions drive a single run and the hyperopt search space. Drop in your 
 
 ## Crates
 
-| crate | role |
-|-------|------|
-| `accelerando-core` | event/footprint model, traits, engine, broker, metrics |
-| `accelerando-sources` | data source adapters (`bookmap_csv`) |
-| `accelerando-aggregators` | footprint aggregators (`time`) |
-| `accelerando-indicators` | indicators — `whitesnake` (ported regime detector) |
-| `accelerando-strategy` | strategies — `regime_follow` |
-| `accelerando-hyperopt` | parallel parameter search (rayon; GPU seam reserved) |
-| `accelerando-web` | zero-build dashboard server (tiny_http + embedded Canvas) |
-| `accelerando-cli` | `accelerando` binary: `run | hyperopt | serve` |
+The core framework lives in `accelerando-core`. The `accelerando-example-*` crates
+provide built-in example adapters for this repo; they are optional implementations
+used by the default CLI/studio setup and can be replaced by downstream adapters
+without changing the core framework.
+
+| crate                             | role                                                                |
+| --------------------------------- | ------------------------------------------------------------------- |
+| `accelerando-core`                | event/footprint model, traits, engine, broker, metrics              |
+| `accelerando-example-sources`     | built-in example data source adapters (`bookmap_csv`)               |
+| `accelerando-example-aggregators` | built-in example footprint aggregators (`time`)                     |
+| `accelerando-example-indicators`  | built-in example indicators — `whitesnake` (ported regime detector) |
+| `accelerando-example-strategy`    | built-in example strategies — `regime_follow`                       |
+| `accelerando-hyperopt`            | parallel parameter search (rayon; GPU seam reserved)                |
+| `accelerando-web`                 | zero-build dashboard server (tiny_http + embedded Canvas)           |
+| `accelerando-cli`                 | `accelerando` binary: `run | hyperopt | serve`                      |
+
+These `accelerando-example-*` crates are built-in example adapters for this repo.
+For downstream adopters, the real integration surface is `accelerando-core` and the
+`accelerando` facade crate; you can write your own adapters and register them with
+`Registry` instead of using these built-in examples.
 
 ## Quick start
 

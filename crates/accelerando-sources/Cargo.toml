@@ -1,9 +1,0 @@
-[package]
-name = "accelerando-sources"
-version.workspace = true
-edition.workspace = true
-license.workspace = true
-description = "Data source adapters for Accelerando (Bookmap replay CSV, ...)."
-
-[dependencies]
-accelerando-core = { workspace = true }

@@ -5,3 +5,10 @@
 mod time;
 
 pub use time::TimeAggregator;
+
+use accelerando_core::Registry;
+
+/// Register all built-in aggregators into `registry`.
+pub fn register_all(registry: &mut Registry) {
+    registry.register_aggregator::<TimeAggregator>("time");
+}

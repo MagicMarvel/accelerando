@@ -4,6 +4,7 @@ mod config;
 mod pipeline;
 mod studio;
 
+use accelerando::{default_registry};
 use accelerando_core::{run_backtest, BacktestResult, Metrics, Params};
 use accelerando_hyperopt::{search, Algo, CpuEvaluator};
 
@@ -60,7 +61,8 @@ fn cmd_run(args: &[String]) -> Result<(), String> {
 
     eprintln!("running backtest from {cfg_path} ...");
     let t0 = std::time::Instant::now();
-    let pipeline = pipeline::build_pipeline(&cfg, &Params::default(), cfg.keep_footprints)?;
+    let registry = default_registry();
+    let pipeline = pipeline::build_pipeline(&cfg, &Params::default(), cfg.keep_footprints, &registry)?;
     let result = run_backtest(pipeline);
     eprintln!(
         "done in {:.2}s — {} footprints, {} trades",
@@ -88,7 +90,8 @@ fn cmd_hyperopt(args: &[String]) -> Result<(), String> {
     let seed: u64 = flag(args, "--seed").unwrap_or("42").parse().map_err(|_| "bad --seed")?;
     let objective = flag(args, "--objective").unwrap_or("sharpe").to_string();
 
-    let space = pipeline::build_search_space(&cfg)?;
+    let registry = default_registry();
+    let space = pipeline::build_search_space(&cfg, &registry)?;
     eprintln!(
         "hyperopt: {} tunable params, {} evals, algo {:?}, objective {}",
         space.dims.len(),
@@ -99,9 +102,10 @@ fn cmd_hyperopt(args: &[String]) -> Result<(), String> {
 
     // Each candidate rebuilds and runs the pipeline (footprints dropped for speed).
     let cfg_ref = &cfg;
+    let registry_ref = &registry;
     let obj = objective.clone();
     let func = move |p: &Params| -> f64 {
-        match pipeline::build_pipeline(cfg_ref, p, false) {
+        match pipeline::build_pipeline(cfg_ref, p, false, registry_ref) {
             Ok(pl) => objective_value(&run_backtest(pl).metrics, &obj),
             Err(_) => f64::NEG_INFINITY,
         }
@@ -147,11 +151,12 @@ fn cmd_serve(args: &[String]) -> Result<(), String> {
 fn cmd_studio(args: &[String]) -> Result<(), String> {
     let port: u16 = flag(args, "--port").unwrap_or("8080").parse().map_err(|_| "bad --port")?;
     let runs_dir = std::path::PathBuf::from(flag(args, "--runs-dir").unwrap_or("runs"));
+    let registry = default_registry();
     let seed = match flag(args, "--config") {
         Some(p) => StudioConfig::from_run_config(&RunConfig::load(p)?),
-        None => studio::default_config(),
+        None => studio::default_config(&registry),
     };
-    studio::serve(seed, runs_dir, port)
+    studio::serve(seed, runs_dir, port, std::sync::Arc::new(registry))
 }
 
 fn objective_value(m: &Metrics, objective: &str) -> f64 {

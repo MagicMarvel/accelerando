@@ -1,9 +1,9 @@
 [package]
-name = "accelerando-aggregators"
+name = "accelerando-example-sources"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "Footprint aggregator adapters for Accelerando (time, range, tick, volume)."
+description = "Data source adapters for Accelerando (Bookmap replay CSV, ...)."
 
 [dependencies]
 accelerando-core = { workspace = true }

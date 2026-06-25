@@ -3,22 +3,27 @@
 version = 4
 
 [[package]]
-name = "accelerando-aggregators"
+name = "accelerando"
 version = "0.1.0"
 dependencies = [
  "accelerando-core",
+ "accelerando-example-aggregators",
+ "accelerando-example-indicators",
+ "accelerando-example-sources",
+ "accelerando-example-strategy",
 ]
 
 [[package]]
 name = "accelerando-cli"
 version = "0.1.0"
 dependencies = [
- "accelerando-aggregators",
+ "accelerando",
  "accelerando-core",
+ "accelerando-example-aggregators",
+ "accelerando-example-indicators",
+ "accelerando-example-sources",
+ "accelerando-example-strategy",
  "accelerando-hyperopt",
- "accelerando-indicators",
- "accelerando-sources",
- "accelerando-strategy",
  "accelerando-web",
  "rayon",
  "serde",
@@ -36,33 +41,40 @@ dependencies = [
 ]
 
 [[package]]
+name = "accelerando-example-aggregators"
+version = "0.1.0"
+dependencies = [
+ "accelerando-core",
+]
+
+[[package]]
+name = "accelerando-example-indicators"
+version = "0.1.0"
+dependencies = [
+ "accelerando-core",
+]
+
+[[package]]
+name = "accelerando-example-sources"
+version = "0.1.0"
+dependencies = [
+ "accelerando-core",
+]
+
+[[package]]
+name = "accelerando-example-strategy"
+version = "0.1.0"
+dependencies = [
+ "accelerando-core",
+]
+
+[[package]]
 name = "accelerando-hyperopt"
 version = "0.1.0"
 dependencies = [
  "accelerando-core",
  "rayon",
  "serde",
-]
-
-[[package]]
-name = "accelerando-indicators"
-version = "0.1.0"
-dependencies = [
- "accelerando-core",
-]
-
-[[package]]
-name = "accelerando-sources"
-version = "0.1.0"
-dependencies = [
- "accelerando-core",
-]
-
-[[package]]
-name = "accelerando-strategy"
-version = "0.1.0"
-dependencies = [
- "accelerando-core",
 ]
 
 [[package]]

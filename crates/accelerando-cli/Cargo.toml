@@ -10,11 +10,12 @@ name = "accelerando"
 path = "src/main.rs"
 
 [dependencies]
+accelerando = { workspace = true }
 accelerando-core = { workspace = true }
-accelerando-sources = { workspace = true }
-accelerando-aggregators = { workspace = true }
-accelerando-indicators = { workspace = true }
-accelerando-strategy = { workspace = true }
+accelerando-example-sources = { workspace = true }
+accelerando-example-aggregators = { workspace = true }
+accelerando-example-indicators = { workspace = true }
+accelerando-example-strategy = { workspace = true }
 accelerando-hyperopt = { workspace = true }
 accelerando-web = { workspace = true }
 serde = { workspace = true }

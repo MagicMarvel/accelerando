@@ -1,5 +1,5 @@
 [package]
-name = "accelerando-strategy"
+name = "accelerando-example-strategy"
 version.workspace = true
 edition.workspace = true
 license.workspace = true

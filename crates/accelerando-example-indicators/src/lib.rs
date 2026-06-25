@@ -4,3 +4,10 @@
 mod whitesnake;
 
 pub use whitesnake::{Regime, Whitesnake};
+
+use accelerando_core::Registry;
+
+/// Register all built-in indicators into `registry`.
+pub fn register_all(registry: &mut Registry) {
+    registry.register_indicator::<Whitesnake>("whitesnake");
+}
