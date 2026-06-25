@@ -1,0 +1,28 @@
+# Accelerando end-to-end example config.
+# Pipeline: Bookmap CSV -> 5min footprints -> Whitesnake regime -> regime-following strategy.
+
+result = "result.json"
+keep_footprints = true
+
+[data]
+adapter = "bookmap_csv"
+params = { path = "D:/allProject/accelerando/es_slice.csv", buy_aggressor_code = 2 }
+
+[aggregator]
+adapter = "time"
+params = { bar_secs = 300 }
+
+[[indicator]]
+adapter = "whitesnake"
+# Defaults match the original price-shape-regime detector; override any of them here, e.g.:
+# params = { window = 48, trend_er = 0.52 }
+params = {}
+
+[strategy]
+adapter = "regime_follow"
+params = { qty = 1, stop_ticks = 40, target_ticks = 80, min_score = 0.0 }
+
+[broker]
+commission_per_contract = 2.0
+slippage_ticks = 1.0
+starting_equity = 100000.0

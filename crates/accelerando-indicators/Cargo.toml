@@ -1,0 +1,9 @@
+[package]
+name = "accelerando-indicators"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Indicator adapters for Accelerando. Whitesnake = the ported price-shape regime detector."
+
+[dependencies]
+accelerando-core = { workspace = true }

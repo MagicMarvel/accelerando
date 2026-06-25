@@ -1,0 +1,40 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/accelerando-core",
+    "crates/accelerando-sources",
+    "crates/accelerando-aggregators",
+    "crates/accelerando-indicators",
+    "crates/accelerando-strategy",
+    "crates/accelerando-hyperopt",
+    "crates/accelerando-web",
+    "crates/accelerando-cli",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/your/accelerando"
+description = "Accelerando — high-speed, pluggable footprint backtesting framework. The world has been accelerated."
+
+[workspace.dependencies]
+accelerando-core = { path = "crates/accelerando-core" }
+accelerando-sources = { path = "crates/accelerando-sources" }
+accelerando-aggregators = { path = "crates/accelerando-aggregators" }
+accelerando-indicators = { path = "crates/accelerando-indicators" }
+accelerando-strategy = { path = "crates/accelerando-strategy" }
+accelerando-hyperopt = { path = "crates/accelerando-hyperopt" }
+accelerando-web = { path = "crates/accelerando-web" }
+
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "0.8"
+rayon = "1"
+tiny_http = "0.12"
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+panic = "abort"

@@ -1,0 +1,321 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Accelerando — backtest studio</title>
+<style>
+  :root { color-scheme: light; font-family: Inter, "Segoe UI", Arial, sans-serif; background:#f6f7f9; color:#111827; }
+  * { box-sizing: border-box; }
+  body { margin:0; height:100vh; display:grid; grid-template-rows:auto 1fr; overflow:hidden; }
+  header { padding:10px 16px; background:#0f172a; color:#fff; display:flex; align-items:baseline; gap:12px; }
+  header .title { font-size:16px; font-weight:800; letter-spacing:.3px; }
+  header .tag { font-size:12px; color:#94a3b8; }
+  header .status { margin-left:auto; font-size:12px; color:#cbd5e1; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; max-width:55vw;}
+  .main { display:grid; grid-template-columns:360px 1fr; min-height:0; }
+  .side { border-right:1px solid #e2e8f0; background:#fff; overflow-y:auto; padding:12px; display:flex; flex-direction:column; gap:12px; }
+  .panel { border:1px solid #e5e7eb; border-radius:10px; background:#fbfcfe; }
+  .panel > h3 { margin:0; padding:8px 12px; font-size:12px; text-transform:uppercase; letter-spacing:.5px; color:#475569; border-bottom:1px solid #eef2f7; }
+  .panel .body { padding:10px 12px; display:flex; flex-direction:column; gap:8px; }
+  .runbar { display:flex; gap:8px; align-items:center; }
+  button { border:1px solid #c5ccd6; border-radius:8px; background:#fff; cursor:pointer; font-size:13px; padding:7px 12px; }
+  button:hover { background:#eef2f7; }
+  button.primary { background:#2563eb; border-color:#2563eb; color:#fff; font-weight:700; }
+  button.primary:disabled { background:#94a3b8; border-color:#94a3b8; cursor:not-allowed; }
+  .progress { height:10px; border-radius:6px; background:#e5e7eb; overflow:hidden; flex:1; }
+  .progress > i { display:block; height:100%; width:0%; background:linear-gradient(90deg,#22c55e,#2563eb); transition:width .15s; }
+  .prog-text { font-size:11px; color:#475569; min-height:14px; }
+  label.f { display:flex; align-items:center; justify-content:space-between; gap:8px; font-size:12px; color:#374151; }
+  label.f input, label.f select { width:150px; padding:4px 6px; border:1px solid #cbd5e1; border-radius:6px; font-size:12px; }
+  details { border:1px solid #eef2f7; border-radius:8px; }
+  details > summary { cursor:pointer; padding:6px 10px; font-size:12px; font-weight:600; color:#334155; }
+  details .body { padding:8px 10px; display:flex; flex-direction:column; gap:6px; }
+  .runs { display:flex; flex-direction:column; gap:4px; max-height:220px; overflow-y:auto; }
+  .run { display:flex; justify-content:space-between; gap:6px; padding:6px 8px; border:1px solid #eef2f7; border-radius:6px; cursor:pointer; font-size:12px; }
+  .run:hover { background:#eff6ff; border-color:#bfdbfe; }
+  .run .nm { font-weight:600; }
+  .run .mt { color:#64748b; }
+  .pos { color:#0f8b69; } .neg { color:#d65b55; }
+  .err { color:#b91c1c; font-size:12px; }
+  .content { display:grid; grid-template-rows:auto auto 1fr; min-height:0; }
+  .cards { display:flex; gap:8px; flex-wrap:wrap; padding:10px 14px; background:#fff; border-bottom:1px solid #e2e8f0; }
+  .card { min-width:104px; padding:6px 10px; border:1px solid #e5e7eb; border-radius:8px; background:#fbfcfe; }
+  .card .k { font-size:10px; color:#6b7280; text-transform:uppercase; letter-spacing:.4px; }
+  .card .v { font-size:16px; font-weight:700; margin-top:2px; }
+  .toolbar { display:flex; align-items:center; gap:8px; padding:6px 14px; background:#fff; border-bottom:1px solid #e2e8f0; }
+  .toolbar .rng { margin-left:auto; font-size:12px; color:#475569; }
+  .charts { display:grid; grid-template-rows:1fr 200px; min-height:0; }
+  canvas { display:block; width:100%; height:100%; background:#fbfcfe; cursor:grab; }
+  canvas.dragging { cursor:grabbing; }
+  .empty { display:flex; align-items:center; justify-content:center; height:100%; color:#94a3b8; font-size:14px; }
+</style>
+</head>
+<body>
+<header>
+  <span class="title">ACCELERANDO</span>
+  <span class="tag">studio · the world has been accelerated</span>
+  <span class="status" id="status"></span>
+</header>
+<div class="main">
+  <aside class="side">
+    <div class="panel">
+      <h3>run</h3>
+      <div class="body">
+        <div class="runbar">
+          <button class="primary" id="runBtn" style="flex:0 0 auto;">▶ 回测</button>
+          <div class="progress"><i id="progBar"></i></div>
+        </div>
+        <div class="prog-text" id="progText"></div>
+        <div class="err" id="runErr"></div>
+        <div class="runbar">
+          <input id="saveName" placeholder="保存名称…" style="flex:1; padding:6px 8px; border:1px solid #cbd5e1; border-radius:6px; font-size:12px;">
+          <button id="saveBtn">保存</button>
+        </div>
+      </div>
+    </div>
+
+    <div class="panel">
+      <h3>saved runs</h3>
+      <div class="body"><div class="runs" id="runs"></div></div>
+    </div>
+
+    <div class="panel">
+      <h3>config</h3>
+      <div class="body" id="form"></div>
+    </div>
+  </aside>
+
+  <section class="content">
+    <div class="cards" id="cards"></div>
+    <div class="toolbar">
+      <button id="zoomIn">+</button><button id="zoomOut">−</button><button id="reset">Reset</button>
+      <label style="font-size:12px;color:#374151;display:inline-flex;gap:6px;align-items:center;"><input type="checkbox" id="showBands" checked> bands</label>
+      <label style="font-size:12px;color:#374151;display:inline-flex;gap:6px;align-items:center;"><input type="checkbox" id="showTrades" checked> trades</label>
+      <span class="rng" id="range"></span>
+    </div>
+    <div class="charts">
+      <canvas id="price"></canvas>
+      <canvas id="equity"></canvas>
+    </div>
+  </section>
+</div>
+<script>
+const COLORS = { up:"#0f8b69", down:"#d65b55", grid:"#e2e8f0", axis:"#475569" };
+let SCHEMA=null, CONFIG=null, DATA=null, fps=[], eq=[], trades=[];
+let barsPerView=300, start=0, hover=null, drag=null, showBands=true, showTrades=true, poll=null;
+const $ = id => document.getElementById(id);
+const price=$("price"), pctx=price.getContext("2d");
+const equity=$("equity"), ectx=equity.getContext("2d");
+const clamp=(v,a,b)=>Math.max(a,Math.min(b,v));
+const fmt=(n,d=2)=>(n===null||n===undefined||!isFinite(n))?"–":Number(n).toLocaleString(undefined,{maximumFractionDigits:d,minimumFractionDigits:d});
+const fmtTs=ns=>new Date(Number(ns)/1e6).toLocaleString();
+const sc=n=>n>=0?"pos":"neg";
+
+// ---------- config form ----------
+function rangeOf(entry){ const r=entry.range; if(r==="Fixed")return{kind:"Fixed"}; const k=Object.keys(r)[0]; return {kind:k, ...r[k]}; }
+function valType(entry){ const r=rangeOf(entry); if(r.kind==="Int")return"int"; if(r.kind==="Float")return"float"; if(r.kind==="Choice")return"str"; return typeof entry.default==="number"?(Number.isInteger(entry.default)?"int":"float"):"str"; }
+
+function paramRow(entry, value){
+  const r=rangeOf(entry); const t=valType(entry);
+  const v = value!==undefined? value : entry.default;
+  const wrap=document.createElement("label"); wrap.className="f"; wrap.append(entry.name);
+  let inp;
+  if(r.kind==="Choice"){ inp=document.createElement("select"); for(const o of r.options||r.Choice||[]){ const op=document.createElement("option"); op.value=o; op.textContent=o; if(o==v)op.selected=true; inp.append(op);} }
+  else if(t==="str"){ inp=document.createElement("input"); inp.type="text"; inp.value=v??""; }
+  else { inp=document.createElement("input"); inp.type="number"; inp.value=v;
+         if(r.kind==="Int"){ inp.step=r.step||1; if(r.min!=null)inp.min=r.min; if(r.max!=null)inp.max=r.max; }
+         else if(r.kind==="Float"){ inp.step=r.step||"any"; if(r.min!=null)inp.min=r.min; if(r.max!=null)inp.max=r.max; } }
+  inp.dataset.name=entry.name; inp.dataset.type=t; inp.className="param";
+  wrap.append(inp); return wrap;
+}
+
+function stageBlock(label, kinds, chosenAdapter, params, opts={}){
+  const block=document.createElement("div"); block.dataset.stage=label;
+  const head=document.createElement("label"); head.className="f";
+  head.style.fontWeight="700"; head.append(label);
+  const sel=document.createElement("select"); sel.className="adapter";
+  for(const k of kinds){ const o=document.createElement("option"); o.value=k.name; o.textContent=k.name; if(k.name===chosenAdapter)o.selected=true; sel.append(o); }
+  head.append(sel); block.append(head);
+  const pdiv=document.createElement("div"); block.append(pdiv);
+  function renderParams(){
+    pdiv.innerHTML="";
+    const k=kinds.find(x=>x.name===sel.value); if(!k||!k.params)return;
+    const det=document.createElement("details"); if(opts.open)det.open=true;
+    const sum=document.createElement("summary"); sum.textContent="参数 ("+k.params.entries.length+")"; det.append(sum);
+    const body=document.createElement("div"); body.className="body";
+    for(const e of k.params.entries) body.append(paramRow(e, params? params[e.name] : undefined));
+    det.append(body); pdiv.append(det);
+  }
+  sel.onchange=()=>{ params=null; renderParams(); };
+  renderParams();
+  return block;
+}
+
+function buildForm(){
+  const f=$("form"); f.innerHTML="";
+  f.append(stageBlock("data", SCHEMA.sources, CONFIG.data.adapter, CONFIG.data.params, {open:true}));
+  f.append(stageBlock("aggregator", SCHEMA.aggregators, CONFIG.aggregator.adapter, CONFIG.aggregator.params, {open:true}));
+  const ind = CONFIG.indicator[0] || {adapter:SCHEMA.indicators[0].name, params:{}};
+  f.append(stageBlock("indicator", SCHEMA.indicators, ind.adapter, ind.params));
+  f.append(stageBlock("strategy", SCHEMA.strategies, CONFIG.strategy.adapter, CONFIG.strategy.params, {open:true}));
+  // broker
+  const b=document.createElement("div"); b.dataset.stage="broker";
+  const head=document.createElement("label"); head.className="f"; head.style.fontWeight="700"; head.append("broker"); b.append(head);
+  const det=document.createElement("details"); det.open=true; const sum=document.createElement("summary"); sum.textContent="参数"; det.append(sum);
+  const body=document.createElement("div"); body.className="body";
+  const bk=CONFIG.broker||{};
+  for(const [name,val] of [["commission_per_contract",bk.commission_per_contract??0],["slippage_ticks",bk.slippage_ticks??0],["starting_equity",bk.starting_equity??100000]]){
+    const w=document.createElement("label"); w.className="f"; w.append(name);
+    const inp=document.createElement("input"); inp.type="number"; inp.step="any"; inp.value=val; inp.dataset.name=name; inp.dataset.type="float"; inp.className="bparam";
+    w.append(inp); body.append(w);
+  }
+  det.append(body); b.append(det); f.append(b);
+}
+
+function readParams(container){
+  const out={};
+  for(const inp of container.querySelectorAll(".param")){
+    const t=inp.dataset.type;
+    out[inp.dataset.name] = t==="str"? inp.value : (t==="int"? parseInt(inp.value,10) : parseFloat(inp.value));
+  }
+  return out;
+}
+function stageEl(label){ return [...document.querySelectorAll("[data-stage]")].find(e=>e.dataset.stage===label); }
+function collectConfig(){
+  const get=label=>{ const el=stageEl(label); return {adapter: el.querySelector(".adapter").value, params: readParams(el)}; };
+  const bro={}; for(const inp of stageEl("broker").querySelectorAll(".bparam")) bro[inp.dataset.name]=parseFloat(inp.value);
+  return {
+    keep_footprints:true,
+    data:get("data"), aggregator:get("aggregator"),
+    indicator:[get("indicator")], strategy:get("strategy"),
+    broker:bro,
+  };
+}
+
+// ---------- run + progress ----------
+async function runBacktest(){
+  $("runErr").textContent=""; const cfg=collectConfig();
+  const r=await (await fetch("/api/backtest",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(cfg)})).json();
+  if(!r.ok){ $("runErr").textContent=r.error||"failed"; return; }
+  $("runBtn").disabled=true;
+  if(poll) clearInterval(poll);
+  poll=setInterval(checkProgress, 250); checkProgress();
+}
+async function checkProgress(){
+  let p; try{ p=await (await fetch("/api/progress")).json(); }catch(e){ return; }
+  const bar=$("progBar"), txt=$("progText");
+  if(p.pct!=null){ bar.style.width=(p.pct*100).toFixed(1)+"%"; }
+  else if(p.running){ bar.style.width="100%"; bar.style.opacity=0.4; }
+  const mb=x=>(x/1048576).toFixed(0);
+  txt.textContent = p.running
+    ? `running… ${p.pct!=null?(p.pct*100).toFixed(1)+"% · ":""}${mb(p.bytes)}/${p.total?mb(p.total):"?"} MB · ${p.footprints} footprints`
+    : (p.error? "" : (p.has_result? "done." : "idle"));
+  if(p.error){ $("runErr").textContent=p.error; }
+  if(!p.running){
+    clearInterval(poll); poll=null; $("runBtn").disabled=false; bar.style.opacity=1;
+    if(p.has_result && !p.error){ bar.style.width="100%"; await loadResult(); refreshRuns(); }
+  }
+}
+async function loadResult(){
+  const data=await (await fetch("/api/result")).json();
+  renderResult(data);
+}
+
+// ---------- saved runs ----------
+async function refreshRuns(){
+  const runs=await (await fetch("/api/runs")).json();
+  const el=$("runs"); el.innerHTML="";
+  if(!runs.length){ el.innerHTML='<div style="color:#94a3b8;font-size:12px;">还没有保存的回测</div>'; return; }
+  for(const r of runs){
+    const d=document.createElement("div"); d.className="run";
+    d.innerHTML=`<span class="nm">${r.name}</span><span class="mt"><span class="${r.net_pnl>=0?'pos':'neg'}">$${fmt(r.net_pnl,0)}</span> · ${r.trades}t · S${fmt(r.sharpe,2)}</span>`;
+    d.onclick=()=>loadRun(r.name);
+    el.append(d);
+  }
+}
+async function loadRun(name){
+  const r=await (await fetch("/api/load?name="+encodeURIComponent(name))).json();
+  if(!r.ok){ $("runErr").textContent=r.error||"load failed"; return; }
+  CONFIG=await (await fetch("/api/config")).json(); buildForm();
+  await loadResult(); $("status").textContent="loaded run: "+name;
+}
+
+// ---------- chart rendering (shared with the static dashboard) ----------
+function renderResult(data){
+  DATA=data; fps=data.footprints||[]; eq=data.equity||[]; trades=data.trades||[];
+  for(const t of trades){ t._ei=idxForTs(t.entry_ts_ns); t._xi=idxForTs(t.exit_ts_ns); }
+  renderCards(data.metrics);
+  barsPerView=Math.min(300,Math.max(20,fps.length)); start=Math.max(0,fps.length-barsPerView);
+  resize();
+}
+function idxForTs(ns){ const x=Number(ns); let lo=0,hi=fps.length-1,best=0; while(lo<=hi){const m=(lo+hi)>>1; if(Number(fps[m].ts_last_ns)<=x){best=m;lo=m+1;}else hi=m-1;} return best; }
+function renderCards(m){
+  if(!m){ $("cards").innerHTML=""; return; }
+  const cards=[["Net PnL","$"+fmt(m.net_pnl),sc(m.net_pnl)],["Return",fmt(m.return_pct)+"%",sc(m.return_pct)],
+    ["Trades",String(m.trades),""],["Win rate",fmt(m.win_rate*100,1)+"%",""],
+    ["Profit factor",fmt(m.profit_factor),sc(m.profit_factor-1)],["Sharpe",fmt(m.sharpe),sc(m.sharpe)],
+    ["Sortino",fmt(m.sortino),sc(m.sortino)],["Max DD","$"+fmt(m.max_drawdown),"neg"],["Max DD %",fmt(m.max_drawdown_pct,1)+"%","neg"]];
+  $("cards").innerHTML=cards.map(([k,v,c])=>`<div class="card"><div class="k">${k}</div><div class="v ${c}">${v}</div></div>`).join("");
+}
+function setBarsPerView(next,anchor=1){ const old=barsPerView; next=Math.round(clamp(next,20,Math.max(20,fps.length))); const a=start+old*anchor; barsPerView=next; start=clamp(Math.round(a-barsPerView*anchor),0,Math.max(0,fps.length-barsPerView)); draw(); }
+function resize(){ for(const c of [price,equity]){ const r=c.getBoundingClientRect(); const dpr=window.devicePixelRatio||1; c.width=Math.max(1,Math.floor(r.width*dpr)); c.height=Math.max(1,Math.floor(r.height*dpr)); c.getContext("2d").setTransform(dpr,0,0,dpr,0,0);} draw(); }
+function viewRange(){ const end=Math.min(fps.length,start+barsPerView); return [start,end]; }
+function drawPrice(){
+  const W=price.clientWidth,H=price.clientHeight; pctx.clearRect(0,0,W,H); pctx.fillStyle="#fbfcfe"; pctx.fillRect(0,0,W,H);
+  if(!fps.length){ pctx.fillStyle="#94a3b8"; pctx.font="14px Segoe UI"; pctx.fillText("运行回测以查看结果", 20, H/2); return; }
+  const [s,e]=viewRange(); const vis=fps.slice(s,e); const L=64,R=16,T=14,B=22; const pw=Math.max(1,W-L-R),ph=Math.max(1,H-T-B);
+  let lo=Infinity,hi=-Infinity; for(const b of vis){lo=Math.min(lo,b.low);hi=Math.max(hi,b.high);}
+  const pad=Math.max(0.25,(hi-lo)*0.06); lo-=pad;hi+=pad; const y=p=>T+(hi-p)/(hi-lo)*ph; const xStep=pw/Math.max(1,vis.length); const cw=Math.max(1,Math.min(16,xStep*0.7));
+  if(showBands){ let i=0; while(i<vis.length){ const band=(vis[i].plots||[]).find(p=>p.kind==="BackgroundBand"); const col=band?band.color:null; let j=i+1; const same=k=>{const bb=(vis[k].plots||[]).find(p=>p.kind==="BackgroundBand"); return (bb?bb.color:null)===col;}; while(j<vis.length&&same(j))j++; if(col){pctx.fillStyle=col; pctx.fillRect(L+i*xStep,T,(j-i)*xStep,ph);} i=j; } }
+  pctx.strokeStyle=COLORS.grid; pctx.fillStyle=COLORS.axis; pctx.font="11px Segoe UI, Arial"; pctx.lineWidth=1;
+  for(let i=0;i<=6;i++){ const yy=T+ph*i/6,pr=hi-(hi-lo)*i/6; pctx.beginPath();pctx.moveTo(L,yy);pctx.lineTo(W-R,yy);pctx.stroke(); pctx.fillText(pr.toFixed(2),6,yy+4); }
+  for(let i=0;i<vis.length;i++){ const b=vis[i]; const x=L+i*xStep+xStep/2; const c=b.close>=b.open?COLORS.up:COLORS.down; pctx.strokeStyle=c;pctx.fillStyle=c; pctx.beginPath();pctx.moveTo(x,y(b.high));pctx.lineTo(x,y(b.low));pctx.stroke(); const oy=y(b.open),cy=y(b.close); pctx.fillRect(x-cw/2,Math.min(oy,cy),cw,Math.max(1,Math.abs(oy-cy))); }
+  if(showTrades){ for(const t of trades){ if(t._xi<s||t._ei>e)continue; const xi=clamp(t._ei-s,0,vis.length-1),xo=clamp(t._xi-s,0,vis.length-1); const ex=L+xi*xStep+xStep/2,xx=L+xo*xStep+xStep/2; const ey=y(t.entry_px),xy_=y(t.exit_px);
+    pctx.strokeStyle=t.pnl>=0?"rgba(15,139,105,0.7)":"rgba(214,91,85,0.7)"; pctx.setLineDash([3,3]); pctx.beginPath();pctx.moveTo(ex,ey);pctx.lineTo(xx,xy_);pctx.stroke(); pctx.setLineDash([]);
+    pctx.fillStyle=t.dir>0?COLORS.up:COLORS.down; pctx.beginPath(); if(t.dir>0){pctx.moveTo(ex,ey-7);pctx.lineTo(ex-5,ey+2);pctx.lineTo(ex+5,ey+2);}else{pctx.moveTo(ex,ey+7);pctx.lineTo(ex-5,ey-2);pctx.lineTo(ex+5,ey-2);} pctx.closePath();pctx.fill();
+    pctx.strokeStyle=t.pnl>=0?COLORS.up:COLORS.down; pctx.lineWidth=2; pctx.beginPath();pctx.moveTo(xx-4,xy_-4);pctx.lineTo(xx+4,xy_+4);pctx.moveTo(xx+4,xy_-4);pctx.lineTo(xx-4,xy_+4);pctx.stroke();pctx.lineWidth=1; } }
+  pctx.strokeStyle="#9aa4b2"; pctx.strokeRect(L,T,pw,ph);
+  if(hover&&hover.canvas==="price"){ const idx=clamp(Math.floor((hover.x-L)/xStep),0,vis.length-1); const b=vis[idx]; if(b){ const x=L+idx*xStep+xStep/2; pctx.strokeStyle="#111827";pctx.beginPath();pctx.moveTo(x,T);pctx.lineTo(x,T+ph);pctx.stroke(); const reg=b.tags?(b.tags.regime||""):""; $("status").textContent=`${s+idx+1}/${fps.length}  ${fmtTs(b.ts_last_ns)}  O ${b.open.toFixed(2)} H ${b.high.toFixed(2)} L ${b.low.toFixed(2)} C ${b.close.toFixed(2)}  Δ ${fmt(b.delta,0)}  ${reg}`; } }
+  $("range").textContent=`bars ${s+1}-${e} / ${fps.length}`;
+}
+function drawEquity(){
+  const W=equity.clientWidth,H=equity.clientHeight; ectx.clearRect(0,0,W,H); ectx.fillStyle="#fff"; ectx.fillRect(0,0,W,H);
+  if(!eq.length)return; const [s,e]=viewRange(); const vis=eq.slice(Math.min(s,eq.length-1),Math.min(e,eq.length));
+  const L=64,R=16,T=12,B=18; const pw=Math.max(1,W-L-R),ph=Math.max(1,H-T-B);
+  let lo=Infinity,hi=-Infinity; for(const p of vis){lo=Math.min(lo,p.equity);hi=Math.max(hi,p.equity);} if(!(isFinite(lo)&&isFinite(hi))||lo===hi){lo-=1;hi+=1;} const pad=(hi-lo)*0.08; lo-=pad;hi+=pad;
+  const y=v=>T+(hi-v)/(hi-lo)*ph; const xStep=pw/Math.max(1,vis.length); const startEq=DATA&&DATA.metrics?DATA.metrics.starting_equity:(vis[0]?vis[0].equity:0);
+  ectx.strokeStyle=COLORS.grid; ectx.fillStyle=COLORS.axis; ectx.font="11px Segoe UI, Arial";
+  for(let i=0;i<=3;i++){ const yy=T+ph*i/3,vv=hi-(hi-lo)*i/3; ectx.beginPath();ectx.moveTo(L,yy);ectx.lineTo(W-R,yy);ectx.stroke(); ectx.fillText("$"+vv.toFixed(0),6,yy+4); }
+  if(startEq>=lo&&startEq<=hi){ ectx.strokeStyle="#cbd5e1";ectx.setLineDash([4,4]); ectx.beginPath();ectx.moveTo(L,y(startEq));ectx.lineTo(W-R,y(startEq));ectx.stroke();ectx.setLineDash([]); }
+  ectx.strokeStyle="#2563eb"; ectx.lineWidth=1.6; ectx.beginPath(); for(let i=0;i<vis.length;i++){const x=L+i*xStep,yy=y(vis[i].equity); i?ectx.lineTo(x,yy):ectx.moveTo(x,yy);} ectx.stroke(); ectx.lineWidth=1;
+  ectx.fillStyle="#64748b"; ectx.fillText("equity",L+4,T+12); ectx.strokeStyle="#9aa4b2"; ectx.strokeRect(L,T,pw,ph);
+}
+function draw(){ drawPrice(); drawEquity(); }
+function attach(canvas,name){
+  canvas.addEventListener("wheel",ev=>{ev.preventDefault(); const r=canvas.getBoundingClientRect(); const ratio=clamp((ev.clientX-r.left-64)/Math.max(1,r.width-80),0,1); setBarsPerView(barsPerView*(ev.deltaY<0?0.82:1.22),ratio);},{passive:false});
+  canvas.addEventListener("mousedown",ev=>{drag={x:ev.clientX,start}; canvas.classList.add("dragging");});
+  canvas.addEventListener("mousemove",ev=>{const r=canvas.getBoundingClientRect(); hover={canvas:name,x:ev.clientX-r.left,y:ev.clientY-r.top}; if(drag){const pw=Math.max(1,r.width-80); const d=Math.round((drag.x-ev.clientX)/pw*barsPerView); start=clamp(drag.start+d,0,Math.max(0,fps.length-barsPerView));} draw();});
+  canvas.addEventListener("mouseleave",()=>{hover=null;draw();});
+}
+window.addEventListener("mouseup",()=>{drag=null; price.classList.remove("dragging"); equity.classList.remove("dragging");});
+attach(price,"price"); attach(equity,"equity");
+$("zoomIn").onclick=()=>setBarsPerView(barsPerView*0.75,0.5);
+$("zoomOut").onclick=()=>setBarsPerView(barsPerView*1.35,0.5);
+$("reset").onclick=()=>{barsPerView=Math.min(300,Math.max(20,fps.length)); start=Math.max(0,fps.length-barsPerView); draw();};
+$("showBands").onchange=e=>{showBands=e.target.checked;draw();};
+$("showTrades").onchange=e=>{showTrades=e.target.checked;draw();};
+$("runBtn").onclick=runBacktest;
+$("saveBtn").onclick=async()=>{ const name=$("saveName").value.trim(); if(!name){$("runErr").textContent="请输入保存名称";return;} const r=await (await fetch("/api/save",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({name})})).json(); if(!r.ok){$("runErr").textContent=r.error||"save failed";} else { $("saveName").value=""; refreshRuns(); } };
+window.addEventListener("resize",resize);
+
+async function init(){
+  SCHEMA=await (await fetch("/api/schema")).json();
+  CONFIG=await (await fetch("/api/config")).json();
+  buildForm(); refreshRuns(); resize();
+  // If the server already holds a result (e.g. seeded), show it.
+  try{ const p=await (await fetch("/api/progress")).json(); if(p.has_result) await loadResult(); }catch(e){}
+}
+init();
+</script>
+</body>
+</html>

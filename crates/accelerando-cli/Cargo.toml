@@ -1,0 +1,24 @@
+[package]
+name = "accelerando-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Accelerando command-line interface: run | hyperopt | serve."
+
+[[bin]]
+name = "accelerando"
+path = "src/main.rs"
+
+[dependencies]
+accelerando-core = { workspace = true }
+accelerando-sources = { workspace = true }
+accelerando-aggregators = { workspace = true }
+accelerando-indicators = { workspace = true }
+accelerando-strategy = { workspace = true }
+accelerando-hyperopt = { workspace = true }
+accelerando-web = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+toml = { workspace = true }
+rayon = { workspace = true }
+tiny_http = { workspace = true }

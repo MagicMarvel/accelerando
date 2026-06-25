@@ -1,0 +1,9 @@
+[package]
+name = "accelerando-strategy"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Strategy adapters for Accelerando (sample regime-following strategy)."
+
+[dependencies]
+accelerando-core = { workspace = true }
