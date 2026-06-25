@@ -167,16 +167,36 @@ function drawPrice(){
       const xi = clamp(t._ei - s, 0, vis.length-1), xo = clamp(t._xi - s, 0, vis.length-1);
       const ex = L+xi*xStep+xStep/2, xx = L+xo*xStep+xStep/2;
       const ey = y(t.entry_px), xy_ = y(t.exit_px);
-      pctx.strokeStyle = t.pnl>=0 ? "rgba(15,139,105,0.7)":"rgba(214,91,85,0.7)";
-      pctx.setLineDash([3,3]); pctx.beginPath(); pctx.moveTo(ex,ey); pctx.lineTo(xx,xy_); pctx.stroke(); pctx.setLineDash([]);
-      // entry triangle
-      pctx.fillStyle = t.dir>0 ? COLORS.up : COLORS.down;
+      // TradingView / ATAS-style position tool. Colorblind-safe palette: BLUE = reward/win,
+      // ORANGE = risk/loss (no red/green). Works for long and short alike, since target/stop
+      // are real prices (a short's target sits below its entry).
+      const REW="37,99,235", RISK="232,131,42";        // blue / orange
+      const outcome = t.pnl>=0 ? REW : RISK;
+      const bx0 = ex, bx1 = Math.max(xx, ex+4), bw = bx1-bx0;
+      if(t.target!=null){ const ty=y(t.target);
+        pctx.fillStyle=`rgba(${REW},0.14)`;
+        pctx.fillRect(bx0, Math.min(ey,ty), bw, Math.max(1,Math.abs(ey-ty)));
+        pctx.strokeStyle=`rgba(${REW},0.9)`; pctx.lineWidth=1;
+        pctx.beginPath(); pctx.moveTo(bx0,ty); pctx.lineTo(bx1,ty); pctx.stroke(); }
+      if(t.stop!=null){ const sy=y(t.stop);
+        pctx.fillStyle=`rgba(${RISK},0.16)`;
+        pctx.fillRect(bx0, Math.min(ey,sy), bw, Math.max(1,Math.abs(ey-sy)));
+        pctx.strokeStyle=`rgba(${RISK},0.95)`; pctx.lineWidth=1;
+        pctx.beginPath(); pctx.moveTo(bx0,sy); pctx.lineTo(bx1,sy); pctx.stroke(); }
+      // entry baseline (anchor) — neutral slate
+      pctx.strokeStyle="rgba(45,55,72,0.9)"; pctx.lineWidth=1;
+      pctx.beginPath(); pctx.moveTo(bx0,ey); pctx.lineTo(bx1,ey); pctx.stroke();
+      // dashed connector entry → exit, colored by outcome
+      pctx.strokeStyle=`rgba(${outcome},0.85)`;
+      pctx.setLineDash([4,3]); pctx.beginPath(); pctx.moveTo(ex,ey); pctx.lineTo(xx,xy_); pctx.stroke(); pctx.setLineDash([]);
+      // entry triangle — direction shown by orientation, neutral fill
+      pctx.fillStyle = "rgba(45,55,72,0.95)";
       pctx.beginPath();
       if(t.dir>0){ pctx.moveTo(ex,ey-7); pctx.lineTo(ex-5,ey+2); pctx.lineTo(ex+5,ey+2);}
       else { pctx.moveTo(ex,ey+7); pctx.lineTo(ex-5,ey-2); pctx.lineTo(ex+5,ey-2);}
       pctx.closePath(); pctx.fill();
-      // exit cross
-      pctx.strokeStyle = t.pnl>=0 ? COLORS.up : COLORS.down; pctx.lineWidth=2;
+      // exit cross, colored by outcome
+      pctx.strokeStyle = `rgba(${outcome},1)`; pctx.lineWidth=2;
       pctx.beginPath(); pctx.moveTo(xx-4,xy_-4); pctx.lineTo(xx+4,xy_+4);
       pctx.moveTo(xx+4,xy_-4); pctx.lineTo(xx-4,xy_+4); pctx.stroke(); pctx.lineWidth=1;
     }

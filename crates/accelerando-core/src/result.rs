@@ -25,6 +25,12 @@ pub struct Trade {
     pub qty: f64,
     pub entry_px: f64,
     pub exit_px: f64,
+    /// Stop-loss price the position carried while open (`None` if no stop was set).
+    #[serde(default)]
+    pub stop: Option<f64>,
+    /// Take-profit price the position carried while open (`None` if no target was set).
+    #[serde(default)]
+    pub target: Option<f64>,
     /// Realized PnL in account currency, net of commission.
     pub pnl: f64,
     pub reason: TradeReason,

@@ -113,6 +113,8 @@ impl Broker {
                 qty: pos.qty,
                 entry_px: pos.entry_px,
                 exit_px: px,
+                stop: pos.stop,
+                target: pos.target,
                 pnl,
                 reason,
             });
