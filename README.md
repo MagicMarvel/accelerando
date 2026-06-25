@@ -137,6 +137,9 @@ fn main() {
 
     let result = run_backtest(pipeline);
     println!("Backtest finished: {} footprints", result.footprints.len());
+
+    // optional: serve the backtest result in the built-in web dashboard
+    accelerando_web::serve(&result, 8080).expect("serve dashboard");
 }
 ```
 
