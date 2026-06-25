@@ -115,16 +115,13 @@ use my_indicator::MyIndicator;
 use my_strategy::MyStrategy;
 
 fn main() {
-    let mut registry = Registry::new();
-    registry.register_source::<MySource>("my_source");
-    registry.register_aggregator::<MyAggregator>("my_aggregator");
-    registry.register_indicator::<MyIndicator>("my_indicator");
-    registry.register_strategy::<MyStrategy>("my_strategy");
-
-    let source = registry.build_source("my_source", &Params::default()).unwrap();
-    let aggregator = registry.build_aggregator("my_aggregator", &Params::default()).unwrap();
-    let indicator = registry.build_indicator("my_indicator", &Params::default()).unwrap();
-    let strategy = registry.build_strategy("my_strategy", &Params::default()).unwrap();
+    // Option A: direct library mode without runtime name lookup.
+    // Use this when you only want to run code and don't need CLI/Studio/Hyperopt
+    // to discover the adapter by string name.
+    let source = MySource::build(&Params::default());
+    let aggregator = MyAggregator::build(&Params::default());
+    let indicator = MyIndicator::build(&Params::default());
+    let strategy = MyStrategy::build(&Params::default());
 
     let pipeline = Pipeline {
         source,
