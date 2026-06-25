@@ -65,6 +65,7 @@ pub fn run_backtest_progress(
         {
             let mut ctx = OrderCtx::new(broker);
             strategy.on_footprint(&fp, &mut ctx);
+            fp.plots.extend(ctx.take_plots());
         }
         history.push(fp);
     };

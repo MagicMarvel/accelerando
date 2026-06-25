@@ -4,7 +4,7 @@
 //! that transition at the **open** of footprint `i+1` (market order, tick slippage + commission),
 //! then checks the open position's stop/target against `i+1`'s high/low intrabar.
 
-use crate::footprint::Footprint;
+use crate::footprint::{Footprint, Plot};
 use crate::result::{EquityPoint, Trade, TradeReason};
 
 /// Static broker configuration (fees, slippage, starting equity).
@@ -267,14 +267,26 @@ impl Broker {
     }
 }
 
-/// Handed to the strategy each footprint; records the desired next-bar position.
+/// Handed to the strategy each footprint; records the desired next-bar position and any
+/// chart overlays the strategy wants drawn.
 pub struct OrderCtx<'b> {
     broker: &'b mut Broker,
+    plots: Vec<Plot>,
 }
 
 impl<'b> OrderCtx<'b> {
     pub fn new(broker: &'b mut Broker) -> Self {
-        Self { broker }
+        Self { broker, plots: Vec::new() }
+    }
+
+    /// Append a chart overlay to this footprint (lines, markers, bands).
+    pub fn plot(&mut self, p: Plot) {
+        self.plots.push(p);
+    }
+
+    /// Drain the collected plots (called by the engine after the strategy returns).
+    pub fn take_plots(self) -> Vec<Plot> {
+        self.plots
     }
 
     /// Current position direction: -1 short, 0 flat, +1 long.

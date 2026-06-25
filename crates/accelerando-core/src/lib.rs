@@ -20,7 +20,7 @@ pub mod traits;
 pub use broker::{Broker, BrokerConfig, OrderCtx};
 pub use engine::{run_backtest, run_backtest_progress, Pipeline};
 pub use event::{OrderFlowEvent, Side};
-pub use footprint::{Footprint, Level, Plot};
+pub use footprint::{Footprint, Level, Plot, VpLevel};
 pub use metrics::Metrics;
 pub use params::{Configurable, ParamRange, ParamSpec, ParamValue, Params};
 pub use progress::{ProgressHandle, ProgressSnapshot};

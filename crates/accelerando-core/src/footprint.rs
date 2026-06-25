@@ -15,7 +15,15 @@ pub struct Level {
     pub sell_vol: f64,
 }
 
-/// A chart overlay an indicator wants drawn on the price panel.
+/// One price level in a volume profile overlay.
+#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
+pub struct VpLevel {
+    pub price: f64,
+    pub buy_vol: f64,
+    pub sell_vol: f64,
+}
+
+/// A chart overlay an indicator or strategy wants drawn on the price panel.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "kind")]
 pub enum Plot {
@@ -29,6 +37,14 @@ pub enum Plot {
         shape: String,
         color: String,
         text: String,
+    },
+    /// ATAS-style volume profile histogram. Left side = delta, right side = total volume.
+    /// `id` groups bars into one profile; the dashboard renders only the last occurrence per id.
+    /// `span` = how many bars back this profile covers (for background shading).
+    VolumeProfile {
+        id: String,
+        levels: Vec<VpLevel>,
+        span: usize,
     },
 }
 
