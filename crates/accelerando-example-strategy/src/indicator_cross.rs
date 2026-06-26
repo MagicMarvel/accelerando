@@ -107,6 +107,8 @@ impl IndicatorCross {
             shape: "triangle".to_string(),
             color: color.to_string(),
             text: text.to_string(),
+            text_dx: None,
+            text_dy: None,
         });
     }
 }

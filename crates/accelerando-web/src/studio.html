@@ -50,7 +50,7 @@
   .seg button { border:0; border-radius:0; height:28px; padding:0 10px; }
   .seg button + button { border-left:1px solid #cbd5e1; }
   .seg button.active { background:#0f172a; color:#fff; }
-  .charts { display:grid; grid-template-rows:minmax(240px,1fr) 170px 180px; min-height:0; }
+  .charts { display:grid; grid-template-rows:minmax(240px,1fr) 180px; min-height:0; }
   canvas { display:block; width:100%; height:100%; background:#fbfcfe; cursor:grab; }
   canvas.dragging { cursor:grabbing; }
   .empty { display:flex; align-items:center; justify-content:center; height:100%; color:#94a3b8; font-size:14px; }
@@ -98,6 +98,7 @@
       <span class="seg" aria-label="chart mode">
         <button id="modeCandles" class="active" title="K线显示">K线</button>
         <button id="modeFootprint" title="Footprint足迹图显示">FootPrint</button>
+        <button id="modeHeatmap" title="L2 heatmap显示">Heatmap</button>
       </span>
       <label style="font-size:12px;color:#374151;display:inline-flex;gap:6px;align-items:center;"><input type="checkbox" id="showBands" checked> bands</label>
       <label style="font-size:12px;color:#374151;display:inline-flex;gap:6px;align-items:center;"><input type="checkbox" id="showTrades" checked> trades</label>
@@ -106,7 +107,6 @@
     </div>
     <div class="charts">
       <canvas id="price"></canvas>
-      <canvas id="heatmap"></canvas>
       <canvas id="equity"></canvas>
     </div>
   </section>
@@ -118,7 +118,6 @@ let barsPerView=300, start=0, hover=null, drag=null, showBands=true, showTrades=
 let yZoom={price:{manual:false,lo:null,hi:null},equity:{manual:false,lo:null,hi:null}};
 const $ = id => document.getElementById(id);
 const price=$("price"), pctx=price.getContext("2d");
-const heatmap=$("heatmap"), hctx=heatmap.getContext("2d");
 const equity=$("equity"), ectx=equity.getContext("2d");
 const clamp=(v,a,b)=>Math.max(a,Math.min(b,v));
 const fmt=(n,d=2)=>(n===null||n===undefined||!isFinite(n))?"–":Number(n).toLocaleString(undefined,{maximumFractionDigits:d,minimumFractionDigits:d});
@@ -295,9 +294,9 @@ function renderCards(m){
   $("cards").innerHTML=cards.map(([k,v,c])=>`<div class="card"><div class="k">${k}</div><div class="v ${c}">${v}</div></div>`).join("");
 }
 function setBarsPerView(next,anchor=1){ lockYZoom(); const old=barsPerView; next=Math.round(clamp(next,20,Math.max(20,fps.length))); const a=start+old*anchor; barsPerView=next; start=clamp(Math.round(a-barsPerView*anchor),0,Math.max(0,fps.length-barsPerView)); draw(); }
-function resize(){ for(const c of [price,heatmap,equity]){ const r=c.getBoundingClientRect(); const dpr=window.devicePixelRatio||1; c.width=Math.max(1,Math.floor(r.width*dpr)); c.height=Math.max(1,Math.floor(r.height*dpr)); c.getContext("2d").setTransform(dpr,0,0,dpr,0,0);} draw(); }
+function resize(){ for(const c of [price,equity]){ const r=c.getBoundingClientRect(); const dpr=window.devicePixelRatio||1; c.width=Math.max(1,Math.floor(r.width*dpr)); c.height=Math.max(1,Math.floor(r.height*dpr)); c.getContext("2d").setTransform(dpr,0,0,dpr,0,0);} draw(); }
 function viewRange(){ const end=Math.min(fps.length,start+barsPerView); return [start,end]; }
-function setChartMode(mode){ chartMode=mode; $("modeCandles").classList.toggle("active",mode==="candles"); $("modeFootprint").classList.toggle("active",mode==="footprint"); draw(); }
+function setChartMode(mode){ chartMode=mode; $("modeCandles").classList.toggle("active",mode==="candles"); $("modeFootprint").classList.toggle("active",mode==="footprint"); $("modeHeatmap").classList.toggle("active",mode==="heatmap"); draw(); }
 function tickSizeFor(vis){
   if(DATA&&DATA.tick_size>0)return DATA.tick_size;
   let best=Infinity;
@@ -324,7 +323,7 @@ function drawPlotMarkers(ctx,vis,L,T,ph,xStep,y){
         ctx.arc(x,yy,5,0,Math.PI*2);
       }
       ctx.fill(); ctx.stroke();
-      if(p.text&&xStep>=18){ ctx.lineWidth=1; ctx.fillStyle=color; ctx.textAlign="left"; ctx.fillText(p.text,x+8,yy); }
+      if(p.text&&xStep>=18){ const textDx=p.text_dx??8, textDy=p.text_dy??0; ctx.lineWidth=1; ctx.fillStyle=color; ctx.textAlign="left"; ctx.fillText(p.text,x+textDx,yy+textDy); }
     }
   }
   ctx.restore();
@@ -348,14 +347,26 @@ function drawTradePositions(ctx,visibleTrades,s,e,L,T,ph,xStep,y){
   }
   ctx.restore();
 }
+function footprintTotals(b){
+  let buy=0,sell=0;
+  for(const lv of (b.ladder||[])){ buy+=lv.buy_vol||0; sell+=lv.sell_vol||0; }
+  return {buy,sell,delta:buy-sell};
+}
+function nearestFootprintLevel(b,price){
+  return (b.ladder||[]).reduce((best,lv)=>!best||Math.abs(lv.price-price)<Math.abs(best.price-price)?lv:best,null);
+}
 function drawFootprints(ctx,vis,L,T,ph,xStep,y,tick){
-  let maxVol=0;
-  for(const b of vis){ for(const lv of (b.ladder||[])){ maxVol=Math.max(maxVol,lv.buy_vol||0,lv.sell_vol||0); } }
+  let maxVol=0, maxDelta=0;
+  for(const b of vis){
+    const totals=footprintTotals(b); maxDelta=Math.max(maxDelta,Math.abs(totals.delta));
+    for(const lv of (b.ladder||[])){ maxVol=Math.max(maxVol,lv.buy_vol||0,lv.sell_vol||0); }
+  }
   if(maxVol<=0){ drawCandles(ctx,vis,L,T,ph,xStep,Math.max(1,Math.min(16,xStep*0.7)),y); return; }
-  const barW=Math.max(2,xStep*0.88), half=barW/2, showText=xStep>=44;
+  const barW=Math.max(2,xStep*0.88), half=barW/2, showText=xStep>=36, showSummary=xStep>=24;
   ctx.font="9px Segoe UI, Arial"; ctx.textBaseline="middle";
   for(let i=0;i<vis.length;i++){
     const b=vis[i], x=L+i*xStep+xStep/2, x0=x-half;
+    const totals=footprintTotals(b);
     ctx.strokeStyle=b.close>=b.open?"rgba(37,99,235,0.75)":"rgba(217,119,6,0.75)";
     ctx.beginPath();ctx.moveTo(x,y(b.high));ctx.lineTo(x,y(b.low));ctx.stroke();
     for(const lv of (b.ladder||[])){
@@ -363,13 +374,26 @@ function drawFootprints(ctx,vis,L,T,ph,xStep,y,tick){
       const yy=Math.min(top,bot), hh=Math.max(1,Math.abs(bot-top));
       if(yy>T+ph||yy+hh<T)continue;
       const sell=lv.sell_vol||0,buy=lv.buy_vol||0;
-      const sellA=0.08+0.42*(sell/maxVol), buyA=0.08+0.42*(buy/maxVol);
+      const sellA=0.08+0.50*(sell/maxVol), buyA=0.08+0.50*(buy/maxVol);
       ctx.fillStyle=`rgba(232,131,42,${sellA})`; ctx.fillRect(x0,yy,half,hh);
       ctx.fillStyle=`rgba(37,99,235,${buyA})`; ctx.fillRect(x,yy,half,hh);
-      if(showText&&hh>=10){
-        ctx.fillStyle="#334155";
+      if(showText&&hh>=8){
+        ctx.fillStyle="#1f2937";
         ctx.textAlign="right"; ctx.fillText(Math.round(sell),x-3,yy+hh/2);
         ctx.textAlign="left"; ctx.fillText(Math.round(buy),x+3,yy+hh/2);
+      }
+    }
+    if(showSummary){
+      const n=maxDelta>0?Math.min(1,Math.abs(totals.delta)/maxDelta):0;
+      const c=totals.delta>=0?COLORS.up:COLORS.down;
+      ctx.fillStyle=totals.delta>=0?`rgba(37,99,235,${0.18+0.45*n})`:`rgba(217,119,6,${0.18+0.45*n})`;
+      ctx.fillRect(x0,T,barW,3);
+      ctx.fillStyle=c; ctx.textAlign="center"; ctx.font=xStep>=46?"10px Segoe UI, Arial":"9px Segoe UI, Arial";
+      const label=xStep>=46?`D ${fmt(totals.delta,0)}`:fmt(totals.delta,0);
+      ctx.fillText(label,x,Math.max(T+9,y(b.high)-10));
+      if(xStep>=58){
+        ctx.fillStyle="#64748b";
+        ctx.fillText(`${fmt(totals.sell,0)} / ${fmt(totals.buy,0)}`,x,Math.min(T+ph-8,y(b.low)+10));
       }
     }
   }
@@ -377,6 +401,7 @@ function drawFootprints(ctx,vis,L,T,ph,xStep,y,tick){
 function drawPrice(){
   const W=price.clientWidth,H=price.clientHeight; pctx.clearRect(0,0,W,H); pctx.fillStyle="#fbfcfe"; pctx.fillRect(0,0,W,H);
   if(!fps.length){ pctx.fillStyle="#94a3b8"; pctx.font="14px Segoe UI"; pctx.fillText("运行回测以查看结果", 20, H/2); return; }
+  if(chartMode==="heatmap"){ drawHeatmap(pctx,price,"price"); const [s,e]=viewRange(); $("range").textContent=`bars ${s+1}-${e} / ${fps.length}`; return; }
   const [s,e]=viewRange(); const vis=fps.slice(s,e); const L=64,R=16,T=14,B=34; const pw=Math.max(1,W-L-R),ph=Math.max(1,H-T-B);
   let lo=Infinity,hi=-Infinity; for(const b of vis){lo=Math.min(lo,b.low);hi=Math.max(hi,b.high);}
   const pad=Math.max(0.25,(hi-lo)*0.06); lo-=pad;hi+=pad; [lo,hi]=applyYZoom("price",lo,hi); yZoom.price.lo=lo; yZoom.price.hi=hi; const y=p=>T+(hi-p)/(hi-lo)*ph; const xStep=pw/Math.max(1,vis.length); const cw=Math.max(1,Math.min(16,xStep*0.7));
@@ -389,7 +414,7 @@ function drawPrice(){
   drawPlotMarkers(pctx,vis,L,T,ph,xStep,y);
   if(showTrades) drawTradePositions(pctx,trades,s,e,L,T,ph,xStep,y);
   pctx.strokeStyle="#9aa4b2"; pctx.strokeRect(L,T,pw,ph);
-  if(hover&&hover.canvas==="price"){ const idx=clamp(Math.floor((hover.x-L)/xStep),0,vis.length-1); const b=vis[idx]; if(b){ const x=L+idx*xStep+xStep/2; pctx.strokeStyle="#111827";pctx.beginPath();pctx.moveTo(x,T);pctx.lineTo(x,T+ph);pctx.stroke(); const tags=b.tags?Object.entries(b.tags).map(([k,v])=>`${k}:${v}`).join(" "):""; $("status").textContent=`${s+idx+1}/${fps.length}  ${fmtTs(b.ts_last_ns)}  O ${b.open.toFixed(2)} H ${b.high.toFixed(2)} L ${b.low.toFixed(2)} C ${b.close.toFixed(2)}  Δ ${fmt(b.delta,0)}  ${tags}`; } }
+  if(hover&&hover.canvas==="price"){ const idx=clamp(Math.floor((hover.x-L)/xStep),0,vis.length-1); const b=vis[idx]; if(b){ const x=L+idx*xStep+xStep/2; pctx.strokeStyle="#111827";pctx.beginPath();pctx.moveTo(x,T);pctx.lineTo(x,T+ph);pctx.stroke(); const tags=b.tags?Object.entries(b.tags).map(([k,v])=>`${k}:${v}`).join(" "):""; const base=`${s+idx+1}/${fps.length}  ${fmtTs(b.ts_last_ns)}  O ${b.open.toFixed(2)} H ${b.high.toFixed(2)} L ${b.low.toFixed(2)} C ${b.close.toFixed(2)}  D ${fmt(b.delta,0)}  ${tags}`; if(chartMode==="footprint"){ const totals=footprintTotals(b); const priceAt=hi-(hover.y-T)/Math.max(1,ph)*(hi-lo); const lv=nearestFootprintLevel(b,priceAt); $("status").textContent=base+`  bar sell/buy ${fmt(totals.sell,0)}/${fmt(totals.buy,0)}  level ${lv?lv.price.toFixed(2):priceAt.toFixed(2)} sell/buy ${lv?fmt(lv.sell_vol,0):"-"}/${lv?fmt(lv.buy_vol,0):"-"}`; } else { $("status").textContent=base; } } }
   $("range").textContent=`bars ${s+1}-${e} / ${fps.length}`;
 }
 function heatColor(v,maxAbs,metric){
@@ -406,17 +431,17 @@ function heatValue(level,metric){
   return bid+ask;
 }
 function liquiditySnapshots(){ return (DATA&&DATA.liquidity_heatmap&&DATA.liquidity_heatmap.snapshots)||[]; }
-function drawHeatmap(){
-  const W=heatmap.clientWidth,H=heatmap.clientHeight; hctx.clearRect(0,0,W,H); hctx.fillStyle="#f8fafc"; hctx.fillRect(0,0,W,H);
-  if(!fps.length){ hctx.fillStyle="#94a3b8"; hctx.font="13px Segoe UI"; hctx.fillText("liquidity heatmap",20,H/2); return; }
+function drawHeatmap(ctx,canvas,hoverCanvas){
+  const W=canvas.clientWidth,H=canvas.clientHeight; ctx.clearRect(0,0,W,H); ctx.fillStyle="#f8fafc"; ctx.fillRect(0,0,W,H);
+  if(!fps.length){ ctx.fillStyle="#94a3b8"; ctx.font="13px Segoe UI"; ctx.fillText("liquidity heatmap",20,H/2); return; }
   const depth=liquiditySnapshots();
   const [s,e]=viewRange(); const vis=fps.slice(s,e); const L=64,R=16,T=10,B=30; const pw=Math.max(1,W-L-R),ph=Math.max(1,H-T-B);
   let lo=Infinity,hi=-Infinity; for(const b of vis){lo=Math.min(lo,b.low);hi=Math.max(hi,b.high);} const pad=Math.max(0.25,(hi-lo)*0.06); lo-=pad;hi+=pad; [lo,hi]=applyYZoom("price",lo,hi); yZoom.price.lo=lo; yZoom.price.hi=hi;
   const y=p=>T+(hi-p)/(hi-lo)*ph, xStep=pw/Math.max(1,vis.length), tick=tickSizeFor(vis);
-  hctx.strokeStyle=COLORS.grid; hctx.fillStyle=COLORS.axis; hctx.font="11px Segoe UI, Arial"; hctx.lineWidth=1;
-  for(let i=0;i<=3;i++){ const yy=T+ph*i/3,pr=hi-(hi-lo)*i/3; hctx.beginPath();hctx.moveTo(L,yy);hctx.lineTo(W-R,yy);hctx.stroke(); hctx.fillText(pr.toFixed(2),6,yy+4); }
+  ctx.strokeStyle=COLORS.grid; ctx.fillStyle=COLORS.axis; ctx.font="11px Segoe UI, Arial"; ctx.lineWidth=1;
+  for(let i=0;i<=3;i++){ const yy=T+ph*i/3,pr=hi-(hi-lo)*i/3; ctx.beginPath();ctx.moveTo(L,yy);ctx.lineTo(W-R,yy);ctx.stroke(); ctx.fillText(pr.toFixed(2),6,yy+4); }
   if(!depth.length){
-    hctx.fillStyle="#64748b"; hctx.font="12px Segoe UI, Arial"; hctx.fillText("No L2 resting-liquidity snapshots in this result",L+8,T+22);
+    ctx.fillStyle="#64748b"; ctx.font="12px Segoe UI, Arial"; ctx.fillText("No L2 resting-liquidity snapshots in this result",L+8,T+22);
   } else {
     const firstTs=Number(vis[0].ts_first_ns), lastTs=Number(vis[vis.length-1].ts_last_ns);
     const visibleDepth=depth.filter(d=>Number(d.ts_ns)>=firstTs&&Number(d.ts_ns)<=lastTs);
@@ -427,18 +452,18 @@ function drawHeatmap(){
       for(const lv of (d.levels||[])){
         const top=y(lv.price+tick/2), bot=y(lv.price-tick/2); const yy=Math.min(top,bot), hh=Math.max(1,Math.abs(bot-top));
         if(yy>T+ph||yy+hh<T)continue;
-        hctx.fillStyle=heatColor(heatValue(lv,heatMetric),maxAbs,heatMetric); hctx.fillRect(x,yy,w,hh);
+        ctx.fillStyle=heatColor(heatValue(lv,heatMetric),maxAbs,heatMetric); ctx.fillRect(x,yy,w,hh);
       }
     }
   }
-  drawTimeAxis(hctx,vis,L,T,pw,ph,W,R);
-  drawPlotMarkers(hctx,vis,L,T,ph,xStep,y);
-  if(showTrades) drawTradePositions(hctx,trades,s,e,L,T,ph,xStep,y);
-  hctx.fillStyle="#334155"; hctx.font="11px Segoe UI, Arial"; hctx.fillText(`book liquidity: ${heatMetric}`,L+4,T+13);
-  hctx.strokeStyle="#9aa4b2"; hctx.strokeRect(L,T,pw,ph);
-  if(hover&&hover.canvas==="heatmap"){
+  drawTimeAxis(ctx,vis,L,T,pw,ph,W,R);
+  drawPlotMarkers(ctx,vis,L,T,ph,xStep,y);
+  if(showTrades) drawTradePositions(ctx,trades,s,e,L,T,ph,xStep,y);
+  ctx.fillStyle="#334155"; ctx.font="11px Segoe UI, Arial"; ctx.fillText(`book liquidity: ${heatMetric}`,L+4,T+13);
+  ctx.strokeStyle="#9aa4b2"; ctx.strokeRect(L,T,pw,ph);
+  if(hover&&hover.canvas===hoverCanvas){
     const idx=clamp(Math.floor((hover.x-L)/xStep),0,vis.length-1); const b=vis[idx];
-    if(b){ const x=L+idx*xStep+xStep/2; hctx.strokeStyle="#111827"; hctx.beginPath();hctx.moveTo(x,T);hctx.lineTo(x,T+ph);hctx.stroke(); const priceAt=hi-(hover.y-T)/Math.max(1,ph)*(hi-lo); const ts=Number(b.ts_last_ns); let snap=null; for(const d of depth){ if(Number(d.ts_ns)<=ts)snap=d; else break; } const nearest=snap?(snap.levels||[]).reduce((best,lv)=>!best||Math.abs(lv.price-priceAt)<Math.abs(best.price-priceAt)?lv:best,null):null; const hv=nearest?heatValue(nearest,heatMetric):0; $("status").textContent=`book ${s+idx+1}/${fps.length}  ${fmtTs(b.ts_last_ns)}  px ${nearest?nearest.price.toFixed(2):priceAt.toFixed(2)}  ${heatMetric} ${fmt(hv,0)}  bid ${nearest?fmt(nearest.bid_size,0):"-"} ask ${nearest?fmt(nearest.ask_size,0):"-"}`; }
+    if(b){ const x=L+idx*xStep+xStep/2; ctx.strokeStyle="#111827"; ctx.beginPath();ctx.moveTo(x,T);ctx.lineTo(x,T+ph);ctx.stroke(); const priceAt=hi-(hover.y-T)/Math.max(1,ph)*(hi-lo); const ts=Number(b.ts_last_ns); let snap=null; for(const d of depth){ if(Number(d.ts_ns)<=ts)snap=d; else break; } const nearest=snap?(snap.levels||[]).reduce((best,lv)=>!best||Math.abs(lv.price-priceAt)<Math.abs(best.price-priceAt)?lv:best,null):null; const hv=nearest?heatValue(nearest,heatMetric):0; $("status").textContent=`book ${s+idx+1}/${fps.length}  ${fmtTs(b.ts_last_ns)}  px ${nearest?nearest.price.toFixed(2):priceAt.toFixed(2)}  ${heatMetric} ${fmt(hv,0)}  bid ${nearest?fmt(nearest.bid_size,0):"-"} ask ${nearest?fmt(nearest.ask_size,0):"-"}`; }
   }
 }
 function drawEquity(){
@@ -455,26 +480,22 @@ function drawEquity(){
   ectx.strokeStyle="#2563eb"; ectx.lineWidth=1.6; ectx.beginPath(); for(let i=0;i<vis.length;i++){const x=L+i*xStep,yy=y(vis[i].equity); i?ectx.lineTo(x,yy):ectx.moveTo(x,yy);} ectx.stroke(); ectx.lineWidth=1;
   ectx.fillStyle="#64748b"; ectx.fillText("equity",L+4,T+12); ectx.strokeStyle="#9aa4b2"; ectx.strokeRect(L,T,pw,ph);
 }
-function draw(){ drawPrice(); drawHeatmap(); drawEquity(); }
-function attachHeatmap(){
-  heatmap.addEventListener("wheel",ev=>{ev.preventDefault(); const r=heatmap.getBoundingClientRect(); const x=ev.clientX-r.left; if(ev.shiftKey||x<64){ const top=10,bottom=30; const frac=clamp((ev.clientY-r.top-top)/Math.max(1,r.height-top-bottom),0,1); zoomY("price",ev.deltaY<0?1.18:1/1.18,frac); } else { const ratio=clamp((x-64)/Math.max(1,r.width-80),0,1); setBarsPerView(barsPerView*(ev.deltaY<0?0.82:1.22),ratio); }},{passive:false});
-  heatmap.addEventListener("mousedown",ev=>{lockYZoom(); const st=yZoom.price; drag={x:ev.clientX,y:ev.clientY,start,name:"price",lo:st?.lo,hi:st?.hi}; heatmap.classList.add("dragging");});
-  heatmap.addEventListener("mousemove",ev=>{const r=heatmap.getBoundingClientRect(); hover={canvas:"heatmap",x:ev.clientX-r.left,y:ev.clientY-r.top}; if(drag){const pw=Math.max(1,r.width-80); const d=Math.round((drag.x-ev.clientX)/pw*barsPerView); start=clamp(drag.start+d,0,Math.max(0,fps.length-barsPerView)); if(drag.name==="price"&&isFinite(drag.lo)&&isFinite(drag.hi)&&drag.hi>drag.lo){ const ph=Math.max(1,r.height-40); const dy=ev.clientY-drag.y; const shift=dy/ph*(drag.hi-drag.lo); yZoom.price.manual=true; yZoom.price.lo=drag.lo+shift; yZoom.price.hi=drag.hi+shift; }} draw();});
-  heatmap.addEventListener("mouseleave",()=>{hover=null;draw();});
-}
+function draw(){ drawPrice(); drawEquity(); }
+
 function attach(canvas,name){
   canvas.addEventListener("wheel",ev=>{ev.preventDefault(); const r=canvas.getBoundingClientRect(); const x=ev.clientX-r.left; if(ev.shiftKey||x<64){ const top=name==="price"?14:12,bottom=name==="price"?34:30; const frac=clamp((ev.clientY-r.top-top)/Math.max(1,r.height-top-bottom),0,1); zoomY(name,ev.deltaY<0?1.18:1/1.18,frac); } else { const ratio=clamp((x-64)/Math.max(1,r.width-80),0,1); setBarsPerView(barsPerView*(ev.deltaY<0?0.82:1.22),ratio); }},{passive:false});
   canvas.addEventListener("mousedown",ev=>{lockYZoom(); const st=yZoom[name]; drag={x:ev.clientX,y:ev.clientY,start,name,lo:st?.lo,hi:st?.hi}; canvas.classList.add("dragging");});
   canvas.addEventListener("mousemove",ev=>{const r=canvas.getBoundingClientRect(); hover={canvas:name,x:ev.clientX-r.left,y:ev.clientY-r.top}; if(drag){const pw=Math.max(1,r.width-80); const d=Math.round((drag.x-ev.clientX)/pw*barsPerView); start=clamp(drag.start+d,0,Math.max(0,fps.length-barsPerView)); if(drag.name===name&&isFinite(drag.lo)&&isFinite(drag.hi)&&drag.hi>drag.lo){ const top=name==="price"?14:12,bottom=name==="price"?34:30; const ph=Math.max(1,r.height-top-bottom); const dy=ev.clientY-drag.y; const shift=dy/ph*(drag.hi-drag.lo); const st=yZoom[name]; st.manual=true; st.lo=drag.lo+shift; st.hi=drag.hi+shift; }} draw();});
   canvas.addEventListener("mouseleave",()=>{hover=null;draw();});
 }
-window.addEventListener("mouseup",()=>{drag=null; price.classList.remove("dragging"); heatmap.classList.remove("dragging"); equity.classList.remove("dragging");});
-attach(price,"price"); attachHeatmap(); attach(equity,"equity");
+window.addEventListener("mouseup",()=>{drag=null; price.classList.remove("dragging"); equity.classList.remove("dragging");});
+attach(price,"price"); attach(equity,"equity");
 $("zoomIn").onclick=()=>setBarsPerView(barsPerView*0.75,0.5);
 $("zoomOut").onclick=()=>setBarsPerView(barsPerView*1.35,0.5);
 $("reset").onclick=()=>{barsPerView=Math.min(300,Math.max(20,fps.length)); start=Math.max(0,fps.length-barsPerView); resetYZoom(); draw();};
 $("modeCandles").onclick=()=>setChartMode("candles");
 $("modeFootprint").onclick=()=>setChartMode("footprint");
+$("modeHeatmap").onclick=()=>setChartMode("heatmap");
 $("showBands").onchange=e=>{showBands=e.target.checked;draw();};
 $("showTrades").onchange=e=>{showTrades=e.target.checked;draw();};
 $("heatMetric").onchange=e=>{heatMetric=e.target.value;draw();};
