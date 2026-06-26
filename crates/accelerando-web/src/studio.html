@@ -100,8 +100,7 @@
         <button id="modeFootprint" title="Footprint足迹图显示">FootPrint</button>
         <button id="modeHeatmap" title="L2 heatmap显示">Heatmap</button>
       </span>
-      <label style="font-size:12px;color:#374151;display:inline-flex;gap:6px;align-items:center;"><input type="checkbox" id="showBands" checked> bands</label>
-      <label style="font-size:12px;color:#374151;display:inline-flex;gap:6px;align-items:center;"><input type="checkbox" id="showTrades" checked> trades</label>
+      <span id="overlayToggles" style="display:inline-flex;gap:10px;align-items:center;flex-wrap:wrap;"></span>
       <label style="font-size:12px;color:#374151;display:inline-flex;gap:6px;align-items:center;">heat <select id="heatMetric" style="height:26px;border:1px solid #cbd5e1;border-radius:6px;font-size:12px;"><option value="total">total</option><option value="bid">bid</option><option value="ask">ask</option></select></label>
       <span class="rng" id="range"></span>
     </div>
@@ -114,7 +113,13 @@
 <script>
 const COLORS = { up:"#2563eb", down:"#d97706", grid:"#e2e8f0", axis:"#475569" };
 let SCHEMA=null, CONFIG=null, DATA=null, fps=[], eq=[], trades=[];
-let barsPerView=300, start=0, hover=null, drag=null, showBands=true, showTrades=true, chartMode="candles", heatMetric="total", poll=null;
+let barsPerView=300, start=0, hover=null, drag=null, chartMode="candles", heatMetric="total", poll=null;
+// Overlay visibility, keyed by category ("bands", "trades", or a marker group). Persisted across
+// re-renders so a hidden overlay stays hidden when the result is reloaded.
+let overlayState={};
+const overlayLabel=cat=>cat==="bands"?"bands":cat==="trades"?"trades":cat.replace(/_/g," ");
+const overlayOn=cat=>overlayState[cat]!==false;
+const markerCat=p=>p.group||"markers";
 let yZoom={price:{manual:false,lo:null,hi:null},equity:{manual:false,lo:null,hi:null}};
 const $ = id => document.getElementById(id);
 const price=$("price"), pctx=price.getContext("2d");
@@ -292,9 +297,37 @@ function renderResult(data){
   DATA=data; fps=data.footprints||[]; eq=data.equity||[]; trades=data.trades||[];
   for(const t of trades){ t._ei=idxForEntryTs(t.entry_ts_ns); t._xi=idxForTs(t.exit_ts_ns); }
   renderCards(data.metrics);
+  buildOverlayToggles();
   barsPerView=Math.min(300,Math.max(20,fps.length)); start=Math.max(0,fps.length-barsPerView);
   resetYZoom();
   resize();
+}
+// Collect the overlay categories actually present in the loaded result, in a stable order:
+// background bands, then marker groups (from indicators/strategies), then trade positions.
+function overlayCategories(){
+  let hasBands=false; const markerGroups=new Set();
+  for(const b of fps){ for(const p of (b.plots||[])){
+    if(p.kind==="BackgroundBand")hasBands=true;
+    else if(p.kind==="Marker")markerGroups.add(markerCat(p));
+  } }
+  const cats=[];
+  if(hasBands)cats.push("bands");
+  for(const g of [...markerGroups].sort())cats.push(g);
+  if(trades.length)cats.push("trades");
+  return cats;
+}
+function buildOverlayToggles(){
+  const host=$("overlayToggles"); if(!host)return;
+  host.innerHTML="";
+  for(const cat of overlayCategories()){
+    if(!(cat in overlayState))overlayState[cat]=true;
+    const lab=document.createElement("label");
+    lab.style.cssText="font-size:12px;color:#374151;display:inline-flex;gap:6px;align-items:center;";
+    const cb=document.createElement("input"); cb.type="checkbox"; cb.checked=overlayState[cat]!==false;
+    cb.onchange=()=>{ overlayState[cat]=cb.checked; draw(); };
+    lab.append(cb, document.createTextNode(overlayLabel(cat)));
+    host.append(lab);
+  }
 }
 function idxForTs(ns){ const x=Number(ns); let lo=0,hi=fps.length-1,best=0; while(lo<=hi){const m=(lo+hi)>>1; if(Number(fps[m].ts_last_ns)<=x){best=m;lo=m+1;}else hi=m-1;} return best; }
 function idxForEntryTs(ns){
@@ -330,6 +363,7 @@ function drawPlotMarkers(ctx,vis,L,T,ph,xStep,y){
     const b=vis[i], x=L+i*xStep+xStep/2;
     for(const p of (b.plots||[])){
       if(p.kind!=="Marker"||p.price==null)continue;
+      if(!overlayOn(markerCat(p)))continue;
       const yy=y(p.price); if(yy<T-12||yy>T+ph+12)continue;
       const color=p.color||"#111827"; ctx.fillStyle=color; ctx.strokeStyle="#ffffff"; ctx.lineWidth=2;
       ctx.beginPath();
@@ -423,14 +457,14 @@ function drawPrice(){
   const [s,e]=viewRange(); const vis=fps.slice(s,e); const L=64,R=16,T=14,B=34; const pw=Math.max(1,W-L-R),ph=Math.max(1,H-T-B);
   let lo=Infinity,hi=-Infinity; for(const b of vis){lo=Math.min(lo,b.low);hi=Math.max(hi,b.high);}
   const pad=Math.max(0.25,(hi-lo)*0.06); lo-=pad;hi+=pad; [lo,hi]=applyYZoom("price",lo,hi); yZoom.price.lo=lo; yZoom.price.hi=hi; const y=p=>T+(hi-p)/(hi-lo)*ph; const xStep=pw/Math.max(1,vis.length); const cw=Math.max(1,Math.min(16,xStep*0.7));
-  if(showBands){ let i=0; while(i<vis.length){ const band=(vis[i].plots||[]).find(p=>p.kind==="BackgroundBand"); const col=band?band.color:null; let j=i+1; const same=k=>{const bb=(vis[k].plots||[]).find(p=>p.kind==="BackgroundBand"); return (bb?bb.color:null)===col;}; while(j<vis.length&&same(j))j++; if(col){pctx.fillStyle=col; pctx.fillRect(L+i*xStep,T,(j-i)*xStep,ph);} i=j; } }
+  if(overlayOn("bands")){ let i=0; while(i<vis.length){ const band=(vis[i].plots||[]).find(p=>p.kind==="BackgroundBand"); const col=band?band.color:null; let j=i+1; const same=k=>{const bb=(vis[k].plots||[]).find(p=>p.kind==="BackgroundBand"); return (bb?bb.color:null)===col;}; while(j<vis.length&&same(j))j++; if(col){pctx.fillStyle=col; pctx.fillRect(L+i*xStep,T,(j-i)*xStep,ph);} i=j; } }
   pctx.strokeStyle=COLORS.grid; pctx.fillStyle=COLORS.axis; pctx.font="11px Segoe UI, Arial"; pctx.lineWidth=1;
   for(let i=0;i<=6;i++){ const yy=T+ph*i/6,pr=hi-(hi-lo)*i/6; pctx.beginPath();pctx.moveTo(L,yy);pctx.lineTo(W-R,yy);pctx.stroke(); pctx.fillText(pr.toFixed(2),6,yy+4); }
   drawTimeAxis(pctx,vis,L,T,pw,ph,W,R);
   if(chartMode==="footprint") drawFootprints(pctx,vis,L,T,ph,xStep,y,tickSizeFor(vis));
   else drawCandles(pctx,vis,L,T,ph,xStep,cw,y);
   drawPlotMarkers(pctx,vis,L,T,ph,xStep,y);
-  if(showTrades) drawTradePositions(pctx,trades,s,e,L,T,ph,xStep,y);
+  if(overlayOn("trades")) drawTradePositions(pctx,trades,s,e,L,T,ph,xStep,y);
   pctx.strokeStyle="#9aa4b2"; pctx.strokeRect(L,T,pw,ph);
   if(hover&&hover.canvas==="price"){ const idx=clamp(Math.floor((hover.x-L)/xStep),0,vis.length-1); const b=vis[idx]; if(b){ const x=L+idx*xStep+xStep/2; pctx.strokeStyle="#111827";pctx.beginPath();pctx.moveTo(x,T);pctx.lineTo(x,T+ph);pctx.stroke(); const tags=b.tags?Object.entries(b.tags).map(([k,v])=>`${k}:${v}`).join(" "):""; const base=`${s+idx+1}/${fps.length}  ${fmtTs(b.ts_last_ns)}  O ${b.open.toFixed(2)} H ${b.high.toFixed(2)} L ${b.low.toFixed(2)} C ${b.close.toFixed(2)}  D ${fmt(b.delta,0)}  ${tags}`; if(chartMode==="footprint"){ const totals=footprintTotals(b); const priceAt=hi-(hover.y-T)/Math.max(1,ph)*(hi-lo); const lv=nearestFootprintLevel(b,priceAt); $("status").textContent=base+`  bar sell/buy ${fmt(totals.sell,0)}/${fmt(totals.buy,0)}  level ${lv?lv.price.toFixed(2):priceAt.toFixed(2)} sell/buy ${lv?fmt(lv.sell_vol,0):"-"}/${lv?fmt(lv.buy_vol,0):"-"}`; } else { $("status").textContent=base; } } }
   $("range").textContent=`bars ${s+1}-${e} / ${fps.length}`;
@@ -476,7 +510,7 @@ function drawHeatmap(ctx,canvas,hoverCanvas){
   }
   drawTimeAxis(ctx,vis,L,T,pw,ph,W,R);
   drawPlotMarkers(ctx,vis,L,T,ph,xStep,y);
-  if(showTrades) drawTradePositions(ctx,trades,s,e,L,T,ph,xStep,y);
+  if(overlayOn("trades")) drawTradePositions(ctx,trades,s,e,L,T,ph,xStep,y);
   ctx.fillStyle="#334155"; ctx.font="11px Segoe UI, Arial"; ctx.fillText(`book liquidity: ${heatMetric}`,L+4,T+13);
   ctx.strokeStyle="#9aa4b2"; ctx.strokeRect(L,T,pw,ph);
   if(hover&&hover.canvas===hoverCanvas){
@@ -514,8 +548,6 @@ $("reset").onclick=()=>{barsPerView=Math.min(300,Math.max(20,fps.length)); start
 $("modeCandles").onclick=()=>setChartMode("candles");
 $("modeFootprint").onclick=()=>setChartMode("footprint");
 $("modeHeatmap").onclick=()=>setChartMode("heatmap");
-$("showBands").onchange=e=>{showBands=e.target.checked;draw();};
-$("showTrades").onchange=e=>{showTrades=e.target.checked;draw();};
 $("heatMetric").onchange=e=>{heatMetric=e.target.value;draw();};
 $("runBtn").onclick=runBacktest;
 $("saveBtn").onclick=async()=>{ const name=$("saveName").value.trim(); if(!name){$("runErr").textContent="请输入保存名称";return;} const r=await (await fetch("/api/save",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({name})})).json(); if(!r.ok){$("runErr").textContent=r.error||"save failed";} else { $("saveName").value=""; refreshRuns(); } };

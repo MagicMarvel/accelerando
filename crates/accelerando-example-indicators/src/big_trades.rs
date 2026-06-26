@@ -172,6 +172,7 @@ impl BigTrades {
                 text: format!("BT buy {:.0}", size),
                 text_dx: Some(8.0),
                 text_dy: Some(-10.0),
+                group: Some("big_trades".to_string()),
             });
         }
 
@@ -189,6 +190,7 @@ impl BigTrades {
                 text: format!("BT sell {:.0}", size),
                 text_dx: Some(8.0),
                 text_dy: Some(10.0),
+                group: Some("big_trades".to_string()),
             });
         }
     }

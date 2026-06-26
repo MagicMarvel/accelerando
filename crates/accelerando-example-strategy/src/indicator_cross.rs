@@ -109,6 +109,7 @@ impl IndicatorCross {
             text: text.to_string(),
             text_dx: None,
             text_dy: None,
+            group: Some("signals".to_string()),
         });
     }
 }
