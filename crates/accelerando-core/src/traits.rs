@@ -28,17 +28,31 @@ pub trait FootprintAggregator {
     fn flush(&mut self) -> Option<Footprint>;
 }
 
-/// Enriches a footprint with computed values, tags and chart overlays. Causal: it sees only the
-/// current footprint and the completed history before it.
+/// Enriches the stream with computed values, tags and chart overlays.
+///
+/// Indicators may consume the raw order-flow stream through [`Indicator::on_event`] and/or consume
+/// completed footprints through [`Indicator::on_footprint`]. Footprint callbacks are causal: they
+/// see only the current footprint and the completed history before it.
 pub trait Indicator {
+    /// Called once for every normalized order-flow event.
+    fn on_event(&mut self, _ev: &OrderFlowEvent) {}
+
     /// Called once per completed footprint, in order. `history` excludes `fp`.
-    fn on_footprint(&mut self, fp: &mut Footprint, history: &[Footprint]);
+    fn on_footprint(&mut self, _fp: &mut Footprint, _history: &[Footprint]) {}
+
     /// A short identifier used for namespacing parameters and labelling outputs.
     fn name(&self) -> &str;
 }
 
-/// Decides position changes from enriched footprints, issuing orders through the broker context.
+/// Decides position changes from order-flow events and/or enriched footprints.
 pub trait Strategy {
+    /// Called once for every normalized order-flow event.
+    ///
+    /// The current broker still applies the existing bar/footprint fill model. Event-driven
+    /// strategies can use this hook for signal state today; a tick-level fill model can be added
+    /// behind the same callback later.
+    fn on_event(&mut self, _ev: &OrderFlowEvent, _ctx: &mut OrderCtx) {}
+
     /// Called once per completed (and indicator-enriched) footprint.
-    fn on_footprint(&mut self, fp: &Footprint, ctx: &mut OrderCtx);
+    fn on_footprint(&mut self, _fp: &Footprint, _ctx: &mut OrderCtx) {}
 }

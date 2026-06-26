@@ -4,6 +4,8 @@
 //!   `f,<ts>,-1,REC`                                   file header (ignored)
 //!   `c,<ts>,0,<exch>,<sym>,<type>,<tick>,<mult>,<n>`  contract metadata
 //!   `T,<ts_ns>,<id>,<price>,<size>,<side>,<flag>`     trade print
+//!   `A,<ts_ns>,<id>,<price>,<size>,<side>,...`        resting liquidity added
+//!   `R,<ts_ns>,<id>,<price>,<size>,<side>,...`        resting liquidity reduced
 //!
 //! `side` is `1` or `2`. Which one is the buy aggressor is feed-dependent, so it is exposed as the
 //! `buy_aggressor_code` parameter (default `2`) and can be flipped without touching code.
@@ -40,8 +42,7 @@ impl Configurable for CsvSource {
 
 impl DataSource for CsvSource {
     fn events(self: Box<Self>) -> Box<dyn Iterator<Item = OrderFlowEvent>> {
-        let file = File::open(&self.path)
-            .unwrap_or_else(|e| panic!("open csv {}: {e}", self.path));
+        let file = File::open(&self.path).unwrap_or_else(|e| panic!("open csv {}: {e}", self.path));
         if let Some(p) = &self.progress {
             if let Ok(md) = file.metadata() {
                 p.set_total_bytes(md.len());
@@ -92,7 +93,11 @@ impl CsvIter {
                 let ts_ns = f.next()?.parse::<i64>().ok()?;
                 let _id = f.next()?;
                 let price = f.next()?.parse::<f64>().ok().filter(|v| v.is_finite())?;
-                let size = f.next()?.parse::<f64>().ok().filter(|v| v.is_finite() && *v >= 0.0)?;
+                let size = f
+                    .next()?
+                    .parse::<f64>()
+                    .ok()
+                    .filter(|v| v.is_finite() && *v >= 0.0)?;
                 let side_code = f.next().and_then(|v| v.parse::<i64>().ok()).unwrap_or(0);
                 let aggressor = if side_code == self.buy_aggressor_code {
                     Side::Buy
@@ -106,6 +111,8 @@ impl CsvIter {
                     aggressor,
                 })
             }
+            "A" | "AddLimit" => self.parse_l2(f, true),
+            "R" | "ReduceLimit" => self.parse_l2(f, false),
             "c" => {
                 // c,ts,0,exch,sym,type,tick,mult,...
                 let _ts = f.next();
@@ -121,6 +128,42 @@ impl CsvIter {
                 })
             }
             _ => None,
+        }
+    }
+
+    fn parse_l2<'a>(
+        &self,
+        mut f: impl Iterator<Item = &'a str>,
+        add: bool,
+    ) -> Option<OrderFlowEvent> {
+        let ts_ns = f.next()?.parse::<i64>().ok()?;
+        let _id = f.next()?;
+        let price = f.next()?.parse::<f64>().ok().filter(|v| v.is_finite())?;
+        let size = f
+            .next()?
+            .parse::<f64>()
+            .ok()
+            .filter(|v| v.is_finite() && *v >= 0.0)?;
+        let side_code = f.next().and_then(|v| v.parse::<i64>().ok()).unwrap_or(0);
+        let side = if side_code == self.buy_aggressor_code {
+            Side::Buy
+        } else {
+            Side::Sell
+        };
+        if add {
+            Some(OrderFlowEvent::AddLimit {
+                ts_ns,
+                price,
+                size,
+                side,
+            })
+        } else {
+            Some(OrderFlowEvent::ReduceLimit {
+                ts_ns,
+                price,
+                size,
+                side,
+            })
         }
     }
 }

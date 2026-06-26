@@ -251,7 +251,11 @@ impl Broker {
     /// Close any open position at end of stream and append a final equity point.
     pub fn finalize(&mut self, last_close: f64, ts: i64) {
         if self.position.is_some() {
-            self.close_position(self.slip(last_close, -self.current_dir()), ts, TradeReason::EndOfData);
+            self.close_position(
+                self.slip(last_close, -self.current_dir()),
+                ts,
+                TradeReason::EndOfData,
+            );
             let eq = self.mark_to_market(last_close);
             self.peak_equity = self.peak_equity.max(eq);
             self.equity.push(EquityPoint {
@@ -276,7 +280,10 @@ pub struct OrderCtx<'b> {
 
 impl<'b> OrderCtx<'b> {
     pub fn new(broker: &'b mut Broker) -> Self {
-        Self { broker, plots: Vec::new() }
+        Self {
+            broker,
+            plots: Vec::new(),
+        }
     }
 
     /// Append a chart overlay to this footprint (lines, markers, bands).

@@ -1,7 +1,8 @@
-//! Accelerando core — the spine of a high-speed, pluggable footprint backtester.
+//! Accelerando core: the spine of a high-speed, pluggable footprint backtester.
 //!
-//! Pipeline: [`DataSource`] → [`OrderFlowEvent`] → [`FootprintAggregator`] → [`Footprint`]
-//! → [`Indicator`]s (enrich) → [`Strategy`] → [`Broker`] → [`BacktestResult`].
+//! Pipeline: [`DataSource`] emits one [`OrderFlowEvent`] stream. The engine fans it out to
+//! event-aware [`Indicator`]s / [`Strategy`] and to the [`FootprintAggregator`], which produces
+//! display footprints for footprint-aware indicators, strategies, and [`BacktestResult`].
 //!
 //! Every pluggable stage is built from a data-driven [`Params`] map and advertises a
 //! [`ParamSpec`], so the same definitions feed both a single backtest and the hyperopt search.
@@ -25,5 +26,7 @@ pub use metrics::Metrics;
 pub use params::{Configurable, ParamRange, ParamSpec, ParamValue, Params};
 pub use progress::{ProgressHandle, ProgressSnapshot};
 pub use registry::Registry;
-pub use result::{BacktestResult, Trade, TradeReason};
+pub use result::{
+    BacktestResult, LiquidityHeatmap, LiquidityLevel, LiquiditySnapshot, Trade, TradeReason,
+};
 pub use traits::{DataSource, FootprintAggregator, Indicator, Strategy};

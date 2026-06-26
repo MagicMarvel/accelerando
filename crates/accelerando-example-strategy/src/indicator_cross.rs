@@ -61,8 +61,8 @@ impl Strategy for IndicatorCross {
         };
         let rsi = fp.values.get("rsi").copied().unwrap_or(50.0);
         let volume_sma = fp.values.get("volume_sma").copied().unwrap_or(0.0);
-        let has_volume = volume_sma <= f64::EPSILON
-            || fp.volume >= volume_sma * self.min_volume_ratio.max(0.0);
+        let has_volume =
+            volume_sma <= f64::EPSILON || fp.volume >= volume_sma * self.min_volume_ratio.max(0.0);
 
         let crossed_above = self
             .prev_fast

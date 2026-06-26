@@ -45,8 +45,16 @@ impl ParamValue {
 /// The tunable domain of a single parameter, consumed by the hyperopt samplers.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum ParamRange {
-    Int { min: i64, max: i64, step: i64 },
-    Float { min: f64, max: f64, step: Option<f64> },
+    Int {
+        min: i64,
+        max: i64,
+        step: i64,
+    },
+    Float {
+        min: f64,
+        max: f64,
+        step: Option<f64>,
+    },
     Choice(Vec<String>),
     /// A fixed value that is never searched (paths, flags).
     Fixed,
@@ -68,7 +76,9 @@ pub struct ParamSpec {
 
 impl ParamSpec {
     pub fn new() -> Self {
-        Self { entries: Vec::new() }
+        Self {
+            entries: Vec::new(),
+        }
     }
 
     pub fn int(mut self, name: &str, default: i64, min: i64, max: i64, step: i64) -> Self {
@@ -83,7 +93,11 @@ impl ParamSpec {
     pub fn float(mut self, name: &str, default: f64, min: f64, max: f64) -> Self {
         self.entries.push(ParamEntry {
             name: name.to_string(),
-            range: ParamRange::Float { min, max, step: None },
+            range: ParamRange::Float {
+                min,
+                max,
+                step: None,
+            },
             default: ParamValue::Float(default),
         });
         self
@@ -153,7 +167,10 @@ impl Params {
     }
 
     pub fn int(&self, key: &str, default: i64) -> i64 {
-        self.0.get(key).and_then(ParamValue::as_i64).unwrap_or(default)
+        self.0
+            .get(key)
+            .and_then(ParamValue::as_i64)
+            .unwrap_or(default)
     }
 
     pub fn usize(&self, key: &str, default: usize) -> usize {
@@ -161,7 +178,10 @@ impl Params {
     }
 
     pub fn float(&self, key: &str, default: f64) -> f64 {
-        self.0.get(key).and_then(ParamValue::as_f64).unwrap_or(default)
+        self.0
+            .get(key)
+            .and_then(ParamValue::as_f64)
+            .unwrap_or(default)
     }
 
     pub fn str(&self, key: &str, default: &str) -> String {

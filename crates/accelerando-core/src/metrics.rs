@@ -137,7 +137,11 @@ fn sortino(rets: &[f64]) -> f64 {
         return 0.0;
     }
     let mu = mean(rets);
-    let downside = rets.iter().filter(|r| **r < 0.0).map(|r| r.powi(2)).sum::<f64>();
+    let downside = rets
+        .iter()
+        .filter(|r| **r < 0.0)
+        .map(|r| r.powi(2))
+        .sum::<f64>();
     let dd = (downside / rets.len() as f64).sqrt();
     if dd > 0.0 {
         mu / dd * (rets.len() as f64).sqrt()

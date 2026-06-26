@@ -54,7 +54,10 @@ impl Registry {
     }
 
     /// Register a footprint aggregator under `name`.
-    pub fn register_aggregator<T: FootprintAggregator + Configurable + 'static>(&mut self, name: &str) {
+    pub fn register_aggregator<T: FootprintAggregator + Configurable + 'static>(
+        &mut self,
+        name: &str,
+    ) {
         self.aggregators.insert(
             name.to_string(),
             Entry {

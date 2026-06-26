@@ -30,7 +30,11 @@ pub enum Plot {
     /// Color the background band behind this footprint.
     BackgroundBand { color: String, label: String },
     /// A point on a named line overlay (connected across footprints by `id`).
-    Line { id: String, value: f64, color: String },
+    Line {
+        id: String,
+        value: f64,
+        color: String,
+    },
     /// A marker at a price (shape is a free string the front-end understands, e.g. "triangle").
     Marker {
         price: f64,

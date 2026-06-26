@@ -20,9 +20,8 @@ pub fn studio_html() -> &'static str {
 pub fn serve(result: &BacktestResult, port: u16) -> std::io::Result<()> {
     let json = serde_json::to_string(result).expect("serialize result");
     let addr = format!("0.0.0.0:{port}");
-    let server = Server::http(&addr).map_err(|e| {
-        std::io::Error::new(std::io::ErrorKind::Other, format!("bind {addr}: {e}"))
-    })?;
+    let server = Server::http(&addr)
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, format!("bind {addr}: {e}")))?;
     println!("Accelerando result viewer → http://localhost:{port}  (Ctrl+C to stop)");
 
     for request in server.incoming_requests() {

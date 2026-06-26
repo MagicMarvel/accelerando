@@ -134,7 +134,9 @@ pub fn search<E: BatchEvaluator>(
     let candidates = match algo {
         Algo::Random => {
             let mut rng = XorShift::new(seed);
-            (0..evals).map(|_| space.sample(&mut rng)).collect::<Vec<_>>()
+            (0..evals)
+                .map(|_| space.sample(&mut rng))
+                .collect::<Vec<_>>()
         }
         Algo::Grid => grid(space, evals),
     };

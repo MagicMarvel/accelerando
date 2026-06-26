@@ -45,6 +45,27 @@ pub struct EquityPoint {
     pub drawdown: f64,
 }
 
+/// Resting liquidity at one price level for a Bookmap-style heatmap snapshot.
+#[derive(Clone, Copy, Debug, Default, Serialize, Deserialize)]
+pub struct LiquidityLevel {
+    pub price: f64,
+    pub bid_size: f64,
+    pub ask_size: f64,
+}
+
+/// A sampled order-book depth state. Levels are sparse and sorted by price.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct LiquiditySnapshot {
+    pub ts_ns: i64,
+    pub levels: Vec<LiquidityLevel>,
+}
+
+/// Bookmap-style resting-liquidity history, sampled on footprint closes.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct LiquidityHeatmap {
+    pub snapshots: Vec<LiquiditySnapshot>,
+}
+
 /// The full result of one backtest run.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct BacktestResult {
@@ -53,6 +74,9 @@ pub struct BacktestResult {
     pub equity: Vec<EquityPoint>,
     /// All enriched footprints (for chart rendering). May be large.
     pub footprints: Vec<Footprint>,
+    /// Resting order-book liquidity snapshots for Bookmap-style heatmap rendering.
+    #[serde(default)]
+    pub liquidity_heatmap: LiquidityHeatmap,
     pub tick_size: f64,
     pub multiplier: f64,
 }
