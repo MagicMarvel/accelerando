@@ -56,7 +56,7 @@
   .empty { display:flex; align-items:center; justify-content:center; height:100%; color:#94a3b8; font-size:14px; }
 </style>
 </head>
-<body>
+<body class="viewer">
 <header>
   <span class="title">ACCELERANDO</span>
   <span class="tag">studio · the world has been accelerated</span>
@@ -143,7 +143,19 @@ function zoomY(name,factor,frac){
   st.manual=true; st.lo=nextLo; st.hi=nextLo+nextSpan;
   draw();
 }
-function drawTimeAxis(ctx,vis,L,T,pw,ph,W,R){ if(!vis.length)return; ctx.save(); ctx.strokeStyle=COLORS.grid; ctx.fillStyle=COLORS.axis; ctx.font="10px Segoe UI, Arial"; ctx.textAlign="center"; ctx.textBaseline="top"; const ticks=Math.min(5,vis.length); for(let i=0;i<ticks;i++){ const idx=ticks===1?0:Math.round((vis.length-1)*i/(ticks-1)); const x=L+(idx+0.5)*pw/Math.max(1,vis.length); ctx.beginPath();ctx.moveTo(x,T+ph);ctx.lineTo(x,T+ph+4);ctx.stroke(); ctx.fillText(fmtAxisTs(vis[idx].ts_last_ns),x,T+ph+7); } ctx.textAlign="right"; ctx.fillText("时间",W-R,T+ph+20); ctx.restore(); }
+function drawTimeAxis(ctx,vis,L,T,pw,ph,W,R,tsKey="ts_last_ns"){
+  if(!vis.length)return;
+  ctx.save(); ctx.strokeStyle=COLORS.grid; ctx.fillStyle=COLORS.axis; ctx.font="10px Segoe UI, Arial"; ctx.textAlign="center"; ctx.textBaseline="top";
+  const ticks=Math.min(5,vis.length);
+  for(let i=0;i<ticks;i++){
+    const idx=ticks===1?0:Math.round((vis.length-1)*i/(ticks-1));
+    const x=L+(idx+0.5)*pw/Math.max(1,vis.length);
+    const ts=vis[idx][tsKey]??vis[idx].ts_last_ns??vis[idx].ts_ns;
+    ctx.beginPath();ctx.moveTo(x,T+ph);ctx.lineTo(x,T+ph+4);ctx.stroke();
+    ctx.fillText(fmtAxisTs(ts),x,T+ph+7);
+  }
+  ctx.textAlign="right"; ctx.fillText("时间",W-R,T+ph+20); ctx.restore();
+}
 async function fetchJson(url){ const r=await fetch(url); if(!r.ok) throw new Error(`${url}: ${r.status}`); return await r.json(); }
 
 // ---------- config form ----------
@@ -278,13 +290,19 @@ async function loadRun(name){
 // ---------- chart rendering ----------
 function renderResult(data){
   DATA=data; fps=data.footprints||[]; eq=data.equity||[]; trades=data.trades||[];
-  for(const t of trades){ t._ei=idxForTs(t.entry_ts_ns); t._xi=idxForTs(t.exit_ts_ns); }
+  for(const t of trades){ t._ei=idxForEntryTs(t.entry_ts_ns); t._xi=idxForTs(t.exit_ts_ns); }
   renderCards(data.metrics);
   barsPerView=Math.min(300,Math.max(20,fps.length)); start=Math.max(0,fps.length-barsPerView);
   resetYZoom();
   resize();
 }
 function idxForTs(ns){ const x=Number(ns); let lo=0,hi=fps.length-1,best=0; while(lo<=hi){const m=(lo+hi)>>1; if(Number(fps[m].ts_last_ns)<=x){best=m;lo=m+1;}else hi=m-1;} return best; }
+function idxForEntryTs(ns){
+  const x=Number(ns); let lo=0,hi=fps.length-1,best=0;
+  while(lo<=hi){ const m=(lo+hi)>>1; if(Number(fps[m].ts_first_ns)<=x){best=m;lo=m+1;} else hi=m-1; }
+  if(fps[best] && x<=Number(fps[best].ts_last_ns)) return best;
+  return idxForTs(ns);
+}
 function renderCards(m){
   if(!m){ $("cards").innerHTML=""; return; }
   const cards=[["Net PnL","$"+fmt(m.net_pnl),sc(m.net_pnl)],["Return",fmt(m.return_pct)+"%",sc(m.return_pct)],
@@ -475,9 +493,9 @@ function drawEquity(){
   const y=v=>T+(hi-v)/(hi-lo)*ph; const xStep=pw/Math.max(1,vis.length); const startEq=DATA&&DATA.metrics?DATA.metrics.starting_equity:(vis[0]?vis[0].equity:0);
   ectx.strokeStyle=COLORS.grid; ectx.fillStyle=COLORS.axis; ectx.font="11px Segoe UI, Arial";
   for(let i=0;i<=3;i++){ const yy=T+ph*i/3,vv=hi-(hi-lo)*i/3; ectx.beginPath();ectx.moveTo(L,yy);ectx.lineTo(W-R,yy);ectx.stroke(); ectx.fillText("$"+vv.toFixed(0),6,yy+4); }
-  drawTimeAxis(ectx,vis,L,T,pw,ph,W,R);
+  drawTimeAxis(ectx,vis,L,T,pw,ph,W,R,"ts_ns");
   if(startEq>=lo&&startEq<=hi){ ectx.strokeStyle="#cbd5e1";ectx.setLineDash([4,4]); ectx.beginPath();ectx.moveTo(L,y(startEq));ectx.lineTo(W-R,y(startEq));ectx.stroke();ectx.setLineDash([]); }
-  ectx.strokeStyle="#2563eb"; ectx.lineWidth=1.6; ectx.beginPath(); for(let i=0;i<vis.length;i++){const x=L+i*xStep,yy=y(vis[i].equity); i?ectx.lineTo(x,yy):ectx.moveTo(x,yy);} ectx.stroke(); ectx.lineWidth=1;
+  ectx.strokeStyle="#2563eb"; ectx.lineWidth=1.6; ectx.beginPath(); for(let i=0;i<vis.length;i++){const x=L+(i+0.5)*xStep,yy=y(vis[i].equity); i?ectx.lineTo(x,yy):ectx.moveTo(x,yy);} ectx.stroke(); ectx.lineWidth=1;
   ectx.fillStyle="#64748b"; ectx.fillText("equity",L+4,T+12); ectx.strokeStyle="#9aa4b2"; ectx.strokeRect(L,T,pw,ph);
 }
 function draw(){ drawPrice(); drawEquity(); }
@@ -504,19 +522,11 @@ $("saveBtn").onclick=async()=>{ const name=$("saveName").value.trim(); if(!name)
 window.addEventListener("resize",resize);
 
 async function init(){
-  try{
-    SCHEMA=await fetchJson("/api/schema");
-    CONFIG=await fetchJson("/api/config");
-    buildForm(); refreshRuns(); resize();
-    // If the server already holds a result (e.g. seeded), show it.
-    try{ const p=await fetchJson("/api/progress"); if(p.has_result) await loadResult(); }catch(e){}
-  }catch(e){
-    document.body.classList.add("viewer");
-    $("status").textContent="result viewer";
-    resize();
-    try{ await loadResult(); }
-    catch(err){ $("status").textContent="无法加载 result"; }
-  }
+  document.body.classList.add("viewer");
+  $("status").textContent="result viewer";
+  resize();
+  try{ await loadResult(); }
+  catch(err){ $("status").textContent="无法加载 result"; }
 }
 init();
 </script>

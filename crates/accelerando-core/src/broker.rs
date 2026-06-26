@@ -33,11 +33,17 @@ enum Desired {
         qty: f64,
         stop_ticks: f64,
         target_ticks: f64,
+        entry_min: Option<f64>,
+        entry_max: Option<f64>,
+        entry_limit: Option<f64>,
     },
     Short {
         qty: f64,
         stop_ticks: f64,
         target_ticks: f64,
+        entry_min: Option<f64>,
+        entry_max: Option<f64>,
+        entry_limit: Option<f64>,
     },
 }
 
@@ -161,7 +167,7 @@ impl Broker {
     pub fn on_new_footprint(&mut self, fp: &Footprint) {
         // 1) Realize the pending desired transition at this bar's open.
         if let Some(desired) = self.pending.take() {
-            self.transition(desired, fp.open, fp.ts_first_ns);
+            self.transition(desired, fp);
         }
         // 2) Intrabar stop/target check against this bar's range.
         self.check_exits(fp);
@@ -175,30 +181,48 @@ impl Broker {
         });
     }
 
-    fn transition(&mut self, desired: Desired, open: f64, ts: i64) {
-        let (want_dir, qty, st, tt) = match desired {
-            Desired::Flat => (0, 0.0, 0.0, 0.0),
+    fn transition(&mut self, desired: Desired, fp: &Footprint) {
+        let open = fp.open;
+        let ts = fp.ts_first_ns;
+        let (want_dir, qty, st, tt, entry_min, entry_max, entry_limit) = match desired {
+            Desired::Flat => (0, 0.0, 0.0, 0.0, None, None, None),
             Desired::Long {
                 qty,
                 stop_ticks,
                 target_ticks,
-            } => (1, qty, stop_ticks, target_ticks),
+                entry_min,
+                entry_max,
+                entry_limit,
+            } => (1, qty, stop_ticks, target_ticks, entry_min, entry_max, entry_limit),
             Desired::Short {
                 qty,
                 stop_ticks,
                 target_ticks,
-            } => (-1, qty, stop_ticks, target_ticks),
+                entry_min,
+                entry_max,
+                entry_limit,
+            } => (-1, qty, stop_ticks, target_ticks, entry_min, entry_max, entry_limit),
         };
         let cur_dir = self.position.map(|p| p.dir).unwrap_or(0);
         if cur_dir == want_dir {
-            return; // already in the desired state
+            return;
+        }
+        if want_dir == 0 {
+            if self.position.is_some() {
+                self.close_position(self.slip(open, -cur_dir), ts, TradeReason::Signal);
+            }
+            return;
+        }
+        let Some(fill_px) = next_bar_entry_fill(fp, want_dir, entry_limit) else {
+            return;
+        };
+        if !price_in_band(fill_px, entry_min, entry_max) {
+            return;
         }
         if self.position.is_some() {
             self.close_position(self.slip(open, -cur_dir), ts, TradeReason::Signal);
         }
-        if want_dir != 0 {
-            self.open_position(want_dir, qty, self.slip(open, want_dir), ts, st, tt);
-        }
+        self.open_position(want_dir, qty, self.slip(fill_px, want_dir), ts, st, tt);
     }
 
     fn check_exits(&mut self, fp: &Footprint) {
@@ -271,6 +295,41 @@ impl Broker {
     }
 }
 
+fn next_bar_entry_fill(fp: &Footprint, dir: i32, limit: Option<f64>) -> Option<f64> {
+    let Some(limit) = limit else {
+        return Some(fp.open);
+    };
+    if dir > 0 {
+        if fp.open <= limit {
+            Some(fp.open)
+        } else if fp.low <= limit {
+            Some(limit)
+        } else {
+            None
+        }
+    } else if fp.open >= limit {
+        Some(fp.open)
+    } else if fp.high >= limit {
+        Some(limit)
+    } else {
+        None
+    }
+}
+
+fn price_in_band(px: f64, min: Option<f64>, max: Option<f64>) -> bool {
+    if let Some(min) = min {
+        if px < min {
+            return false;
+        }
+    }
+    if let Some(max) = max {
+        if px > max {
+            return false;
+        }
+    }
+    true
+}
+
 /// Handed to the strategy each footprint; records the desired next-bar position and any
 /// chart overlays the strategy wants drawn.
 pub struct OrderCtx<'b> {
@@ -303,19 +362,89 @@ impl<'b> OrderCtx<'b> {
 
     /// Desire a long position of `qty` next bar, with stop/target distances in ticks (0 = none).
     pub fn go_long(&mut self, qty: f64, stop_ticks: f64, target_ticks: f64) {
+        self.go_long_if_open_between(qty, stop_ticks, target_ticks, None, None);
+    }
+
+    /// Desire a long position only if the next bar opens inside the optional price band.
+    pub fn go_long_if_open_between(
+        &mut self,
+        qty: f64,
+        stop_ticks: f64,
+        target_ticks: f64,
+        entry_min: Option<f64>,
+        entry_max: Option<f64>,
+    ) {
         self.broker.set_pending(Desired::Long {
             qty,
             stop_ticks,
             target_ticks,
+            entry_min,
+            entry_max,
+            entry_limit: None,
         });
     }
 
     /// Desire a short position of `qty` next bar.
     pub fn go_short(&mut self, qty: f64, stop_ticks: f64, target_ticks: f64) {
+        self.go_short_if_open_between(qty, stop_ticks, target_ticks, None, None);
+    }
+
+    /// Desire a short position only if the next bar opens inside the optional price band.
+    pub fn go_short_if_open_between(
+        &mut self,
+        qty: f64,
+        stop_ticks: f64,
+        target_ticks: f64,
+        entry_min: Option<f64>,
+        entry_max: Option<f64>,
+    ) {
         self.broker.set_pending(Desired::Short {
             qty,
             stop_ticks,
             target_ticks,
+            entry_min,
+            entry_max,
+            entry_limit: None,
+        });
+    }
+
+    /// Desire a long position using a next-bar limit entry inside an optional price band.
+    pub fn go_long_limit_next_bar(
+        &mut self,
+        qty: f64,
+        stop_ticks: f64,
+        target_ticks: f64,
+        entry_limit: f64,
+        entry_min: Option<f64>,
+        entry_max: Option<f64>,
+    ) {
+        self.broker.set_pending(Desired::Long {
+            qty,
+            stop_ticks,
+            target_ticks,
+            entry_min,
+            entry_max,
+            entry_limit: Some(entry_limit),
+        });
+    }
+
+    /// Desire a short position using a next-bar limit entry inside an optional price band.
+    pub fn go_short_limit_next_bar(
+        &mut self,
+        qty: f64,
+        stop_ticks: f64,
+        target_ticks: f64,
+        entry_limit: f64,
+        entry_min: Option<f64>,
+        entry_max: Option<f64>,
+    ) {
+        self.broker.set_pending(Desired::Short {
+            qty,
+            stop_ticks,
+            target_ticks,
+            entry_min,
+            entry_max,
+            entry_limit: Some(entry_limit),
         });
     }
 
