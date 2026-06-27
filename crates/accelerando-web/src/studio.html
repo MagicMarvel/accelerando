@@ -489,13 +489,18 @@ function nearestFootprintLevel(b,price){
   return (b.ladder||[]).reduce((best,lv)=>!best||Math.abs(lv.price-price)<Math.abs(best.price-price)?lv:best,null);
 }
 function drawFootprints(ctx,vis,L,T,ph,xStep,y,tick){
-  let maxVol=0, maxDelta=0;
+  let maxVol=0, maxDelta=0, maxLevelDelta=0, maxProfile=0;
   for(const b of vis){
     const totals=footprintTotals(b); maxDelta=Math.max(maxDelta,Math.abs(totals.delta));
-    for(const lv of (b.ladder||[])){ maxVol=Math.max(maxVol,lv.buy_vol||0,lv.sell_vol||0); }
+    for(const lv of (b.ladder||[])){
+      const buy=lv.buy_vol||0, sell=lv.sell_vol||0, total=buy+sell;
+      maxVol=Math.max(maxVol,buy,sell);
+      maxLevelDelta=Math.max(maxLevelDelta,Math.abs(buy-sell));
+      maxProfile=Math.max(maxProfile,total);
+    }
   }
   if(maxVol<=0){ drawCandles(ctx,vis,L,T,ph,xStep,Math.max(1,Math.min(16,xStep*0.7)),y); return; }
-  const barW=Math.max(2,xStep*0.88), half=barW/2, showText=xStep>=36, showSummary=xStep>=24;
+  const barW=Math.max(2,xStep*0.92), half=barW/2, showProfile=xStep>=14, showFull=xStep>=70, showText=xStep>=36, showExtraText=xStep>=92, showSummary=xStep>=24;
   ctx.font="9px Segoe UI, Arial"; ctx.textBaseline="middle";
   for(let i=0;i<vis.length;i++){
     const b=vis[i], x=L+i*xStep+xStep/2, x0=x-half;
@@ -508,9 +513,33 @@ function drawFootprints(ctx,vis,L,T,ph,xStep,y,tick){
       if(yy>T+ph||yy+hh<T)continue;
       const sell=lv.sell_vol||0,buy=lv.buy_vol||0;
       const sellA=0.08+0.50*(sell/maxVol), buyA=0.08+0.50*(buy/maxVol);
-      ctx.fillStyle=`rgba(232,131,42,${sellA})`; ctx.fillRect(x0,yy,half,hh);
-      ctx.fillStyle=`rgba(37,99,235,${buyA})`; ctx.fillRect(x,yy,half,hh);
-      if(showText&&hh>=8){
+      const delta=buy-sell, deltaN=maxLevelDelta>0?Math.min(1,Math.abs(delta)/maxLevelDelta):0;
+      const profileN=maxProfile>0?Math.min(1,(buy+sell)/maxProfile):0;
+      if(showFull){
+        const profileW=barW*0.22, flowW=(barW-profileW*2)/2;
+        const deltaX=x0, sellX=x0+profileW, buyX=sellX+flowW, vpX=buyX+flowW;
+        ctx.fillStyle=delta>=0?`rgba(37,99,235,${0.10+0.55*deltaN})`:`rgba(217,119,6,${0.10+0.55*deltaN})`;
+        ctx.fillRect(deltaX+profileW*(1-deltaN),yy,Math.max(1,profileW*deltaN),hh);
+        ctx.fillStyle=`rgba(232,131,42,${sellA})`; ctx.fillRect(sellX,yy,flowW,hh);
+        ctx.fillStyle=`rgba(37,99,235,${buyA})`; ctx.fillRect(buyX,yy,flowW,hh);
+        ctx.fillStyle=`rgba(100,116,139,${0.08+0.48*profileN})`;
+        ctx.fillRect(vpX,yy,Math.max(1,profileW*profileN),hh);
+        if(showExtraText&&hh>=8){
+          ctx.fillStyle="#1f2937"; ctx.textAlign="center";
+          ctx.fillText(Math.round(sell),sellX+flowW/2,yy+hh/2);
+          ctx.fillText(Math.round(buy),buyX+flowW/2,yy+hh/2);
+        }
+      } else if(showProfile) {
+        const profileW=barW/2, deltaX=x0, vpX=x0+profileW;
+        ctx.fillStyle=delta>=0?`rgba(37,99,235,${0.10+0.58*deltaN})`:`rgba(217,119,6,${0.10+0.58*deltaN})`;
+        ctx.fillRect(deltaX+profileW*(1-deltaN),yy,Math.max(1,profileW*deltaN),hh);
+        ctx.fillStyle=`rgba(100,116,139,${0.08+0.50*profileN})`;
+        ctx.fillRect(vpX,yy,Math.max(1,profileW*profileN),hh);
+      } else {
+        ctx.fillStyle=`rgba(232,131,42,${sellA})`; ctx.fillRect(x0,yy,half,hh);
+        ctx.fillStyle=`rgba(37,99,235,${buyA})`; ctx.fillRect(x,yy,half,hh);
+      }
+      if(!showProfile&&showText&&hh>=8){
         ctx.fillStyle="#1f2937";
         ctx.textAlign="right"; ctx.fillText(Math.round(sell),x-3,yy+hh/2);
         ctx.textAlign="left"; ctx.fillText(Math.round(buy),x+3,yy+hh/2);
