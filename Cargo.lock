@@ -63,6 +63,7 @@ name = "accelerando-web"
 version = "0.1.0"
 dependencies = [
  "accelerando-core",
+ "serde",
  "serde_json",
  "tiny_http",
 ]

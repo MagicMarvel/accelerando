@@ -120,6 +120,7 @@ let overlayState={};
 const overlayLabel=cat=>cat==="bands"?"bands":cat==="trades"?"trades":cat.replace(/_/g," ");
 const overlayOn=cat=>overlayState[cat]!==false;
 const markerCat=p=>p.group||"markers";
+const volumeProfileCat=p=>(p.id||"").startsWith("entry_vp_")?"entry_vp":"volume_profiles";
 let yZoom={price:{manual:false,lo:null,hi:null},equity:{manual:false,lo:null,hi:null}};
 const $ = id => document.getElementById(id);
 const price=$("price"), pctx=price.getContext("2d");
@@ -142,7 +143,7 @@ function lockYZoom(){ for(const st of Object.values(yZoom)){ if(st&&isFinite(st.
 function zoomY(name,factor,frac){
   const st=yZoom[name]; if(!st||st.lo==null||st.hi==null)return;
   const oldLo=st.lo, oldHi=st.hi, oldSpan=oldHi-oldLo; if(!(oldSpan>0))return;
-  const nextSpan=clamp(oldSpan/factor,1e-6,1e12);
+  const nextSpan=clamp(oldSpan/factor,1e-12,1e18);
   const anchor=oldHi-frac*oldSpan;
   const nextLo=anchor-(1-frac)*nextSpan;
   st.manual=true; st.lo=nextLo; st.hi=nextLo+nextSpan;
@@ -309,6 +310,7 @@ function overlayCategories(){
   for(const b of fps){ for(const p of (b.plots||[])){
     if(p.kind==="BackgroundBand")hasBands=true;
     else if(p.kind==="Marker")markerGroups.add(markerCat(p));
+    else if(p.kind==="VolumeProfile")markerGroups.add(volumeProfileCat(p));
   } }
   const cats=[];
   if(hasBands)cats.push("bands");
@@ -344,7 +346,7 @@ function renderCards(m){
     ["Sortino",fmt(m.sortino),sc(m.sortino)],["Max DD","$"+fmt(m.max_drawdown),"neg"],["Max DD %",fmt(m.max_drawdown_pct,1)+"%","neg"]];
   $("cards").innerHTML=cards.map(([k,v,c])=>`<div class="card"><div class="k">${k}</div><div class="v ${c}">${v}</div></div>`).join("");
 }
-function setBarsPerView(next,anchor=1){ lockYZoom(); const old=barsPerView; next=Math.round(clamp(next,20,Math.max(20,fps.length))); const a=start+old*anchor; barsPerView=next; start=clamp(Math.round(a-barsPerView*anchor),0,Math.max(0,fps.length-barsPerView)); draw(); }
+function setBarsPerView(next,anchor=1){ lockYZoom(); const old=barsPerView; next=Math.round(clamp(next,1,Math.max(1,fps.length))); const a=start+old*anchor; barsPerView=next; start=clamp(Math.round(a-barsPerView*anchor),0,Math.max(0,fps.length-barsPerView)); draw(); }
 function resize(){ for(const c of [price,equity]){ const r=c.getBoundingClientRect(); const dpr=window.devicePixelRatio||1; c.width=Math.max(1,Math.floor(r.width*dpr)); c.height=Math.max(1,Math.floor(r.height*dpr)); c.getContext("2d").setTransform(dpr,0,0,dpr,0,0);} draw(); }
 function viewRange(){ const end=Math.min(fps.length,start+barsPerView); return [start,end]; }
 function setChartMode(mode){ chartMode=mode; $("modeCandles").classList.toggle("active",mode==="candles"); $("modeFootprint").classList.toggle("active",mode==="footprint"); $("modeHeatmap").classList.toggle("active",mode==="heatmap"); draw(); }
@@ -354,10 +356,48 @@ function tickSizeFor(vis){
   for(const b of vis){ const lv=(b.ladder||[]).map(x=>x.price).sort((a,b)=>a-b); for(let i=1;i<lv.length;i++){ const d=lv[i]-lv[i-1]; if(d>0)best=Math.min(best,d); } }
   return isFinite(best)?best:0.25;
 }
+function clipPlot(ctx,L,T,pw,ph){
+  ctx.beginPath(); ctx.rect(L,T,pw,ph); ctx.clip();
+}
+function rectsOverlap(a,b){
+  return a.x < b.x+b.w && a.x+a.w > b.x && a.y < b.y+b.h && a.y+a.h > b.y;
+}
+function roundedRect(ctx,x,y,w,h,r){
+  r=Math.min(r,w/2,h/2);
+  ctx.beginPath();
+  ctx.moveTo(x+r,y); ctx.lineTo(x+w-r,y); ctx.quadraticCurveTo(x+w,y,x+w,y+r);
+  ctx.lineTo(x+w,y+h-r); ctx.quadraticCurveTo(x+w,y+h,x+w-r,y+h);
+  ctx.lineTo(x+r,y+h); ctx.quadraticCurveTo(x,y+h,x,y+h-r);
+  ctx.lineTo(x,y+r); ctx.quadraticCurveTo(x,y,x+r,y); ctx.closePath();
+}
+function drawLabel(ctx,text,x,y,color,layout,opts={}){
+  if(!text||!layout)return;
+  const padX=4,padY=2,lineH=12;
+  ctx.save(); ctx.font=opts.font||"10px Segoe UI, Arial"; ctx.textBaseline="middle";
+  const w=ctx.measureText(text).width+padX*2, h=lineH+padY*2;
+  const align=opts.align||"left";
+  const baseX=align==="center"?x-w/2:align==="right"?x-w:x;
+  const shifts=[0,-14,14,-28,28,-42,42,-56,56,-70,70,-84,84];
+  let chosen=null;
+  for(const dy of shifts){
+    const rx=clamp(baseX,layout.L+2,layout.L+layout.pw-w-2);
+    const ry=clamp(y+dy-h/2,layout.T+2,layout.T+layout.ph-h-2);
+    const rect={x:rx,y:ry,w,h};
+    if(!layout.boxes.some(b=>rectsOverlap(rect,b))){ chosen=rect; break; }
+    if(!chosen)chosen=rect;
+  }
+  layout.boxes.push(chosen);
+  ctx.fillStyle=opts.bg||"rgba(255,255,255,0.90)";
+  roundedRect(ctx,chosen.x,chosen.y,chosen.w,chosen.h,4); ctx.fill();
+  ctx.strokeStyle=opts.border||"rgba(15,23,42,0.18)"; ctx.stroke();
+  ctx.fillStyle=color||"#111827"; ctx.textAlign="left";
+  ctx.fillText(text,chosen.x+padX,chosen.y+chosen.h/2);
+  ctx.restore();
+}
 function drawCandles(ctx,vis,L,T,ph,xStep,cw,y){
   for(let i=0;i<vis.length;i++){ const b=vis[i]; const x=L+i*xStep+xStep/2; const c=b.close>=b.open?COLORS.up:COLORS.down; ctx.strokeStyle=c;ctx.fillStyle=c; ctx.beginPath();ctx.moveTo(x,y(b.high));ctx.lineTo(x,y(b.low));ctx.stroke(); const oy=y(b.open),cy=y(b.close); ctx.fillRect(x-cw/2,Math.min(oy,cy),cw,Math.max(1,Math.abs(oy-cy))); }
 }
-function drawPlotMarkers(ctx,vis,L,T,ph,xStep,y){
+function drawPlotMarkers(ctx,vis,L,T,ph,xStep,y,labelLayout){
   ctx.save(); ctx.font="10px Segoe UI, Arial"; ctx.textBaseline="middle";
   for(let i=0;i<vis.length;i++){
     const b=vis[i], x=L+i*xStep+xStep/2;
@@ -375,12 +415,43 @@ function drawPlotMarkers(ctx,vis,L,T,ph,xStep,y){
         ctx.arc(x,yy,5,0,Math.PI*2);
       }
       ctx.fill(); ctx.stroke();
-      if(p.text&&xStep>=18){ const textDx=p.text_dx??8, textDy=p.text_dy??0; ctx.lineWidth=1; ctx.fillStyle=color; ctx.textAlign="left"; ctx.fillText(p.text,x+textDx,yy+textDy); }
+      if(p.text&&xStep>=10){ const textDx=p.text_dx??8, textDy=p.text_dy??0; drawLabel(ctx,p.text,x+textDx,yy+textDy,color,labelLayout); }
     }
   }
   ctx.restore();
 }
-function drawTradePositions(ctx,visibleTrades,s,e,L,T,ph,xStep,y){
+function drawVolumeProfiles(ctx,vis,L,T,ph,xStep,y,tick,labelLayout){
+  if(!overlayOn("entry_vp")&&!overlayOn("volume_profiles"))return;
+  ctx.save(); ctx.font="10px Segoe UI, Arial"; ctx.textBaseline="middle";
+  for(let i=0;i<vis.length;i++){
+    const b=vis[i], x=L+i*xStep+xStep/2;
+    for(const p of (b.plots||[])){
+      if(p.kind!=="VolumeProfile"||!(p.levels||[]).length)continue;
+      if(!overlayOn(volumeProfileCat(p)))continue;
+      let maxVol=0;
+      for(const lv of p.levels)maxVol=Math.max(maxVol,(lv.buy_vol||0)+(lv.sell_vol||0));
+      if(!(maxVol>0))continue;
+      const width=Math.max(18,xStep*1.8), half=width/2;
+      let minY=Infinity,maxY=-Infinity;
+      for(const lv of p.levels){
+        const top=y(lv.price+tick/2), bot=y(lv.price-tick/2);
+        const yy=Math.min(top,bot), hh=Math.max(1,Math.abs(bot-top));
+        if(yy>T+ph||yy+hh<T)continue;
+        minY=Math.min(minY,yy); maxY=Math.max(maxY,yy+hh);
+        const sellW=half*((lv.sell_vol||0)/maxVol), buyW=half*((lv.buy_vol||0)/maxVol);
+        ctx.fillStyle="rgba(217,119,6,0.42)"; ctx.fillRect(x-sellW,yy,sellW,hh);
+        ctx.fillStyle="rgba(37,99,235,0.42)"; ctx.fillRect(x,yy,buyW,hh);
+      }
+      if(isFinite(minY)&&isFinite(maxY)){
+        ctx.strokeStyle="rgba(17,24,39,0.55)"; ctx.setLineDash([3,2]);
+        ctx.strokeRect(x-half,minY,width,Math.max(1,maxY-minY)); ctx.setLineDash([]);
+        if(xStep>=10){ drawLabel(ctx,"entry VP",x,Math.max(T+10,minY-8),"#111827",labelLayout,{align:"center"}); }
+      }
+    }
+  }
+  ctx.restore();
+}
+function drawTradePositions(ctx,visibleTrades,s,e,L,T,ph,xStep,y,labelLayout){
   ctx.save(); ctx.font="10px Segoe UI, Arial"; ctx.textBaseline="middle";
   for(const t of visibleTrades){
     if(t._xi<s||t._ei>e)continue;
@@ -391,8 +462,8 @@ function drawTradePositions(ctx,visibleTrades,s,e,L,T,ph,xStep,y){
     if(target!=null){ const top=Math.min(entry,target), h=Math.max(1,Math.abs(target-entry)); ctx.fillStyle="rgba(37,99,235,0.16)"; ctx.fillRect(x0,top,w,h); ctx.strokeStyle="rgba(37,99,235,0.65)"; ctx.strokeRect(x0,top,w,h); }
     if(stop!=null){ const top=Math.min(entry,stop), h=Math.max(1,Math.abs(stop-entry)); ctx.fillStyle="rgba(217,119,6,0.16)"; ctx.fillRect(x0,top,w,h); ctx.strokeStyle="rgba(217,119,6,0.65)"; ctx.strokeRect(x0,top,w,h); }
     ctx.strokeStyle="rgba(17,24,39,0.70)"; ctx.setLineDash([4,3]); ctx.beginPath();ctx.moveTo(x0,entry);ctx.lineTo(x0+w,entry);ctx.stroke(); ctx.setLineDash([]);
-    if(target!=null){ ctx.fillStyle=COLORS.up; ctx.fillText("TP",x0+4,target); }
-    if(stop!=null){ ctx.fillStyle=COLORS.down; ctx.fillText("SL",x0+4,stop); }
+    if(target!=null){ drawLabel(ctx,"TP",x0+4,target,COLORS.up,labelLayout); }
+    if(stop!=null){ drawLabel(ctx,"SL",x0+4,stop,COLORS.down,labelLayout); }
     ctx.strokeStyle=t.pnl>=0?"rgba(37,99,235,0.8)":"rgba(217,119,6,0.8)"; ctx.beginPath();ctx.moveTo(ex,entry);ctx.lineTo(xx,exit);ctx.stroke();
     ctx.fillStyle=t.dir>0?COLORS.up:COLORS.down; ctx.beginPath(); if(t.dir>0){ctx.moveTo(ex,entry-7);ctx.lineTo(ex-5,entry+2);ctx.lineTo(ex+5,entry+2);}else{ctx.moveTo(ex,entry+7);ctx.lineTo(ex-5,entry-2);ctx.lineTo(ex+5,entry-2);} ctx.closePath();ctx.fill();
     ctx.strokeStyle=t.pnl>=0?COLORS.up:COLORS.down; ctx.lineWidth=2; ctx.beginPath();ctx.moveTo(xx-4,exit-4);ctx.lineTo(xx+4,exit+4);ctx.moveTo(xx+4,exit-4);ctx.lineTo(xx-4,exit+4);ctx.stroke(); ctx.lineWidth=1;
@@ -456,15 +527,19 @@ function drawPrice(){
   if(chartMode==="heatmap"){ drawHeatmap(pctx,price,"price"); const [s,e]=viewRange(); $("range").textContent=`bars ${s+1}-${e} / ${fps.length}`; return; }
   const [s,e]=viewRange(); const vis=fps.slice(s,e); const L=64,R=16,T=14,B=34; const pw=Math.max(1,W-L-R),ph=Math.max(1,H-T-B);
   let lo=Infinity,hi=-Infinity; for(const b of vis){lo=Math.min(lo,b.low);hi=Math.max(hi,b.high);}
-  const pad=Math.max(0.25,(hi-lo)*0.06); lo-=pad;hi+=pad; [lo,hi]=applyYZoom("price",lo,hi); yZoom.price.lo=lo; yZoom.price.hi=hi; const y=p=>T+(hi-p)/(hi-lo)*ph; const xStep=pw/Math.max(1,vis.length); const cw=Math.max(1,Math.min(16,xStep*0.7));
+  const pad=Math.max(0.25,(hi-lo)*0.06); lo-=pad;hi+=pad; [lo,hi]=applyYZoom("price",lo,hi); yZoom.price.lo=lo; yZoom.price.hi=hi; const y=p=>T+(hi-p)/(hi-lo)*ph; const xStep=pw/Math.max(1,vis.length); const cw=Math.max(1,Math.min(16,xStep*0.7)); const tick=tickSizeFor(vis);
   if(overlayOn("bands")){ let i=0; while(i<vis.length){ const band=(vis[i].plots||[]).find(p=>p.kind==="BackgroundBand"); const col=band?band.color:null; let j=i+1; const same=k=>{const bb=(vis[k].plots||[]).find(p=>p.kind==="BackgroundBand"); return (bb?bb.color:null)===col;}; while(j<vis.length&&same(j))j++; if(col){pctx.fillStyle=col; pctx.fillRect(L+i*xStep,T,(j-i)*xStep,ph);} i=j; } }
   pctx.strokeStyle=COLORS.grid; pctx.fillStyle=COLORS.axis; pctx.font="11px Segoe UI, Arial"; pctx.lineWidth=1;
   for(let i=0;i<=6;i++){ const yy=T+ph*i/6,pr=hi-(hi-lo)*i/6; pctx.beginPath();pctx.moveTo(L,yy);pctx.lineTo(W-R,yy);pctx.stroke(); pctx.fillText(pr.toFixed(2),6,yy+4); }
   drawTimeAxis(pctx,vis,L,T,pw,ph,W,R);
-  if(chartMode==="footprint") drawFootprints(pctx,vis,L,T,ph,xStep,y,tickSizeFor(vis));
+  const labelLayout={boxes:[],L,T,pw,ph};
+  pctx.save(); clipPlot(pctx,L,T,pw,ph);
+  if(chartMode==="footprint") drawFootprints(pctx,vis,L,T,ph,xStep,y,tick);
   else drawCandles(pctx,vis,L,T,ph,xStep,cw,y);
-  drawPlotMarkers(pctx,vis,L,T,ph,xStep,y);
-  if(overlayOn("trades")) drawTradePositions(pctx,trades,s,e,L,T,ph,xStep,y);
+  drawVolumeProfiles(pctx,vis,L,T,ph,xStep,y,tick,labelLayout);
+  drawPlotMarkers(pctx,vis,L,T,ph,xStep,y,labelLayout);
+  if(overlayOn("trades")) drawTradePositions(pctx,trades,s,e,L,T,ph,xStep,y,labelLayout);
+  pctx.restore();
   pctx.strokeStyle="#9aa4b2"; pctx.strokeRect(L,T,pw,ph);
   if(hover&&hover.canvas==="price"){ const idx=clamp(Math.floor((hover.x-L)/xStep),0,vis.length-1); const b=vis[idx]; if(b){ const x=L+idx*xStep+xStep/2; pctx.strokeStyle="#111827";pctx.beginPath();pctx.moveTo(x,T);pctx.lineTo(x,T+ph);pctx.stroke(); const tags=b.tags?Object.entries(b.tags).map(([k,v])=>`${k}:${v}`).join(" "):""; const base=`${s+idx+1}/${fps.length}  ${fmtTs(b.ts_last_ns)}  O ${b.open.toFixed(2)} H ${b.high.toFixed(2)} L ${b.low.toFixed(2)} C ${b.close.toFixed(2)}  D ${fmt(b.delta,0)}  ${tags}`; if(chartMode==="footprint"){ const totals=footprintTotals(b); const priceAt=hi-(hover.y-T)/Math.max(1,ph)*(hi-lo); const lv=nearestFootprintLevel(b,priceAt); $("status").textContent=base+`  bar sell/buy ${fmt(totals.sell,0)}/${fmt(totals.buy,0)}  level ${lv?lv.price.toFixed(2):priceAt.toFixed(2)} sell/buy ${lv?fmt(lv.sell_vol,0):"-"}/${lv?fmt(lv.buy_vol,0):"-"}`; } else { $("status").textContent=base; } } }
   $("range").textContent=`bars ${s+1}-${e} / ${fps.length}`;
@@ -509,8 +584,12 @@ function drawHeatmap(ctx,canvas,hoverCanvas){
     }
   }
   drawTimeAxis(ctx,vis,L,T,pw,ph,W,R);
-  drawPlotMarkers(ctx,vis,L,T,ph,xStep,y);
-  if(overlayOn("trades")) drawTradePositions(ctx,trades,s,e,L,T,ph,xStep,y);
+  const labelLayout={boxes:[],L,T,pw,ph};
+  ctx.save(); clipPlot(ctx,L,T,pw,ph);
+  drawVolumeProfiles(ctx,vis,L,T,ph,xStep,y,tick,labelLayout);
+  drawPlotMarkers(ctx,vis,L,T,ph,xStep,y,labelLayout);
+  if(overlayOn("trades")) drawTradePositions(ctx,trades,s,e,L,T,ph,xStep,y,labelLayout);
+  ctx.restore();
   ctx.fillStyle="#334155"; ctx.font="11px Segoe UI, Arial"; ctx.fillText(`book liquidity: ${heatMetric}`,L+4,T+13);
   ctx.strokeStyle="#9aa4b2"; ctx.strokeRect(L,T,pw,ph);
   if(hover&&hover.canvas===hoverCanvas){
