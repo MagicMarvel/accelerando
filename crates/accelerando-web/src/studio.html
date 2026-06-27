@@ -50,7 +50,9 @@
   .seg button { border:0; border-radius:0; height:28px; padding:0 10px; }
   .seg button + button { border-left:1px solid #cbd5e1; }
   .seg button.active { background:#0f172a; color:#fff; }
-  .charts { display:grid; grid-template-rows:minmax(240px,1fr) 180px; min-height:0; }
+  .charts { --equity-height:180px; display:grid; grid-template-rows:minmax(160px,1fr) 7px minmax(80px,var(--equity-height)); min-height:0; }
+  .splitter { height:7px; cursor:row-resize; background:#eef2f7; border-top:1px solid #cbd5e1; border-bottom:1px solid #cbd5e1; }
+  .splitter:hover, .splitter.dragging { background:#dbeafe; }
   canvas { display:block; width:100%; height:100%; background:#fbfcfe; cursor:grab; }
   canvas.dragging { cursor:grabbing; }
   .empty { display:flex; align-items:center; justify-content:center; height:100%; color:#94a3b8; font-size:14px; }
@@ -106,6 +108,7 @@
     </div>
     <div class="charts">
       <canvas id="price"></canvas>
+      <div id="chartSplitter" class="splitter" title="拖动调整上下图高度"></div>
       <canvas id="equity"></canvas>
     </div>
   </section>
@@ -113,7 +116,7 @@
 <script>
 const COLORS = { up:"#2563eb", down:"#d97706", grid:"#e2e8f0", axis:"#475569" };
 let SCHEMA=null, CONFIG=null, DATA=null, fps=[], eq=[], trades=[];
-let barsPerView=300, start=0, hover=null, drag=null, chartMode="candles", heatMetric="total", poll=null;
+let barsPerView=300, start=0, hover=null, drag=null, splitDrag=null, chartMode="candles", heatMetric="total", poll=null;
 // Overlay visibility, keyed by category ("bands", "trades", or a marker group). Persisted across
 // re-renders so a hidden overlay stays hidden when the result is reloaded.
 let overlayState={};
@@ -125,6 +128,7 @@ let yZoom={price:{manual:false,lo:null,hi:null},equity:{manual:false,lo:null,hi:
 const $ = id => document.getElementById(id);
 const price=$("price"), pctx=price.getContext("2d");
 const equity=$("equity"), ectx=equity.getContext("2d");
+const charts=document.querySelector(".charts"), splitter=$("chartSplitter");
 const clamp=(v,a,b)=>Math.max(a,Math.min(b,v));
 const fmt=(n,d=2)=>(n===null||n===undefined||!isFinite(n))?"–":Number(n).toLocaleString(undefined,{maximumFractionDigits:d,minimumFractionDigits:d});
 const fmtTs=ns=>new Date(Number(ns)/1e6).toLocaleString();
@@ -270,7 +274,10 @@ async function checkProgress(){
   }
 }
 async function loadResult(){
-  const data=await (await fetch("/api/result")).json();
+  const r=await fetch("/api/result");
+  if(!r.ok) throw new Error(`/api/result: ${r.status}`);
+  const data=await r.json();
+  if(data&&data.error) throw new Error(data.error);
   renderResult(data);
 }
 
@@ -420,7 +427,7 @@ function drawPlotMarkers(ctx,vis,L,T,ph,xStep,y,labelLayout){
   }
   ctx.restore();
 }
-function drawVolumeProfiles(ctx,vis,L,T,ph,xStep,y,tick,labelLayout){
+function drawVolumeProfiles(ctx,vis,L,T,pw,ph,xStep,y,tick,labelLayout){
   if(!overlayOn("entry_vp")&&!overlayOn("volume_profiles"))return;
   ctx.save(); ctx.font="10px Segoe UI, Arial"; ctx.textBaseline="middle";
   for(let i=0;i<vis.length;i++){
@@ -431,7 +438,10 @@ function drawVolumeProfiles(ctx,vis,L,T,ph,xStep,y,tick,labelLayout){
       let maxVol=0;
       for(const lv of p.levels)maxVol=Math.max(maxVol,(lv.buy_vol||0)+(lv.sell_vol||0));
       if(!(maxVol>0))continue;
-      const width=Math.max(18,xStep*1.8), half=width/2;
+      const span=Math.max(1,Math.round(p.span||1));
+      const x0=clamp(L+(i-span+1)*xStep,L,L+pw);
+      const x1=clamp(L+(i+1)*xStep,L,L+pw);
+      const width=Math.max(18,x1-x0), half=width/2, mid=x0+width/2;
       let minY=Infinity,maxY=-Infinity;
       for(const lv of p.levels){
         const top=y(lv.price+tick/2), bot=y(lv.price-tick/2);
@@ -439,13 +449,13 @@ function drawVolumeProfiles(ctx,vis,L,T,ph,xStep,y,tick,labelLayout){
         if(yy>T+ph||yy+hh<T)continue;
         minY=Math.min(minY,yy); maxY=Math.max(maxY,yy+hh);
         const sellW=half*((lv.sell_vol||0)/maxVol), buyW=half*((lv.buy_vol||0)/maxVol);
-        ctx.fillStyle="rgba(217,119,6,0.42)"; ctx.fillRect(x-sellW,yy,sellW,hh);
-        ctx.fillStyle="rgba(37,99,235,0.42)"; ctx.fillRect(x,yy,buyW,hh);
+        ctx.fillStyle="rgba(217,119,6,0.42)"; ctx.fillRect(mid-sellW,yy,sellW,hh);
+        ctx.fillStyle="rgba(37,99,235,0.42)"; ctx.fillRect(mid,yy,buyW,hh);
       }
       if(isFinite(minY)&&isFinite(maxY)){
         ctx.strokeStyle="rgba(17,24,39,0.55)"; ctx.setLineDash([3,2]);
-        ctx.strokeRect(x-half,minY,width,Math.max(1,maxY-minY)); ctx.setLineDash([]);
-        if(xStep>=10){ drawLabel(ctx,"entry VP",x,Math.max(T+10,minY-8),"#111827",labelLayout,{align:"center"}); }
+        ctx.strokeRect(mid-half,minY,width,Math.max(1,maxY-minY)); ctx.setLineDash([]);
+        if(xStep>=10){ drawLabel(ctx,"entry VP",mid,Math.max(T+10,minY-8),"#111827",labelLayout,{align:"center"}); }
       }
     }
   }
@@ -536,7 +546,7 @@ function drawPrice(){
   pctx.save(); clipPlot(pctx,L,T,pw,ph);
   if(chartMode==="footprint") drawFootprints(pctx,vis,L,T,ph,xStep,y,tick);
   else drawCandles(pctx,vis,L,T,ph,xStep,cw,y);
-  drawVolumeProfiles(pctx,vis,L,T,ph,xStep,y,tick,labelLayout);
+  drawVolumeProfiles(pctx,vis,L,T,pw,ph,xStep,y,tick,labelLayout);
   drawPlotMarkers(pctx,vis,L,T,ph,xStep,y,labelLayout);
   if(overlayOn("trades")) drawTradePositions(pctx,trades,s,e,L,T,ph,xStep,y,labelLayout);
   pctx.restore();
@@ -586,7 +596,7 @@ function drawHeatmap(ctx,canvas,hoverCanvas){
   drawTimeAxis(ctx,vis,L,T,pw,ph,W,R);
   const labelLayout={boxes:[],L,T,pw,ph};
   ctx.save(); clipPlot(ctx,L,T,pw,ph);
-  drawVolumeProfiles(ctx,vis,L,T,ph,xStep,y,tick,labelLayout);
+  drawVolumeProfiles(ctx,vis,L,T,pw,ph,xStep,y,tick,labelLayout);
   drawPlotMarkers(ctx,vis,L,T,ph,xStep,y,labelLayout);
   if(overlayOn("trades")) drawTradePositions(ctx,trades,s,e,L,T,ph,xStep,y,labelLayout);
   ctx.restore();
@@ -599,7 +609,9 @@ function drawHeatmap(ctx,canvas,hoverCanvas){
 }
 function drawEquity(){
   const W=equity.clientWidth,H=equity.clientHeight; ectx.clearRect(0,0,W,H); ectx.fillStyle="#fff"; ectx.fillRect(0,0,W,H);
-  if(!eq.length)return; const [s,e]=viewRange(); const vis=eq.slice(Math.min(s,eq.length-1),Math.min(e,eq.length));
+  if(!eq.length)return; const [s,e]=viewRange();
+  const vis=eq.slice(Math.min(s,eq.length-1),Math.min(e,eq.length));
+  if(!vis.length)return;
   const L=64,R=16,T=12,B=30; const pw=Math.max(1,W-L-R),ph=Math.max(1,H-T-B);
   let lo=Infinity,hi=-Infinity; for(const p of vis){lo=Math.min(lo,p.equity);hi=Math.max(hi,p.equity);} if(!(isFinite(lo)&&isFinite(hi))||lo===hi){lo-=1;hi+=1;} const pad=(hi-lo)*0.08; lo-=pad;hi+=pad;
   [lo,hi]=applyYZoom("equity",lo,hi); yZoom.equity.lo=lo; yZoom.equity.hi=hi;
@@ -607,8 +619,10 @@ function drawEquity(){
   ectx.strokeStyle=COLORS.grid; ectx.fillStyle=COLORS.axis; ectx.font="11px Segoe UI, Arial";
   for(let i=0;i<=3;i++){ const yy=T+ph*i/3,vv=hi-(hi-lo)*i/3; ectx.beginPath();ectx.moveTo(L,yy);ectx.lineTo(W-R,yy);ectx.stroke(); ectx.fillText("$"+vv.toFixed(0),6,yy+4); }
   drawTimeAxis(ectx,vis,L,T,pw,ph,W,R,"ts_ns");
+  ectx.save(); clipPlot(ectx,L,T,pw,ph);
   if(startEq>=lo&&startEq<=hi){ ectx.strokeStyle="#cbd5e1";ectx.setLineDash([4,4]); ectx.beginPath();ectx.moveTo(L,y(startEq));ectx.lineTo(W-R,y(startEq));ectx.stroke();ectx.setLineDash([]); }
   ectx.strokeStyle="#2563eb"; ectx.lineWidth=1.6; ectx.beginPath(); for(let i=0;i<vis.length;i++){const x=L+(i+0.5)*xStep,yy=y(vis[i].equity); i?ectx.lineTo(x,yy):ectx.moveTo(x,yy);} ectx.stroke(); ectx.lineWidth=1;
+  ectx.restore();
   ectx.fillStyle="#64748b"; ectx.fillText("equity",L+4,T+12); ectx.strokeStyle="#9aa4b2"; ectx.strokeRect(L,T,pw,ph);
 }
 function draw(){ drawPrice(); drawEquity(); }
@@ -620,6 +634,19 @@ function attach(canvas,name){
   canvas.addEventListener("mouseleave",()=>{hover=null;draw();});
 }
 window.addEventListener("mouseup",()=>{drag=null; price.classList.remove("dragging"); equity.classList.remove("dragging");});
+splitter.addEventListener("mousedown",ev=>{
+  splitDrag={y:ev.clientY,h:equity.getBoundingClientRect().height};
+  splitter.classList.add("dragging");
+  ev.preventDefault();
+});
+window.addEventListener("mousemove",ev=>{
+  if(!splitDrag)return;
+  const total=charts.getBoundingClientRect().height;
+  const next=clamp(splitDrag.h-(ev.clientY-splitDrag.y),80,Math.max(80,total-180));
+  charts.style.setProperty("--equity-height",`${Math.round(next)}px`);
+  resize();
+});
+window.addEventListener("mouseup",()=>{splitDrag=null; splitter.classList.remove("dragging");});
 attach(price,"price"); attach(equity,"equity");
 $("zoomIn").onclick=()=>setBarsPerView(barsPerView*0.75,0.5);
 $("zoomOut").onclick=()=>setBarsPerView(barsPerView*1.35,0.5);
@@ -637,7 +664,7 @@ async function init(){
   $("status").textContent="result viewer";
   resize();
   try{ await loadResult(); }
-  catch(err){ $("status").textContent="无法加载 result"; }
+  catch(err){ $("status").textContent="无法加载 result: "+(err&&err.message?err.message:err); }
 }
 init();
 </script>
