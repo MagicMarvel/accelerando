@@ -127,7 +127,7 @@ where
             "/" | "/index.html" => html_response(EXPERIMENT_HTML),
             "/run" | "/run.html" => {
                 let run_id = query_param(&raw_url, "id").unwrap_or_default();
-                html_response(&studio_html_for_run(&run_id))
+                html_response(&studio_html_for_run(&run_id, &summaries))
             }
             "/api/experiment" => json_response(&summary_json),
             "/api/result" | "/result.json" => {
@@ -149,12 +149,18 @@ where
     Ok(())
 }
 
-fn studio_html_for_run(run_id: &str) -> String {
+fn studio_html_for_run(run_id: &str, runs: &[ExperimentRunSummary]) -> String {
     let escaped = json_string(run_id);
+    let strategy = runs
+        .iter()
+        .find(|run| run.id == run_id)
+        .map(|run| run.strategy.as_str())
+        .unwrap_or("");
+    let escaped_strategy = json_string(strategy);
     STUDIO_HTML.replace(
         "const price=$(\"price\"), pctx=price.getContext(\"2d\");",
         &format!(
-            "const RUN_ID={escaped};\nconst price=$(\"price\"), pctx=price.getContext(\"2d\");"
+            "const RUN_ID={escaped};\nconst RUN_STRATEGY={escaped_strategy};\nconst price=$(\"price\"), pctx=price.getContext(\"2d\");"
         ),
     )
     .replace("fetch(\"/api/result\")", "fetch(\"/api/result?id=\"+encodeURIComponent(RUN_ID))")

@@ -13,6 +13,7 @@ pub const DELTA: &str = "big_trade_delta";
 pub const TOTAL_BUY: &str = "big_trade_total_buy";
 pub const TOTAL_SELL: &str = "big_trade_total_sell";
 pub const COUNT: &str = "big_trade_count";
+pub const THRESHOLD: &str = "big_trade_threshold";
 
 #[derive(Clone, Copy, Debug, Default)]
 struct BigLevel {
@@ -20,17 +21,44 @@ struct BigLevel {
     sell: f64,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum BigTradeMode {
+    Single,
+    Cumulative,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ThresholdMode {
+    Fixed,
+    Adaptive,
+}
+
+#[derive(Clone, Debug)]
+struct PendingCumulative {
+    side: Side,
+    by_tick: BTreeMap<i64, f64>,
+    total: f64,
+}
+
 /// ATAS-style big trade indicator.
 ///
-/// It watches raw trade events, keeps only trades at or above `min_trade_size`, aggregates them by
-/// price inside the current footprint, exposes summary values for strategies, and optionally plots
-/// the big-trade nodes directly on the footprint chart.
+/// In `single` mode it keeps trades at or above `min_trade_size`. In `cumulative` mode it groups
+/// consecutive same-side trades and keeps the whole group when its total reaches the threshold.
+/// Both modes aggregate accepted volume by price inside the current footprint.
 pub struct BigTrades {
+    mode: BigTradeMode,
+    threshold_mode: ThresholdMode,
     min_trade_size: f64,
+    max_trade_size: f64,
+    lookback_bars: usize,
+    sensitivity: f64,
     edge_band_ticks: f64,
     tick: f64,
     plot_markers: bool,
     max_markers_per_side: usize,
+    pending: Option<PendingCumulative>,
+    current_candidate_max: f64,
+    prior_candidate_max: Vec<f64>,
     by_tick: BTreeMap<i64, BigLevel>,
     total_buy: f64,
     total_sell: f64,
@@ -40,7 +68,12 @@ pub struct BigTrades {
 impl Configurable for BigTrades {
     fn param_spec() -> ParamSpec {
         ParamSpec::new()
+            .choice("mode", "single", &["single", "cumulative"])
+            .choice("threshold_mode", "fixed", &["fixed", "adaptive"])
             .float("min_trade_size", 25.0, 1.0, 5000.0)
+            .float("max_trade_size", 500.0, 1.0, 20000.0)
+            .int("lookback_bars", 20, 3, 200, 1)
+            .float("sensitivity", 1.0, 0.0, 4.0)
             .int("edge_band_ticks", 16, 1, 120, 1)
             .fixed_float("tick", 0.25)
             .int("plot_markers", 1, 0, 1, 1)
@@ -48,12 +81,28 @@ impl Configurable for BigTrades {
     }
 
     fn from_params(p: &Params) -> Self {
+        let mode = match p.str("mode", "single").as_str() {
+            "cumulative" => BigTradeMode::Cumulative,
+            _ => BigTradeMode::Single,
+        };
+        let min_trade_size = p.float("min_trade_size", 25.0).max(1.0);
         Self {
-            min_trade_size: p.float("min_trade_size", 25.0).max(1.0),
+            mode,
+            threshold_mode: match p.str("threshold_mode", "fixed").as_str() {
+                "adaptive" => ThresholdMode::Adaptive,
+                _ => ThresholdMode::Fixed,
+            },
+            min_trade_size,
+            max_trade_size: p.float("max_trade_size", 500.0).max(min_trade_size),
+            lookback_bars: p.usize("lookback_bars", 20).max(1),
+            sensitivity: p.float("sensitivity", 1.0).max(0.0),
             edge_band_ticks: p.int("edge_band_ticks", 16) as f64,
             tick: p.float("tick", 0.25).max(f64::EPSILON),
             plot_markers: p.int("plot_markers", 1) != 0,
             max_markers_per_side: p.usize("max_markers_per_side", 8).max(1),
+            pending: None,
+            current_candidate_max: 0.0,
+            prior_candidate_max: Vec::new(),
             by_tick: BTreeMap::new(),
             total_buy: 0.0,
             total_sell: 0.0,
@@ -83,28 +132,19 @@ impl Indicator for BigTrades {
                 size,
                 aggressor,
                 ..
-            } if size >= self.min_trade_size => {
-                let level = self.by_tick.entry(self.price_key(price)).or_default();
-                match aggressor {
-                    Side::Buy => {
-                        level.buy += size;
-                        self.total_buy += size;
-                    }
-                    Side::Sell => {
-                        level.sell += size;
-                        self.total_sell += size;
-                    }
-                }
-                self.count += 1;
-            }
+            } => self.on_trade(price, size, aggressor),
             _ => {}
         }
     }
 
     fn on_footprint(&mut self, fp: &mut Footprint, _history: &[Footprint]) {
+        self.flush_pending_cumulative();
+
+        let threshold = self.threshold();
         let buy_edge = self.best_buy_edge(fp);
         let sell_edge = self.best_sell_edge(fp);
 
+        fp.values.insert(THRESHOLD.to_string(), threshold);
         fp.values.insert(TOTAL_BUY.to_string(), self.total_buy);
         fp.values.insert(TOTAL_SELL.to_string(), self.total_sell);
         fp.values
@@ -131,11 +171,110 @@ impl Indicator for BigTrades {
             self.plot_big_trades(fp);
         }
 
+        self.push_prior_candidate();
         self.clear_bar();
     }
 }
 
 impl BigTrades {
+    fn on_trade(&mut self, price: f64, size: f64, side: Side) {
+        match self.mode {
+            BigTradeMode::Single => {
+                self.current_candidate_max = self.current_candidate_max.max(size);
+                if size >= self.threshold() {
+                    self.record_big_trade(self.price_key(price), size, side);
+                    self.count += 1;
+                }
+            }
+            BigTradeMode::Cumulative => self.on_cumulative_trade(price, size, side),
+        }
+    }
+
+    fn on_cumulative_trade(&mut self, price: f64, size: f64, side: Side) {
+        let key = self.price_key(price);
+        let side_changed = self
+            .pending
+            .as_ref()
+            .is_some_and(|pending| pending.side != side);
+        if side_changed {
+            self.flush_pending_cumulative();
+        }
+
+        let pending = self.pending.get_or_insert_with(|| PendingCumulative {
+            side,
+            by_tick: BTreeMap::new(),
+            total: 0.0,
+        });
+        *pending.by_tick.entry(key).or_default() += size;
+        pending.total += size;
+    }
+
+    fn flush_pending_cumulative(&mut self) {
+        let Some(pending) = self.pending.take() else {
+            return;
+        };
+        self.current_candidate_max = self.current_candidate_max.max(pending.total);
+        if pending.total < self.threshold() {
+            return;
+        }
+        for (key, size) in pending.by_tick {
+            self.record_big_trade(key, size, pending.side);
+        }
+        self.count += 1;
+    }
+
+    fn threshold(&self) -> f64 {
+        if self.threshold_mode == ThresholdMode::Fixed || self.prior_candidate_max.is_empty() {
+            return self.min_trade_size;
+        }
+        let values: Vec<f64> = self
+            .prior_candidate_max
+            .iter()
+            .rev()
+            .take(self.lookback_bars)
+            .copied()
+            .filter(|v| v.is_finite() && *v > 0.0)
+            .collect();
+        if values.is_empty() {
+            return self.min_trade_size;
+        }
+        let mean = values.iter().sum::<f64>() / values.len() as f64;
+        let var = values
+            .iter()
+            .map(|v| {
+                let diff = *v - mean;
+                diff * diff
+            })
+            .sum::<f64>()
+            / values.len() as f64;
+        (mean + self.sensitivity * var.sqrt()).clamp(self.min_trade_size, self.max_trade_size)
+    }
+
+    fn push_prior_candidate(&mut self) {
+        if self.current_candidate_max > 0.0 {
+            self.prior_candidate_max.push(self.current_candidate_max);
+        }
+        let max_keep = self.lookback_bars.saturating_mul(4).max(self.lookback_bars + 1);
+        if self.prior_candidate_max.len() > max_keep {
+            let remove = self.prior_candidate_max.len() - max_keep;
+            self.prior_candidate_max.drain(0..remove);
+        }
+    }
+
+    fn record_big_trade(&mut self, key: i64, size: f64, side: Side) {
+        let level = self.by_tick.entry(key).or_default();
+        match side {
+            Side::Buy => {
+                level.buy += size;
+                self.total_buy += size;
+            }
+            Side::Sell => {
+                level.sell += size;
+                self.total_sell += size;
+            }
+        }
+    }
+
     fn price_key(&self, price: f64) -> i64 {
         (price / self.tick).round() as i64
     }
@@ -201,6 +340,8 @@ impl BigTrades {
     }
 
     fn clear_bar(&mut self) {
+        self.pending = None;
+        self.current_candidate_max = 0.0;
         self.by_tick.clear();
         self.total_buy = 0.0;
         self.total_sell = 0.0;

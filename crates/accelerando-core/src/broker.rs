@@ -47,6 +47,8 @@ enum Desired {
     },
 }
 
+const LIMIT_ORDER_TTL_BARS: usize = 8;
+
 #[derive(Clone, Copy, Debug)]
 struct Position {
     dir: i32,
@@ -66,6 +68,7 @@ pub struct Broker {
     peak_equity: f64,
     position: Option<Position>,
     pending: Option<Desired>,
+    pending_age: usize,
     pub trades: Vec<Trade>,
     pub equity: Vec<EquityPoint>,
 }
@@ -80,6 +83,7 @@ impl Broker {
             peak_equity: cfg.starting_equity,
             position: None,
             pending: None,
+            pending_age: 0,
             trades: Vec::new(),
             equity: Vec::new(),
         }
@@ -167,7 +171,12 @@ impl Broker {
     pub fn on_new_footprint(&mut self, fp: &Footprint) {
         // 1) Realize the pending desired transition at this bar's open.
         if let Some(desired) = self.pending.take() {
-            self.transition(desired, fp);
+            if self.transition(desired, fp) {
+                self.pending = Some(desired);
+                self.pending_age += 1;
+            } else {
+                self.pending_age = 0;
+            }
         }
         // 2) Intrabar stop/target check against this bar's range.
         self.check_exits(fp);
@@ -181,7 +190,7 @@ impl Broker {
         });
     }
 
-    fn transition(&mut self, desired: Desired, fp: &Footprint) {
+    fn transition(&mut self, desired: Desired, fp: &Footprint) -> bool {
         let open = fp.open;
         let ts = fp.ts_first_ns;
         let (want_dir, qty, st, tt, entry_min, entry_max, entry_limit) = match desired {
@@ -205,24 +214,25 @@ impl Broker {
         };
         let cur_dir = self.position.map(|p| p.dir).unwrap_or(0);
         if cur_dir == want_dir {
-            return;
+            return false;
         }
         if want_dir == 0 {
             if self.position.is_some() {
                 self.close_position(self.slip(open, -cur_dir), ts, TradeReason::Signal);
             }
-            return;
+            return false;
         }
         let Some(fill_px) = next_bar_entry_fill(fp, want_dir, entry_limit) else {
-            return;
+            return entry_limit.is_some() && self.pending_age < LIMIT_ORDER_TTL_BARS;
         };
         if !price_in_band(fill_px, entry_min, entry_max) {
-            return;
+            return false;
         }
         if self.position.is_some() {
             self.close_position(self.slip(open, -cur_dir), ts, TradeReason::Signal);
         }
         self.open_position(want_dir, qty, self.slip(fill_px, want_dir), ts, st, tt);
+        false
     }
 
     fn check_exits(&mut self, fp: &Footprint) {
@@ -266,6 +276,7 @@ impl Broker {
     /// Queue the strategy's desired position for the next bar's open.
     fn set_pending(&mut self, desired: Desired) {
         self.pending = Some(desired);
+        self.pending_age = 0;
     }
 
     fn current_dir(&self) -> i32 {

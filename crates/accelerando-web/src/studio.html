@@ -326,11 +326,17 @@ function overlayCategories(){
   if(trades.length)cats.push("trades");
   return cats;
 }
+function defaultOverlayState(cat){
+  const strategy=typeof RUN_STRATEGY==="string"?RUN_STRATEGY:"";
+  if(strategy==="delta_regime") return cat!=="big_trades";
+  if(strategy==="big_trade_regime") return cat!=="imbalance";
+  return true;
+}
 function buildOverlayToggles(){
   const host=$("overlayToggles"); if(!host)return;
   host.innerHTML="";
   for(const cat of overlayCategories()){
-    if(!(cat in overlayState))overlayState[cat]=true;
+    if(!(cat in overlayState))overlayState[cat]=defaultOverlayState(cat);
     const lab=document.createElement("label");
     lab.style.cssText="font-size:12px;color:#374151;display:inline-flex;gap:6px;align-items:center;";
     const cb=document.createElement("input"); cb.type="checkbox"; cb.checked=overlayState[cat]!==false;
@@ -436,9 +442,13 @@ function drawVolumeProfiles(ctx,vis,L,T,pw,ph,xStep,y,tick,labelLayout){
     for(const p of (b.plots||[])){
       if(p.kind!=="VolumeProfile"||!(p.levels||[]).length)continue;
       if(!overlayOn(volumeProfileCat(p)))continue;
-      let maxVol=0;
-      for(const lv of p.levels)maxVol=Math.max(maxVol,(lv.buy_vol||0)+(lv.sell_vol||0));
-      if(!(maxVol>0))continue;
+      let maxProfile=0,maxDelta=0;
+      for(const lv of p.levels){
+        const buy=lv.buy_vol||0,sell=lv.sell_vol||0;
+        maxProfile=Math.max(maxProfile,buy+sell);
+        maxDelta=Math.max(maxDelta,Math.abs(buy-sell));
+      }
+      if(!(maxProfile>0))continue;
       const span=Math.max(1,Math.round(p.span||1));
       const x0=clamp(L+(i-span+1)*xStep,L,L+pw);
       const x1=clamp(L+(i+1)*xStep,L,L+pw);
@@ -449,9 +459,14 @@ function drawVolumeProfiles(ctx,vis,L,T,pw,ph,xStep,y,tick,labelLayout){
         const yy=Math.min(top,bot), hh=Math.max(1,Math.abs(bot-top));
         if(yy>T+ph||yy+hh<T)continue;
         minY=Math.min(minY,yy); maxY=Math.max(maxY,yy+hh);
-        const sellW=half*((lv.sell_vol||0)/maxVol), buyW=half*((lv.buy_vol||0)/maxVol);
-        ctx.fillStyle="rgba(217,119,6,0.42)"; ctx.fillRect(mid-sellW,yy,sellW,hh);
-        ctx.fillStyle="rgba(37,99,235,0.42)"; ctx.fillRect(mid,yy,buyW,hh);
+        const buy=lv.buy_vol||0,sell=lv.sell_vol||0,total=buy+sell,delta=buy-sell;
+        const deltaN=maxDelta>0?Math.min(1,Math.abs(delta)/maxDelta):0;
+        const profileN=Math.min(1,total/maxProfile);
+        const deltaW=half*deltaN, profileW=half*profileN;
+        ctx.fillStyle=delta>=0?"#2563eb":"#d97706";
+        ctx.fillRect(mid-deltaW,yy,Math.max(1,deltaW),hh);
+        ctx.fillStyle="#64748b";
+        ctx.fillRect(mid,yy,Math.max(1,profileW),hh);
       }
       if(isFinite(minY)&&isFinite(maxY)){
         ctx.strokeStyle="rgba(17,24,39,0.55)"; ctx.setLineDash([3,2]);
@@ -501,7 +516,7 @@ function drawFootprints(ctx,vis,L,T,ph,xStep,y,tick){
     }
   }
   if(maxVol<=0){ drawCandles(ctx,vis,L,T,ph,xStep,Math.max(1,Math.min(16,xStep*0.7)),y); return; }
-  const barW=Math.max(2,xStep*0.92), half=barW/2, showProfile=xStep>=14, showFull=xStep>=70, showText=xStep>=36, showExtraText=xStep>=92, showSummary=xStep>=24;
+  const barW=Math.max(2,xStep*0.92), half=barW/2, showProfile=true, showFull=xStep>=70, showText=xStep>=36, showExtraText=xStep>=92, showSummary=xStep>=24;
   ctx.font="9px Segoe UI, Arial"; ctx.textBaseline="middle";
   for(let i=0;i<vis.length;i++){
     const b=vis[i], x=L+i*xStep+xStep/2, x0=x-half;
