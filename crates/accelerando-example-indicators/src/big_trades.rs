@@ -1,7 +1,8 @@
 use std::collections::BTreeMap;
 
 use accelerando_core::{
-    Configurable, Footprint, Indicator, OrderFlowEvent, ParamSpec, Params, Plot, Side,
+    Configurable, EventInterest, Footprint, Indicator, OrderFlowEvent, ParamSpec, Params, Plot,
+    Side,
 };
 
 pub const BUY_EDGE_PRICE: &str = "big_trade_buy_edge_price";
@@ -62,6 +63,10 @@ impl Configurable for BigTrades {
 }
 
 impl Indicator for BigTrades {
+    fn event_interest(&self) -> EventInterest {
+        EventInterest::CONTRACT.union(EventInterest::TRADE)
+    }
+
     fn name(&self) -> &str {
         "big_trades"
     }
