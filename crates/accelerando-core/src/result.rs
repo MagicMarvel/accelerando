@@ -80,3 +80,27 @@ pub struct BacktestResult {
     pub tick_size: f64,
     pub multiplier: f64,
 }
+
+/// Lightweight metadata and metrics for one run in a multi-run experiment.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ExperimentRunSummary {
+    pub id: String,
+    pub label: String,
+    pub strategy: String,
+    #[serde(default)]
+    pub params: serde_json::Value,
+    pub metrics: Metrics,
+}
+
+/// A complete multi-run experiment result.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ExperimentResult {
+    pub runs: Vec<ExperimentRun>,
+}
+
+/// One complete experiment run, including chartable backtest data.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ExperimentRun {
+    pub summary: ExperimentRunSummary,
+    pub result: BacktestResult,
+}

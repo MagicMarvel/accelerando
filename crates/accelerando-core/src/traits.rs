@@ -2,7 +2,7 @@
 //! adapters and they slot straight into the engine and the hyperopt search space.
 
 use crate::broker::OrderCtx;
-use crate::event::OrderFlowEvent;
+use crate::event::{EventInterest, OrderFlowEvent};
 use crate::footprint::Footprint;
 use crate::progress::ProgressHandle;
 
@@ -15,6 +15,10 @@ pub trait DataSource {
     /// Consume the source and yield its events in chronological order.
     fn events(self: Box<Self>) -> Box<dyn Iterator<Item = OrderFlowEvent>>;
 
+    /// Optionally receive the event classes needed downstream, so sources can skip parsing rows
+    /// that no component will consume.
+    fn set_event_interest(&mut self, _interest: EventInterest) {}
+
     /// Optionally accept a progress handle to report input consumption (default: ignore).
     /// Sources that know their size (e.g. a CSV) should set the total and add bytes as they read.
     fn set_progress(&mut self, _progress: ProgressHandle) {}
@@ -22,6 +26,11 @@ pub trait DataSource {
 
 /// Folds order-flow events into footprints, emitting one when a bar boundary is crossed.
 pub trait FootprintAggregator {
+    /// Event classes this aggregator needs. Override to skip irrelevant hot-loop calls.
+    fn event_interest(&self) -> EventInterest {
+        EventInterest::ALL
+    }
+
     /// Feed one event. Returns the just-completed footprint, if this event closed a bar.
     fn on_event(&mut self, ev: &OrderFlowEvent) -> Option<Footprint>;
     /// Emit any partially-built footprint at end of stream.
@@ -34,6 +43,11 @@ pub trait FootprintAggregator {
 /// completed footprints through [`Indicator::on_footprint`]. Footprint callbacks are causal: they
 /// see only the current footprint and the completed history before it.
 pub trait Indicator {
+    /// Event classes this indicator consumes through [`Indicator::on_event`].
+    fn event_interest(&self) -> EventInterest {
+        EventInterest::NONE
+    }
+
     /// Called once for every normalized order-flow event.
     fn on_event(&mut self, _ev: &OrderFlowEvent) {}
 
@@ -46,6 +60,11 @@ pub trait Indicator {
 
 /// Decides position changes from order-flow events and/or enriched footprints.
 pub trait Strategy {
+    /// Event classes this strategy consumes through [`Strategy::on_event`].
+    fn event_interest(&self) -> EventInterest {
+        EventInterest::NONE
+    }
+
     /// Called once for every normalized order-flow event.
     ///
     /// The current broker still applies the existing bar/footprint fill model. Event-driven

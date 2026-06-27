@@ -49,3 +49,31 @@ pub enum OrderFlowEvent {
         side: Side,
     },
 }
+
+/// Bitmask describing which event classes a component wants to receive in the hot loop.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct EventInterest(u8);
+
+impl EventInterest {
+    pub const NONE: Self = Self(0);
+    pub const CONTRACT: Self = Self(1 << 0);
+    pub const TRADE: Self = Self(1 << 1);
+    pub const L2: Self = Self(1 << 2);
+    pub const ALL: Self = Self(Self::CONTRACT.0 | Self::TRADE.0 | Self::L2.0);
+
+    pub fn contains(self, other: Self) -> bool {
+        self.0 & other.0 != 0
+    }
+
+    pub fn union(self, other: Self) -> Self {
+        Self(self.0 | other.0)
+    }
+
+    pub fn matches(self, ev: &OrderFlowEvent) -> bool {
+        self.contains(match ev {
+            OrderFlowEvent::Contract { .. } => Self::CONTRACT,
+            OrderFlowEvent::Trade { .. } => Self::TRADE,
+            OrderFlowEvent::AddLimit { .. } | OrderFlowEvent::ReduceLimit { .. } => Self::L2,
+        })
+    }
+}

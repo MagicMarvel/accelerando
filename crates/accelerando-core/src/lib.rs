@@ -19,14 +19,18 @@ pub mod result;
 pub mod traits;
 
 pub use broker::{Broker, BrokerConfig, OrderCtx};
-pub use engine::{run_backtest, run_backtest_progress, Pipeline};
-pub use event::{OrderFlowEvent, Side};
+pub use engine::{
+    prepare_backtest_data, run_backtest, run_backtest_progress, run_prepared_backtest, Pipeline,
+    PreparedBacktestData,
+};
+pub use event::{EventInterest, OrderFlowEvent, Side};
 pub use footprint::{Footprint, Level, Plot, VpLevel};
 pub use metrics::Metrics;
 pub use params::{Configurable, ParamRange, ParamSpec, ParamValue, Params};
 pub use progress::{ProgressHandle, ProgressSnapshot};
 pub use registry::Registry;
 pub use result::{
-    BacktestResult, LiquidityHeatmap, LiquidityLevel, LiquiditySnapshot, Trade, TradeReason,
+    BacktestResult, ExperimentResult, ExperimentRun, ExperimentRunSummary, LiquidityHeatmap,
+    LiquidityLevel, LiquiditySnapshot, Trade, TradeReason,
 };
 pub use traits::{DataSource, FootprintAggregator, Indicator, Strategy};
