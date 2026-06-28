@@ -24,25 +24,84 @@ main{padding:14px}
 .cards{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:12px}
 .card{min-width:120px;padding:8px 10px;border:1px solid #e5e7eb;border-radius:8px;background:#fff}
 .k{font-size:10px;color:#6b7280;text-transform:uppercase;letter-spacing:.4px}.v{font-size:18px;font-weight:800;margin-top:2px}
-table{width:100%;border-collapse:collapse;background:#fff;border:1px solid #e5e7eb;border-radius:8px;overflow:hidden}
-th,td{padding:8px 10px;border-bottom:1px solid #eef2f7;text-align:right;font-size:13px;white-space:nowrap}
-th:first-child,td:first-child,th:nth-child(2),td:nth-child(2){text-align:left}
-th{background:#f8fafc;color:#475569;font-size:11px;text-transform:uppercase;letter-spacing:.4px}
-tr{cursor:pointer}tr:hover{background:#eff6ff}.pos{color:#2563eb}.neg{color:#d97706}.muted{color:#64748b}
+.runs{display:flex;flex-direction:column;gap:10px}
+.run-card{border:1px solid #e5e7eb;border-radius:8px;background:#fff;overflow:hidden}
+.run-top{display:grid;grid-template-columns:minmax(180px,1.2fr) minmax(120px,.8fr) repeat(7,minmax(78px,auto)) auto;gap:8px;align-items:center;padding:10px 12px;border-bottom:1px solid #eef2f7}
+.run-name{font-size:14px;font-weight:800}.muted{color:#64748b}.strategy{font-size:13px;color:#334155}
+.metric{text-align:right}.metric .k{font-size:9px}.metric .v{font-size:13px}
+.open{justify-self:end;text-decoration:none;border:1px solid #c5ccd6;border-radius:8px;padding:6px 10px;color:#111827;background:#fff;font-size:12px;font-weight:700}
+.open:hover{background:#eff6ff;border-color:#bfdbfe}
+.params{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:8px;padding:10px 12px;background:#fbfcfe}
+.param-group{border:1px solid #eef2f7;border-radius:8px;background:#fff;padding:8px}
+.param-title{font-size:10px;color:#475569;text-transform:uppercase;letter-spacing:.4px;font-weight:800;margin-bottom:6px}
+.param-list{display:flex;flex-wrap:wrap;gap:6px}
+.param{display:inline-flex;gap:4px;align-items:baseline;border:1px solid #e5e7eb;border-radius:6px;padding:3px 6px;background:#f8fafc;font-size:12px;max-width:100%}
+.param b{color:#475569;font-weight:600;overflow:hidden;text-overflow:ellipsis}.param span{font-family:Consolas,"SFMono-Regular",monospace;color:#111827;overflow:hidden;text-overflow:ellipsis}
+.pos{color:#2563eb}.neg{color:#d97706}
+@media(max-width:1100px){.run-top{grid-template-columns:minmax(180px,1fr) repeat(2,minmax(88px,auto));}.strategy{grid-column:1/-1}.open{grid-column:1/-1;justify-self:start}.metric{text-align:left}}
 </style>
 </head>
 <body>
 <header><span class="title">ACCELERANDO</span><span class="tag">experiment · multi-run comparison</span></header>
 <main>
   <div class="cards" id="cards"></div>
-  <table><thead><tr><th>run</th><th>strategy</th><th>net pnl</th><th>return</th><th>trades</th><th>win</th><th>pf</th><th>sharpe</th><th>max dd</th></tr></thead><tbody id="runs"></tbody></table>
+  <div class="runs" id="runs"></div>
 </main>
 <script>
 const fmt=(n,d=2)=>(n===null||n===undefined||!isFinite(n))?"-":Number(n).toLocaleString(undefined,{maximumFractionDigits:d,minimumFractionDigits:d});
 const cls=n=>n>=0?"pos":"neg";
+const html=s=>String(s??"").replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;","'":"&#39;"}[c]));
+function fmtParam(v){
+  if(v===null||v===undefined)return "-";
+  if(typeof v==="number")return Number.isInteger(v)?String(v):fmt(v,4);
+  if(typeof v==="boolean")return v?"true":"false";
+  return html(v);
+}
+function flattenParams(value,prefix="",out=[]){
+  if(value===null||value===undefined)return out;
+  if(Array.isArray(value)){
+    value.forEach((item,i)=>{
+      flattenParams(item,prefix||String(i+1),out);
+    });
+    return out;
+  }
+  if(typeof value==="object"){
+    if(value.adapter&&value.params&&typeof value.params==="object"){
+      const base=prefix?`${prefix}.${value.adapter}`:value.adapter;
+      flattenParams(value.params,base,out);
+      return out;
+    }
+    for(const [k,v] of Object.entries(value)){
+      if(k==="adapter")continue;
+      flattenParams(v,prefix?`${prefix}.${k}`:k,out);
+    }
+    return out;
+  }
+  out.push({key:prefix,value});
+  return out;
+}
+function groupParams(items){
+  const groups=[];
+  for(const item of items){
+    const parts=item.key.split(".");
+    const group=parts.slice(0,-1).join(".")||"params";
+    const name=parts[parts.length-1]||item.key;
+    let g=groups.find(x=>x.name===group);
+    if(!g){ g={name:group,items:[]}; groups.push(g); }
+    g.items.push({name,value:item.value});
+  }
+  return groups;
+}
+function metric(k,v,c=""){
+  return `<div class="metric"><div class="k">${k}</div><div class="v ${c}">${v}</div></div>`;
+}
+function renderParams(r){
+  return groupParams(r._flatParams).map(g=>`<div class="param-group"><div class="param-title">${html(g.name)}</div><div class="param-list">${g.items.map(p=>`<span class="param" title="${html(p.name)} = ${html(fmtParam(p.value))}"><b>${html(p.name)}</b><span>${fmtParam(p.value)}</span></span>`).join("")}</div></div>`).join("");
+}
 async function init(){
   const exp=await (await fetch("/api/experiment")).json();
   const runs=exp.runs||[];
+  for(const r of runs) r._flatParams=flattenParams(r.params||{});
   const best=[...runs].sort((a,b)=>b.metrics.net_pnl-a.metrics.net_pnl)[0];
   const totalTrades=runs.reduce((a,r)=>a+r.metrics.trades,0);
   document.getElementById("cards").innerHTML=[
@@ -50,7 +109,21 @@ async function init(){
   ].map(([k,v,c])=>`<div class="card"><div class="k">${k}</div><div class="v ${c}">${v}</div></div>`).join("");
   document.getElementById("runs").innerHTML=runs.sort((a,b)=>b.metrics.net_pnl-a.metrics.net_pnl).map(r=>{
     const m=r.metrics;
-    return `<tr onclick="location.href='/run?id=${encodeURIComponent(r.id)}'"><td><b>${r.label}</b><div class="muted">${r.id}</div></td><td>${r.strategy}</td><td class="${cls(m.net_pnl)}">$${fmt(m.net_pnl)}</td><td class="${cls(m.return_pct)}">${fmt(m.return_pct)}%</td><td>${m.trades}</td><td>${fmt(m.win_rate*100,1)}%</td><td>${fmt(m.profit_factor)}</td><td class="${cls(m.sharpe)}">${fmt(m.sharpe)}</td><td class="neg">$${fmt(m.max_drawdown)}</td></tr>`;
+    return `<section class="run-card">
+      <div class="run-top">
+        <div><div class="run-name">${html(r.label)}</div><div class="muted">${html(r.id)}</div></div>
+        <div class="strategy">${html(r.strategy)}</div>
+        ${metric("net pnl","$"+fmt(m.net_pnl),cls(m.net_pnl))}
+        ${metric("return",fmt(m.return_pct)+"%",cls(m.return_pct))}
+        ${metric("trades",m.trades)}
+        ${metric("win",fmt(m.win_rate*100,1)+"%")}
+        ${metric("pf",fmt(m.profit_factor))}
+        ${metric("sharpe",fmt(m.sharpe),cls(m.sharpe))}
+        ${metric("max dd","$"+fmt(m.max_drawdown),"neg")}
+        <a class="open" href="/run?id=${encodeURIComponent(r.id)}">Open chart</a>
+      </div>
+      <div class="params">${renderParams(r)}</div>
+    </section>`;
   }).join("");
 }
 init();
@@ -151,16 +224,16 @@ where
 
 fn studio_html_for_run(run_id: &str, runs: &[ExperimentRunSummary]) -> String {
     let escaped = json_string(run_id);
-    let strategy = runs
-        .iter()
-        .find(|run| run.id == run_id)
-        .map(|run| run.strategy.as_str())
-        .unwrap_or("");
+    let summary = runs.iter().find(|run| run.id == run_id);
+    let strategy = summary.map(|run| run.strategy.as_str()).unwrap_or("");
     let escaped_strategy = json_string(strategy);
+    let summary_json = summary
+        .map(|run| serde_json::to_string(run).expect("serialize run summary"))
+        .unwrap_or_else(|| "null".to_string());
     STUDIO_HTML.replace(
         "const price=$(\"price\"), pctx=price.getContext(\"2d\");",
         &format!(
-            "const RUN_ID={escaped};\nconst RUN_STRATEGY={escaped_strategy};\nconst price=$(\"price\"), pctx=price.getContext(\"2d\");"
+            "const RUN_ID={escaped};\nconst RUN_STRATEGY={escaped_strategy};\nconst RUN_SUMMARY={summary_json};\nconst price=$(\"price\"), pctx=price.getContext(\"2d\");"
         ),
     )
     .replace("fetch(\"/api/result\")", "fetch(\"/api/result?id=\"+encodeURIComponent(RUN_ID))")

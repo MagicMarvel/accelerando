@@ -57,6 +57,7 @@ pub struct BigTrades {
     plot_markers: bool,
     max_markers_per_side: usize,
     pending: Option<PendingCumulative>,
+    cached_threshold: f64,
     current_candidate_max: f64,
     prior_candidate_max: Vec<f64>,
     by_tick: BTreeMap<i64, BigLevel>,
@@ -101,6 +102,7 @@ impl Configurable for BigTrades {
             plot_markers: p.int("plot_markers", 1) != 0,
             max_markers_per_side: p.usize("max_markers_per_side", 8).max(1),
             pending: None,
+            cached_threshold: min_trade_size,
             current_candidate_max: 0.0,
             prior_candidate_max: Vec::new(),
             by_tick: BTreeMap::new(),
@@ -140,7 +142,7 @@ impl Indicator for BigTrades {
     fn on_footprint(&mut self, fp: &mut Footprint, _history: &[Footprint]) {
         self.flush_pending_cumulative();
 
-        let threshold = self.threshold();
+        let threshold = self.cached_threshold;
         let buy_edge = self.best_buy_edge(fp);
         let sell_edge = self.best_sell_edge(fp);
 
@@ -181,7 +183,7 @@ impl BigTrades {
         match self.mode {
             BigTradeMode::Single => {
                 self.current_candidate_max = self.current_candidate_max.max(size);
-                if size >= self.threshold() {
+                if size >= self.cached_threshold {
                     self.record_big_trade(self.price_key(price), size, side);
                     self.count += 1;
                 }
@@ -214,7 +216,7 @@ impl BigTrades {
             return;
         };
         self.current_candidate_max = self.current_candidate_max.max(pending.total);
-        if pending.total < self.threshold() {
+        if pending.total < self.cached_threshold {
             return;
         }
         for (key, size) in pending.by_tick {
@@ -227,26 +229,26 @@ impl BigTrades {
         if self.threshold_mode == ThresholdMode::Fixed || self.prior_candidate_max.is_empty() {
             return self.min_trade_size;
         }
-        let values: Vec<f64> = self
+        let mut n = 0usize;
+        let mut sum = 0.0;
+        let mut sum_sq = 0.0;
+        for v in self
             .prior_candidate_max
             .iter()
             .rev()
             .take(self.lookback_bars)
             .copied()
             .filter(|v| v.is_finite() && *v > 0.0)
-            .collect();
-        if values.is_empty() {
+        {
+            n += 1;
+            sum += v;
+            sum_sq += v * v;
+        }
+        if n == 0 {
             return self.min_trade_size;
         }
-        let mean = values.iter().sum::<f64>() / values.len() as f64;
-        let var = values
-            .iter()
-            .map(|v| {
-                let diff = *v - mean;
-                diff * diff
-            })
-            .sum::<f64>()
-            / values.len() as f64;
+        let mean = sum / n as f64;
+        let var = (sum_sq / n as f64 - mean * mean).max(0.0);
         (mean + self.sensitivity * var.sqrt()).clamp(self.min_trade_size, self.max_trade_size)
     }
 
@@ -259,6 +261,7 @@ impl BigTrades {
             let remove = self.prior_candidate_max.len() - max_keep;
             self.prior_candidate_max.drain(0..remove);
         }
+        self.cached_threshold = self.threshold();
     }
 
     fn record_big_trade(&mut self, key: i64, size: f64, side: Side) {
