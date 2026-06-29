@@ -10,6 +10,8 @@
   body { margin:0; height:100vh; display:grid; grid-template-rows:auto 1fr; overflow:hidden; }
   header { padding:10px 16px; background:#0f172a; color:#fff; display:flex; align-items:baseline; gap:12px; }
   header .title { font-size:16px; font-weight:800; letter-spacing:.3px; }
+  header .brand-home { color:#fff; text-decoration:none; flex:0 0 auto; }
+  header .brand-home:hover { text-decoration:underline; }
   header .tag { font-size:12px; color:#94a3b8; }
   header .status { margin-left:auto; font-size:12px; color:#cbd5e1; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; max-width:55vw;}
   .main { display:grid; grid-template-columns:360px 1fr; min-height:0; }
@@ -39,13 +41,20 @@
   .run .mt { color:#64748b; }
   .pos { color:#2563eb; } .neg { color:#d97706; }
   .err { color:#b45309; font-size:12px; }
-  .content { display:grid; grid-template-rows:auto auto 1fr; min-height:0; }
+  .content { display:grid; grid-template-rows:auto auto auto 1fr; min-height:0; }
   .cards { display:flex; gap:8px; flex-wrap:wrap; padding:10px 14px; background:#fff; border-bottom:1px solid #e2e8f0; }
   .card { min-width:104px; padding:6px 10px; border:1px solid #e5e7eb; border-radius:8px; background:#fbfcfe; }
   .card .k { font-size:10px; color:#6b7280; text-transform:uppercase; letter-spacing:.4px; }
   .card .v { font-size:16px; font-weight:700; margin-top:2px; }
-  .run-meta { display:none; padding:8px 14px; background:#fff; border-bottom:1px solid #e2e8f0; gap:8px; flex-wrap:wrap; align-items:stretch; }
-  .run-meta.visible { display:flex; }
+  .run-meta { display:none; background:#fff; border-bottom:1px solid #e2e8f0; }
+  .run-meta.visible { display:block; }
+  .run-meta-bar { display:flex; align-items:center; gap:8px; min-height:34px; padding:5px 14px; border-bottom:1px solid #eef2f7; }
+  .run-meta.collapsed .run-meta-bar { border-bottom:0; }
+  .run-meta-title { font-size:12px; font-weight:800; color:#334155; text-transform:uppercase; letter-spacing:.4px; }
+  .run-meta-sub { min-width:0; color:#64748b; font-size:12px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  .meta-toggle { height:24px; min-width:62px; padding:0 8px; border-radius:6px; font-size:12px; }
+  .run-meta-body { display:flex; padding:8px 14px; gap:8px; flex-wrap:wrap; align-items:stretch; }
+  .run-meta.collapsed .run-meta-body { display:none; }
   .run-meta .meta-head { min-width:180px; padding:6px 8px; border:1px solid #e5e7eb; border-radius:8px; background:#fbfcfe; }
   .run-meta .meta-head b { display:block; font-size:13px; }
   .run-meta .meta-head span { display:block; margin-top:2px; font-size:11px; color:#64748b; }
@@ -57,11 +66,15 @@
   .run-meta .meta-param span { font-family:Consolas,"SFMono-Regular",monospace; overflow:hidden; text-overflow:ellipsis; }
   .toolbar { display:flex; align-items:center; gap:8px; padding:6px 14px; background:#fff; border-bottom:1px solid #e2e8f0; }
   .toolbar .rng { margin-left:auto; font-size:12px; color:#475569; }
+  .toolbar button.tool-toggle { height:28px; padding:0 10px; border-radius:8px; }
+  .toolbar button.tool-toggle.active { background:#0f172a; border-color:#0f172a; color:#fff; }
   .seg { display:inline-flex; border:1px solid #cbd5e1; border-radius:8px; overflow:hidden; background:#fff; }
   .seg button { border:0; border-radius:0; height:28px; padding:0 10px; }
   .seg button + button { border-left:1px solid #cbd5e1; }
   .seg button.active { background:#0f172a; color:#fff; }
   .charts { --equity-height:180px; display:grid; grid-template-rows:minmax(160px,1fr) 7px minmax(80px,var(--equity-height)); min-height:0; }
+  .charts.equity-collapsed { grid-template-rows:minmax(160px,1fr) 0 0; }
+  .charts.equity-collapsed .splitter, .charts.equity-collapsed #equity { display:none; }
   .splitter { height:7px; cursor:row-resize; background:#eef2f7; border-top:1px solid #cbd5e1; border-bottom:1px solid #cbd5e1; }
   .splitter:hover, .splitter.dragging { background:#dbeafe; }
   canvas { display:block; width:100%; height:100%; background:#fbfcfe; cursor:grab; }
@@ -71,7 +84,7 @@
 </head>
 <body class="viewer">
 <header>
-  <span class="title">ACCELERANDO</span>
+  <a class="title brand-home" href="/" title="Back to home">ACCELERANDO</a>
   <span class="tag">studio · the world has been accelerated</span>
   <span class="status" id="status"></span>
 </header>
@@ -81,14 +94,14 @@
       <h3>run</h3>
       <div class="body">
         <div class="runbar">
-          <button class="primary" id="runBtn" style="flex:0 0 auto;">▶ 回测</button>
+          <button class="primary" id="runBtn" style="flex:0 0 auto;">▶ Run</button>
           <div class="progress"><i id="progBar"></i></div>
         </div>
         <div class="prog-text" id="progText"></div>
         <div class="err" id="runErr"></div>
         <div class="runbar">
-          <input id="saveName" placeholder="保存名称…" style="flex:1; padding:6px 8px; border:1px solid #cbd5e1; border-radius:6px; font-size:12px;">
-          <button id="saveBtn">保存</button>
+          <input id="saveName" placeholder="Save name..." style="flex:1; padding:6px 8px; border:1px solid #cbd5e1; border-radius:6px; font-size:12px;">
+          <button id="saveBtn">Save</button>
         </div>
       </div>
     </div>
@@ -115,23 +128,24 @@
         <button id="tradeLast" title="Jump to last trade">Last</button>
       </span>
       <span class="seg" aria-label="chart mode">
-        <button id="modeCandles" class="active" title="K线显示">K线</button>
-        <button id="modeFootprint" title="Footprint足迹图显示">FootPrint</button>
-        <button id="modeHeatmap" title="L2 heatmap显示">Heatmap</button>
+        <button id="modeCandles" class="active" title="Candlestick chart">Candles</button>
+        <button id="modeFootprint" title="Footprint chart">Footprint</button>
+        <button id="modeHeatmap" title="L2 heatmap chart">Heatmap</button>
       </span>
       <span id="overlayToggles" style="display:inline-flex;gap:10px;align-items:center;flex-wrap:wrap;"></span>
       <label style="font-size:12px;color:#374151;display:inline-flex;gap:6px;align-items:center;">heat <select id="heatMetric" style="height:26px;border:1px solid #cbd5e1;border-radius:6px;font-size:12px;"><option value="total">total</option><option value="bid">bid</option><option value="ask">ask</option></select></label>
+      <button id="toggleEquity" class="tool-toggle active" type="button" title="Hide equity" aria-pressed="true">Equity</button>
       <span class="rng" id="range"></span>
     </div>
     <div class="charts">
       <canvas id="price"></canvas>
-      <div id="chartSplitter" class="splitter" title="拖动调整上下图高度"></div>
+      <div id="chartSplitter" class="splitter" title="Drag to resize charts"></div>
       <canvas id="equity"></canvas>
     </div>
   </section>
 </div>
 <script>
-const COLORS = { up:"#2563eb", down:"#d97706", grid:"#e2e8f0", axis:"#475569" };
+const COLORS = { up:"#6d6dff", down:"#ff6d6d", buy:"#6d6dff", sell:"#ff6d6d", tradeText:"#ffffff", grid:"#e2e8f0", axis:"#475569" };
 let SCHEMA=null, CONFIG=null, DATA=null, fps=[], eq=[], trades=[];
 let barsPerView=300, start=0, hover=null, drag=null, splitDrag=null, chartMode="candles", heatMetric="total", poll=null;
 // Overlay visibility, keyed by category ("bands", "trades", or a marker group). Persisted across
@@ -141,12 +155,17 @@ const overlayLabel=cat=>cat==="bands"?"bands":cat==="trades"?"trades":cat.replac
 const overlayOn=cat=>overlayState[cat]!==false;
 const markerCat=p=>p.group||"markers";
 const volumeProfileCat=p=>(p.id||"").startsWith("entry_vp_")?"entry_vp":"volume_profiles";
+const priceBoxCat=p=>p.group||"price_boxes";
 let yZoom={price:{manual:false,lo:null,hi:null},equity:{manual:false,lo:null,hi:null}};
 const $ = id => document.getElementById(id);
 const price=$("price"), pctx=price.getContext("2d");
 const equity=$("equity"), ectx=equity.getContext("2d");
 const charts=document.querySelector(".charts"), splitter=$("chartSplitter");
 const clamp=(v,a,b)=>Math.max(a,Math.min(b,v));
+function readStoredBool(key,fallback=false){ try{ const v=localStorage.getItem(key); return v===null?fallback:v==="1"; } catch(_){ return fallback; } }
+function writeStoredBool(key,value){ try{ localStorage.setItem(key,value?"1":"0"); } catch(_){} }
+let metaCollapsed=readStoredBool("accelerando.runMetaCollapsed",false);
+let equityCollapsed=readStoredBool("accelerando.equityCollapsed",false);
 const fmt=(n,d=2)=>(n===null||n===undefined||!isFinite(n))?"–":Number(n).toLocaleString(undefined,{maximumFractionDigits:d,minimumFractionDigits:d});
 const fmtTs=ns=>new Date(Number(ns)/1e6).toLocaleString();
 const fmtAxisTs=ns=>new Date(Number(ns)/1e6).toLocaleTimeString([], {hour:"2-digit", minute:"2-digit"});
@@ -190,8 +209,47 @@ function renderRunMeta(){
   if(!summary){ host.classList.remove("visible"); host.innerHTML=""; return; }
   const groups=groupedParams(summary.params);
   host.classList.add("visible");
-  host.innerHTML=`<div class="meta-head"><b>${esc(summary.label||summary.id||"run")}</b><span>${esc(summary.strategy||"")}</span></div>`+
-    groups.map(g=>`<div class="meta-group"><div class="meta-title">${esc(g.name)}</div><div class="meta-items">${g.items.map(p=>`<span class="meta-param" title="${esc(p.name)} = ${esc(fmtParam(p.value))}"><b>${esc(p.name)}</b><span>${fmtParam(p.value)}</span></span>`).join("")}</div></div>`).join("");
+  const label=summary.label||summary.id||"run", strategy=summary.strategy||"";
+  host.innerHTML=`<div class="run-meta-bar"><button id="toggleRunMeta" class="meta-toggle" type="button" aria-expanded="${String(!metaCollapsed)}"></button><div class="run-meta-title">Parameters</div><div class="run-meta-sub">${esc(label)}${strategy?` · ${esc(strategy)}`:""}</div></div>`+
+    `<div class="run-meta-body"><div class="meta-head"><b>${esc(label)}</b><span>${esc(strategy)}</span></div>`+
+    groups.map(g=>`<div class="meta-group"><div class="meta-title">${esc(g.name)}</div><div class="meta-items">${g.items.map(p=>`<span class="meta-param" title="${esc(p.name)} = ${esc(fmtParam(p.value))}"><b>${esc(p.name)}</b><span>${fmtParam(p.value)}</span></span>`).join("")}</div></div>`).join("")+
+    `</div>`;
+  $("toggleRunMeta").onclick=()=>setMetaCollapsed(!metaCollapsed);
+  setMetaCollapsed(metaCollapsed,false);
+}
+
+function setMetaCollapsed(collapsed,persist=true){
+  metaCollapsed=!!collapsed;
+  const host=$("runMeta");
+  if(host){
+    host.classList.toggle("collapsed",metaCollapsed);
+    const btn=$("toggleRunMeta");
+    if(btn){
+      btn.textContent=metaCollapsed?"Show params":"Hide params";
+      btn.title=metaCollapsed?"Show parameter panel":"Hide parameter panel";
+      btn.setAttribute("aria-expanded",String(!metaCollapsed));
+    }
+  }
+  if(persist)writeStoredBool("accelerando.runMetaCollapsed",metaCollapsed);
+  requestAnimationFrame(resize);
+}
+
+function setEquityCollapsed(collapsed,persist=true){
+  equityCollapsed=!!collapsed;
+  charts.classList.toggle("equity-collapsed",equityCollapsed);
+  const btn=$("toggleEquity");
+  if(btn){
+    btn.classList.toggle("active",!equityCollapsed);
+    btn.title=equityCollapsed?"Show equity":"Hide equity";
+    btn.setAttribute("aria-pressed",String(!equityCollapsed));
+  }
+  if(equityCollapsed){
+    if(hover&&hover.canvas==="equity")hover=null;
+    splitDrag=null;
+    splitter.classList.remove("dragging");
+  }
+  if(persist)writeStoredBool("accelerando.equityCollapsed",equityCollapsed);
+  requestAnimationFrame(resize);
 }
 
 function resetYZoom(){ yZoom={price:{manual:false,lo:null,hi:null},equity:{manual:false,lo:null,hi:null}}; }
@@ -224,7 +282,7 @@ function drawTimeAxis(ctx,vis,L,T,pw,ph,W,R,tsKey="ts_last_ns"){
     ctx.beginPath();ctx.moveTo(x,T+ph);ctx.lineTo(x,T+ph+4);ctx.stroke();
     ctx.fillText(fmtAxisTs(ts),x,T+ph+7);
   }
-  ctx.textAlign="right"; ctx.fillText("时间",W-R,T+ph+20); ctx.restore();
+  ctx.textAlign="right"; ctx.fillText("Time",W-R,T+ph+20); ctx.restore();
 }
 async function fetchJson(url){ const r=await fetch(url); if(!r.ok) throw new Error(`${url}: ${r.status}`); return await r.json(); }
 
@@ -258,7 +316,7 @@ function stageBlock(label, kinds, chosenAdapter, params, opts={}){
     pdiv.innerHTML="";
     const k=kinds.find(x=>x.name===sel.value); if(!k||!k.params)return;
     const det=document.createElement("details"); if(opts.open)det.open=true;
-    const sum=document.createElement("summary"); sum.textContent="参数 ("+k.params.entries.length+")"; det.append(sum);
+    const sum=document.createElement("summary"); sum.textContent="Parameters ("+k.params.entries.length+")"; det.append(sum);
     const body=document.createElement("div"); body.className="body";
     for(const e of k.params.entries) body.append(paramRow(e, params? params[e.name] : undefined));
     det.append(body); pdiv.append(det);
@@ -278,7 +336,7 @@ function buildForm(){
   // broker
   const b=document.createElement("div"); b.dataset.stage="broker";
   const head=document.createElement("label"); head.className="f"; head.style.fontWeight="700"; head.append("broker"); b.append(head);
-  const det=document.createElement("details"); det.open=true; const sum=document.createElement("summary"); sum.textContent="参数"; det.append(sum);
+  const det=document.createElement("details"); det.open=true; const sum=document.createElement("summary"); sum.textContent="Parameters"; det.append(sum);
   const body=document.createElement("div"); body.className="body";
   const bk=CONFIG.broker||{};
   for(const [name,val] of [["commission_per_contract",bk.commission_per_contract??0],["slippage_ticks",bk.slippage_ticks??0],["starting_equity",bk.starting_equity??100000]]){
@@ -345,7 +403,7 @@ async function loadResult(){
 async function refreshRuns(){
   const runs=await (await fetch("/api/runs")).json();
   const el=$("runs"); el.innerHTML="";
-  if(!runs.length){ el.innerHTML='<div style="color:#94a3b8;font-size:12px;">还没有保存的回测</div>'; return; }
+  if(!runs.length){ el.innerHTML='<div style="color:#94a3b8;font-size:12px;">No saved runs yet</div>'; return; }
   for(const r of runs){
     const d=document.createElement("div"); d.className="run";
     d.innerHTML=`<span class="nm">${r.name}</span><span class="mt"><span class="${r.net_pnl>=0?'pos':'neg'}">$${fmt(r.net_pnl,0)}</span> · ${r.trades}t · S${fmt(r.sharpe,2)}</span>`;
@@ -379,6 +437,7 @@ function overlayCategories(){
     if(p.kind==="BackgroundBand")hasBands=true;
     else if(p.kind==="Marker")markerGroups.add(markerCat(p));
     else if(p.kind==="VolumeProfile")markerGroups.add(volumeProfileCat(p));
+    else if(p.kind==="PriceBox")markerGroups.add(priceBoxCat(p));
   } }
   const cats=[];
   if(hasBands)cats.push("bands");
@@ -504,7 +563,6 @@ function markerSize(p){
   const n=m?Number(m[0]):0;
   return Number.isFinite(n)&&n>0?n:0;
 }
-function isWarmMarker(color){ return ["#d97706","#f59e0b","#f97316"].includes(String(color||"").toLowerCase()); }
 function colorAlpha(color,a){
   const c=String(color||"").trim();
   const m=c.match(/^#([0-9a-f]{6})$/i);
@@ -512,8 +570,14 @@ function colorAlpha(color,a){
   const n=parseInt(m[1],16), r=(n>>16)&255, g=(n>>8)&255, b=n&255;
   return `rgba(${r},${g},${b},${a})`;
 }
+function tradeMarkerColor(color){
+  const c=String(color||"").trim().toLowerCase();
+  if(!c||c==="#2563eb")return COLORS.buy;
+  if(["#d97706","#f59e0b","#f97316","#e8832a"].includes(c))return COLORS.sell;
+  return color;
+}
 function drawBigTradeBubble(ctx,p,x,yy,r){
-  const color=p.color||"#2563eb", text=String(p.text??"");
+  const color=tradeMarkerColor(p.color), text=String(p.text??"");
   ctx.save();
   ctx.shadowColor="rgba(15,23,42,0.18)";
   ctx.shadowBlur=5;
@@ -528,7 +592,7 @@ function drawBigTradeBubble(ctx,p,x,yy,r){
     const fontSize=clamp(Math.floor(r*0.72),8,13);
     ctx.font=`800 ${fontSize}px Segoe UI, Arial`;
     ctx.textAlign="center"; ctx.textBaseline="middle";
-    ctx.fillStyle=isWarmMarker(color)?"#111827":"#ffffff";
+    ctx.fillStyle=COLORS.tradeText;
     const maxW=Math.max(6,r*1.72);
     let label=text;
     while(label.length>1&&ctx.measureText(label).width>maxW)label=label.slice(0,-1);
@@ -602,7 +666,7 @@ function drawVolumeProfiles(ctx,vis,L,T,pw,ph,xStep,y,tick,labelLayout){
         const deltaN=maxDelta>0?Math.min(1,Math.abs(delta)/maxDelta):0;
         const profileN=Math.min(1,total/maxProfile);
         const deltaW=half*deltaN, profileW=half*profileN;
-        ctx.fillStyle=delta>=0?"#2563eb":"#d97706";
+        ctx.fillStyle=delta>=0?COLORS.buy:COLORS.sell;
         ctx.fillRect(mid-deltaW,yy,Math.max(1,deltaW),hh);
         ctx.fillStyle="#64748b";
         ctx.fillRect(mid,yy,Math.max(1,profileW),hh);
@@ -616,6 +680,41 @@ function drawVolumeProfiles(ctx,vis,L,T,pw,ph,xStep,y,tick,labelLayout){
   }
   ctx.restore();
 }
+function drawPriceBoxes(ctx,vis,L,T,pw,ph,xStep,y,labelLayout){
+  ctx.save(); ctx.font="10px Segoe UI, Arial"; ctx.textBaseline="middle";
+  const lastById=new Map();
+  for(let i=0;i<vis.length;i++){
+    for(const p of (vis[i].plots||[])){
+      if(p.kind==="PriceBox")lastById.set(p.id||`__box_${i}`,i);
+    }
+  }
+  for(let i=0;i<vis.length;i++){
+    const b=vis[i];
+    for(const p of (b.plots||[])){
+      if(p.kind!=="PriceBox"||p.low==null||p.high==null)continue;
+      if(lastById.get(p.id||`__box_${i}`)!==i)continue;
+      if(!overlayOn(priceBoxCat(p)))continue;
+      const span=Math.max(1,Math.round(p.span||1));
+      const x0=clamp(L+(i-span+1)*xStep,L,L+pw);
+      const x1=clamp(L+(i+1)*xStep,L,L+pw);
+      const top=y(Math.max(p.low,p.high)), bot=y(Math.min(p.low,p.high));
+      const yy=Math.min(top,bot), hh=Math.max(1,Math.abs(bot-top));
+      if(yy>T+ph||yy+hh<T||x1<=L||x0>=L+pw)continue;
+      const color=p.color||"#111827", w=Math.max(2,x1-x0);
+      ctx.fillStyle=colorAlpha(color,0.07);
+      ctx.fillRect(x0,yy,w,hh);
+      ctx.strokeStyle=colorAlpha(color,0.85);
+      ctx.lineWidth=1.5;
+      ctx.setLineDash([5,4]);
+      ctx.strokeRect(x0,yy,w,hh);
+      ctx.setLineDash([]);
+      if(p.text&&xStep>=10){
+        drawLabel(ctx,p.text,x0+4,Math.max(T+10,yy-8),color,labelLayout);
+      }
+    }
+  }
+  ctx.restore();
+}
 function drawTradePositions(ctx,visibleTrades,s,e,L,T,ph,xStep,y,labelLayout){
   ctx.save(); ctx.font="10px Segoe UI, Arial"; ctx.textBaseline="middle";
   for(const t of visibleTrades){
@@ -624,12 +723,12 @@ function drawTradePositions(ctx,visibleTrades,s,e,L,T,ph,xStep,y,labelLayout){
     const ex=L+xi*xStep+xStep/2, xx=L+xo*xStep+xStep/2, x0=Math.min(ex,xx), w=Math.max(5,Math.abs(xx-ex));
     const entry=y(t.entry_px), exit=y(t.exit_px);
     const stop=(t.stop==null||!isFinite(t.stop))?null:y(t.stop), target=(t.target==null||!isFinite(t.target))?null:y(t.target);
-    if(target!=null){ const top=Math.min(entry,target), h=Math.max(1,Math.abs(target-entry)); ctx.fillStyle="rgba(37,99,235,0.16)"; ctx.fillRect(x0,top,w,h); ctx.strokeStyle="rgba(37,99,235,0.65)"; ctx.strokeRect(x0,top,w,h); }
-    if(stop!=null){ const top=Math.min(entry,stop), h=Math.max(1,Math.abs(stop-entry)); ctx.fillStyle="rgba(217,119,6,0.16)"; ctx.fillRect(x0,top,w,h); ctx.strokeStyle="rgba(217,119,6,0.65)"; ctx.strokeRect(x0,top,w,h); }
+    if(target!=null){ const top=Math.min(entry,target), h=Math.max(1,Math.abs(target-entry)); ctx.fillStyle=colorAlpha(COLORS.buy,0.16); ctx.fillRect(x0,top,w,h); ctx.strokeStyle=colorAlpha(COLORS.buy,0.65); ctx.strokeRect(x0,top,w,h); }
+    if(stop!=null){ const top=Math.min(entry,stop), h=Math.max(1,Math.abs(stop-entry)); ctx.fillStyle=colorAlpha(COLORS.sell,0.16); ctx.fillRect(x0,top,w,h); ctx.strokeStyle=colorAlpha(COLORS.sell,0.65); ctx.strokeRect(x0,top,w,h); }
     ctx.strokeStyle="rgba(17,24,39,0.70)"; ctx.setLineDash([4,3]); ctx.beginPath();ctx.moveTo(x0,entry);ctx.lineTo(x0+w,entry);ctx.stroke(); ctx.setLineDash([]);
     if(target!=null){ drawLabel(ctx,"TP",x0+4,target,COLORS.up,labelLayout); }
     if(stop!=null){ drawLabel(ctx,"SL",x0+4,stop,COLORS.down,labelLayout); }
-    ctx.strokeStyle=t.pnl>=0?"rgba(37,99,235,0.8)":"rgba(217,119,6,0.8)"; ctx.beginPath();ctx.moveTo(ex,entry);ctx.lineTo(xx,exit);ctx.stroke();
+    ctx.strokeStyle=t.pnl>=0?colorAlpha(COLORS.buy,0.8):colorAlpha(COLORS.sell,0.8); ctx.beginPath();ctx.moveTo(ex,entry);ctx.lineTo(xx,exit);ctx.stroke();
     ctx.fillStyle=t.dir>0?COLORS.up:COLORS.down; ctx.beginPath(); if(t.dir>0){ctx.moveTo(ex,entry-7);ctx.lineTo(ex-5,entry+2);ctx.lineTo(ex+5,entry+2);}else{ctx.moveTo(ex,entry+7);ctx.lineTo(ex-5,entry-2);ctx.lineTo(ex+5,entry-2);} ctx.closePath();ctx.fill();
     ctx.strokeStyle=t.pnl>=0?COLORS.up:COLORS.down; ctx.lineWidth=2; ctx.beginPath();ctx.moveTo(xx-4,exit-4);ctx.lineTo(xx+4,exit+4);ctx.moveTo(xx+4,exit-4);ctx.lineTo(xx-4,exit+4);ctx.stroke(); ctx.lineWidth=1;
   }
@@ -660,7 +759,7 @@ function drawFootprints(ctx,vis,L,T,ph,xStep,y,tick){
   for(let i=0;i<vis.length;i++){
     const b=vis[i], x=L+i*xStep+xStep/2, x0=x-half;
     const totals=footprintTotals(b);
-    ctx.strokeStyle=b.close>=b.open?"rgba(37,99,235,0.75)":"rgba(217,119,6,0.75)";
+    ctx.strokeStyle=b.close>=b.open?colorAlpha(COLORS.up,0.75):colorAlpha(COLORS.down,0.75);
     ctx.beginPath();ctx.moveTo(x,y(b.high));ctx.lineTo(x,y(b.low));ctx.stroke();
     for(const lv of (b.ladder||[])){
       const top=y(lv.price+tick/2), bot=y(lv.price-tick/2);
@@ -673,29 +772,29 @@ function drawFootprints(ctx,vis,L,T,ph,xStep,y,tick){
       if(showFull){
         const profileW=barW*0.22, flowW=(barW-profileW*2)/2;
         const deltaX=x0, sellX=x0+profileW, buyX=sellX+flowW, vpX=buyX+flowW;
-        ctx.fillStyle=delta>=0?`rgba(37,99,235,${0.10+0.55*deltaN})`:`rgba(217,119,6,${0.10+0.55*deltaN})`;
+        ctx.fillStyle=delta>=0?colorAlpha(COLORS.buy,0.10+0.55*deltaN):colorAlpha(COLORS.sell,0.10+0.55*deltaN);
         ctx.fillRect(deltaX+profileW*(1-deltaN),yy,Math.max(1,profileW*deltaN),hh);
-        ctx.fillStyle=`rgba(232,131,42,${sellA})`; ctx.fillRect(sellX,yy,flowW,hh);
-        ctx.fillStyle=`rgba(37,99,235,${buyA})`; ctx.fillRect(buyX,yy,flowW,hh);
+        ctx.fillStyle=colorAlpha(COLORS.sell,sellA); ctx.fillRect(sellX,yy,flowW,hh);
+        ctx.fillStyle=colorAlpha(COLORS.buy,buyA); ctx.fillRect(buyX,yy,flowW,hh);
         ctx.fillStyle=`rgba(100,116,139,${0.08+0.48*profileN})`;
         ctx.fillRect(vpX,yy,Math.max(1,profileW*profileN),hh);
         if(showExtraText&&hh>=8){
-          ctx.fillStyle="#1f2937"; ctx.textAlign="center";
+          ctx.fillStyle=COLORS.tradeText; ctx.textAlign="center";
           ctx.fillText(Math.round(sell),sellX+flowW/2,yy+hh/2);
           ctx.fillText(Math.round(buy),buyX+flowW/2,yy+hh/2);
         }
       } else if(showProfile) {
         const profileW=barW/2, deltaX=x0, vpX=x0+profileW;
-        ctx.fillStyle=delta>=0?`rgba(37,99,235,${0.10+0.58*deltaN})`:`rgba(217,119,6,${0.10+0.58*deltaN})`;
+        ctx.fillStyle=delta>=0?colorAlpha(COLORS.buy,0.10+0.58*deltaN):colorAlpha(COLORS.sell,0.10+0.58*deltaN);
         ctx.fillRect(deltaX+profileW*(1-deltaN),yy,Math.max(1,profileW*deltaN),hh);
         ctx.fillStyle=`rgba(100,116,139,${0.08+0.50*profileN})`;
         ctx.fillRect(vpX,yy,Math.max(1,profileW*profileN),hh);
       } else {
-        ctx.fillStyle=`rgba(232,131,42,${sellA})`; ctx.fillRect(x0,yy,half,hh);
-        ctx.fillStyle=`rgba(37,99,235,${buyA})`; ctx.fillRect(x,yy,half,hh);
+        ctx.fillStyle=colorAlpha(COLORS.sell,sellA); ctx.fillRect(x0,yy,half,hh);
+        ctx.fillStyle=colorAlpha(COLORS.buy,buyA); ctx.fillRect(x,yy,half,hh);
       }
       if(!showProfile&&showText&&hh>=8){
-        ctx.fillStyle="#1f2937";
+        ctx.fillStyle=COLORS.tradeText;
         ctx.textAlign="right"; ctx.fillText(Math.round(sell),x-3,yy+hh/2);
         ctx.textAlign="left"; ctx.fillText(Math.round(buy),x+3,yy+hh/2);
       }
@@ -703,7 +802,7 @@ function drawFootprints(ctx,vis,L,T,ph,xStep,y,tick){
     if(showSummary){
       const n=maxDelta>0?Math.min(1,Math.abs(totals.delta)/maxDelta):0;
       const c=totals.delta>=0?COLORS.up:COLORS.down;
-      ctx.fillStyle=totals.delta>=0?`rgba(37,99,235,${0.18+0.45*n})`:`rgba(217,119,6,${0.18+0.45*n})`;
+      ctx.fillStyle=totals.delta>=0?colorAlpha(COLORS.buy,0.18+0.45*n):colorAlpha(COLORS.sell,0.18+0.45*n);
       ctx.fillRect(x0,T,barW,3);
       ctx.fillStyle=c; ctx.textAlign="center"; ctx.font=xStep>=46?"10px Segoe UI, Arial":"9px Segoe UI, Arial";
       const label=xStep>=46?`D ${fmt(totals.delta,0)}`:fmt(totals.delta,0);
@@ -717,7 +816,7 @@ function drawFootprints(ctx,vis,L,T,ph,xStep,y,tick){
 }
 function drawPrice(){
   const W=price.clientWidth,H=price.clientHeight; pctx.clearRect(0,0,W,H); pctx.fillStyle="#fbfcfe"; pctx.fillRect(0,0,W,H);
-  if(!fps.length){ pctx.fillStyle="#94a3b8"; pctx.font="14px Segoe UI"; pctx.fillText("运行回测以查看结果", 20, H/2); return; }
+  if(!fps.length){ pctx.fillStyle="#94a3b8"; pctx.font="14px Segoe UI"; pctx.fillText("Run a backtest to view results", 20, H/2); return; }
   if(chartMode==="heatmap"){ drawHeatmap(pctx,price,"price"); const [s,e]=viewRange(); $("range").textContent=`bars ${s+1}-${e} / ${fps.length}`; return; }
   const [s,e]=viewRange(); const vis=fps.slice(s,e); const L=64,R=16,T=14,B=34; const pw=Math.max(1,W-L-R),ph=Math.max(1,H-T-B);
   let lo=Infinity,hi=-Infinity; for(const b of vis){lo=Math.min(lo,b.low);hi=Math.max(hi,b.high);}
@@ -730,6 +829,7 @@ function drawPrice(){
   pctx.save(); clipPlot(pctx,L,T,pw,ph);
   if(chartMode==="footprint") drawFootprints(pctx,vis,L,T,ph,xStep,y,tick);
   else drawCandles(pctx,vis,L,T,ph,xStep,cw,y);
+  drawPriceBoxes(pctx,vis,L,T,pw,ph,xStep,y,labelLayout);
   drawVolumeProfiles(pctx,vis,L,T,pw,ph,xStep,y,tick,labelLayout);
   drawPlotMarkers(pctx,vis,L,T,ph,xStep,y,labelLayout);
   if(overlayOn("trades")) drawTradePositions(pctx,trades,s,e,L,T,ph,xStep,y,labelLayout);
@@ -741,8 +841,8 @@ function drawPrice(){
 function heatColor(v,maxAbs,metric){
   if(!(maxAbs>0)||!isFinite(v)||v<=0)return "rgba(148,163,184,0.03)";
   const n=Math.min(1,v/maxAbs), a=0.08+0.78*n;
-  if(metric==="bid")return `rgba(37,99,235,${a})`;
-  if(metric==="ask")return `rgba(217,119,6,${a})`;
+  if(metric==="bid")return colorAlpha(COLORS.buy,a);
+  if(metric==="ask")return colorAlpha(COLORS.sell,a);
   return `rgba(234,179,8,${a})`;
 }
 function heatValue(level,metric){
@@ -780,6 +880,7 @@ function drawHeatmap(ctx,canvas,hoverCanvas){
   drawTimeAxis(ctx,vis,L,T,pw,ph,W,R);
   const labelLayout={boxes:[],L,T,pw,ph};
   ctx.save(); clipPlot(ctx,L,T,pw,ph);
+  drawPriceBoxes(ctx,vis,L,T,pw,ph,xStep,y,labelLayout);
   drawVolumeProfiles(ctx,vis,L,T,pw,ph,xStep,y,tick,labelLayout);
   drawPlotMarkers(ctx,vis,L,T,ph,xStep,y,labelLayout);
   if(overlayOn("trades")) drawTradePositions(ctx,trades,s,e,L,T,ph,xStep,y,labelLayout);
@@ -809,7 +910,7 @@ function drawEquity(){
   ectx.restore();
   ectx.fillStyle="#64748b"; ectx.fillText("equity",L+4,T+12); ectx.strokeStyle="#9aa4b2"; ectx.strokeRect(L,T,pw,ph);
 }
-function draw(){ drawPrice(); drawEquity(); }
+function draw(){ drawPrice(); if(!equityCollapsed)drawEquity(); }
 
 function attach(canvas,name){
   canvas.addEventListener("wheel",ev=>{ev.preventDefault(); const r=canvas.getBoundingClientRect(); const x=ev.clientX-r.left; if(ev.shiftKey||x<64){ const top=name==="price"?14:12,bottom=name==="price"?34:30; const frac=clamp((ev.clientY-r.top-top)/Math.max(1,r.height-top-bottom),0,1); zoomY(name,ev.deltaY<0?1.18:1/1.18,frac); } else { const ratio=clamp((x-64)/Math.max(1,r.width-80),0,1); setBarsPerView(barsPerView*(ev.deltaY<0?0.82:1.22),ratio); }},{passive:false});
@@ -840,8 +941,10 @@ $("modeCandles").onclick=()=>setChartMode("candles");
 $("modeFootprint").onclick=()=>setChartMode("footprint");
 $("modeHeatmap").onclick=()=>setChartMode("heatmap");
 $("heatMetric").onchange=e=>{heatMetric=e.target.value;draw();};
+$("toggleEquity").onclick=()=>setEquityCollapsed(!equityCollapsed);
+setEquityCollapsed(equityCollapsed,false);
 $("runBtn").onclick=runBacktest;
-$("saveBtn").onclick=async()=>{ const name=$("saveName").value.trim(); if(!name){$("runErr").textContent="请输入保存名称";return;} const r=await (await fetch("/api/save",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({name})})).json(); if(!r.ok){$("runErr").textContent=r.error||"save failed";} else { $("saveName").value=""; refreshRuns(); } };
+$("saveBtn").onclick=async()=>{ const name=$("saveName").value.trim(); if(!name){$("runErr").textContent="Enter a save name";return;} const r=await (await fetch("/api/save",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({name})})).json(); if(!r.ok){$("runErr").textContent=r.error||"save failed";} else { $("saveName").value=""; refreshRuns(); } };
 window.addEventListener("resize",resize);
 
 async function init(){
@@ -849,7 +952,7 @@ async function init(){
   $("status").textContent="result viewer";
   resize();
   try{ await loadResult(); }
-  catch(err){ $("status").textContent="无法加载 result: "+(err&&err.message?err.message:err); }
+  catch(err){ $("status").textContent="Unable to load result: "+(err&&err.message?err.message:err); }
 }
 init();
 </script>

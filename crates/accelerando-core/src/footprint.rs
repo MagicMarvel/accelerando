@@ -58,6 +58,17 @@ pub enum Plot {
         levels: Vec<VpLevel>,
         span: usize,
     },
+    /// A price-range box ending on this footprint and extending `span` bars to the left.
+    PriceBox {
+        id: String,
+        low: f64,
+        high: f64,
+        span: usize,
+        color: String,
+        text: String,
+        #[serde(default)]
+        group: Option<String>,
+    },
 }
 
 /// One aggregated bar flowing through the pipeline.

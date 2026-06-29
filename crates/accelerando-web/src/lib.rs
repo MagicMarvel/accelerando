@@ -19,7 +19,7 @@ const EXPERIMENT_HTML: &str = r#"<!doctype html>
 :root{font-family:Inter,"Segoe UI",Arial,sans-serif;background:#f6f7f9;color:#111827}
 body{margin:0}
 header{padding:10px 16px;background:#0f172a;color:white;display:flex;gap:12px;align-items:baseline}
-.title{font-size:16px;font-weight:800;letter-spacing:.3px}.tag{font-size:12px;color:#94a3b8}
+.title{font-size:16px;font-weight:800;letter-spacing:.3px}.brand-home{color:#fff;text-decoration:none;flex:0 0 auto}.brand-home:hover{text-decoration:underline}.tag{font-size:12px;color:#94a3b8}
 main{padding:14px}
 .cards{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:12px}
 .card{min-width:120px;padding:8px 10px;border:1px solid #e5e7eb;border-radius:8px;background:#fff}
@@ -42,7 +42,7 @@ main{padding:14px}
 </style>
 </head>
 <body>
-<header><span class="title">ACCELERANDO</span><span class="tag">experiment · multi-run comparison</span></header>
+<header><a class="title brand-home" href="/" title="Back to home">ACCELERANDO</a><span class="tag">experiment · multi-run comparison</span></header>
 <main>
   <div class="cards" id="cards"></div>
   <div class="runs" id="runs"></div>

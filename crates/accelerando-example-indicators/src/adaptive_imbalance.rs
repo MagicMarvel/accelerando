@@ -229,12 +229,12 @@ impl AdaptiveImbalance {
     fn plot_marker(&self, fp: &mut Footprint, node: EdgeNode, is_buy: bool, threshold: f64) {
         let (color, text) = if is_buy {
             (
-                "#2563eb",
+                "#6d6dff",
                 format!("upper imbalance {:.0}/{:.0}", node.delta, threshold),
             )
         } else {
             (
-                "#d97706",
+                "#ff6d6d",
                 format!("lower imbalance {:.0}/{:.0}", -node.delta, threshold),
             )
         };

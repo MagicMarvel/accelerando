@@ -315,7 +315,7 @@ impl BigTrades {
             fp.plots.push(Plot::Marker {
                 price: self.price_from_key(key),
                 shape: "circle".to_string(),
-                color: "#2563eb".to_string(),
+                color: "#6d6dff".to_string(),
                 text: format!("{:.0}", size),
                 text_dx: Some(0.0),
                 text_dy: Some(0.0),
@@ -333,7 +333,7 @@ impl BigTrades {
             fp.plots.push(Plot::Marker {
                 price: self.price_from_key(key),
                 shape: "circle".to_string(),
-                color: "#d97706".to_string(),
+                color: "#ff6d6d".to_string(),
                 text: format!("{:.0}", size),
                 text_dx: Some(0.0),
                 text_dy: Some(0.0),
