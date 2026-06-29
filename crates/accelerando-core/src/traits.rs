@@ -58,18 +58,19 @@ pub trait Indicator {
     fn name(&self) -> &str;
 }
 
-/// Decides position changes from order-flow events and/or enriched footprints.
+/// Decides position changes from enriched footprints.
 pub trait Strategy {
     /// Event classes this strategy consumes through [`Strategy::on_event`].
+    ///
+    /// Built-in engines require this to remain [`EventInterest::NONE`] so strategy decisions are
+    /// based on completed footprints rather than raw events.
     fn event_interest(&self) -> EventInterest {
         EventInterest::NONE
     }
 
     /// Called once for every normalized order-flow event.
     ///
-    /// The current broker still applies the existing bar/footprint fill model. Event-driven
-    /// strategies can use this hook for signal state today; a tick-level fill model can be added
-    /// behind the same callback later.
+    /// This hook is reserved for custom engines. The built-in backtest runners do not call it.
     fn on_event(&mut self, _ev: &OrderFlowEvent, _ctx: &mut OrderCtx) {}
 
     /// Called once per completed (and indicator-enriched) footprint.

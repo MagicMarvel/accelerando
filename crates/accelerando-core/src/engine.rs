@@ -3,7 +3,7 @@
 
 use crate::broker::{Broker, BrokerConfig, OrderCtx};
 use crate::event::{EventInterest, OrderFlowEvent};
-use crate::footprint::{Footprint, Plot};
+use crate::footprint::Footprint;
 use crate::metrics::Metrics;
 use crate::progress::ProgressHandle;
 use crate::result::{BacktestResult, LiquidityHeatmap, LiquidityLevel, LiquiditySnapshot};
@@ -318,16 +318,17 @@ pub fn run_backtest_progress(
     let mut history: Vec<Footprint> = Vec::new();
     let mut liquidity_heatmap = LiquidityHeatmap::default();
     let mut book_depth = keep_liquidity_heatmap.then(BookDepth::new);
-    let mut pending_event_plots: Vec<Plot> = Vec::new();
     let mut last_close = f64::NAN;
     let mut last_ts = 0i64;
     let aggregator_interest = aggregator.event_interest();
     let indicator_interests: Vec<EventInterest> =
         indicators.iter().map(|ind| ind.event_interest()).collect();
-    let strategy_interest = strategy.event_interest();
-    let mut source_interest = EventInterest::CONTRACT
-        .union(aggregator_interest)
-        .union(strategy_interest);
+    assert_eq!(
+        strategy.event_interest(),
+        EventInterest::NONE,
+        "run_backtest_progress only supports footprint-only strategies"
+    );
+    let mut source_interest = EventInterest::CONTRACT.union(aggregator_interest);
     for interest in &indicator_interests {
         source_interest = source_interest.union(*interest);
     }
@@ -346,7 +347,6 @@ pub fn run_backtest_progress(
                   history: &mut Vec<Footprint>,
                   indicators: &mut Vec<Box<dyn Indicator>>,
                   strategy: &mut Box<dyn Strategy>,
-                  pending_event_plots: &mut Vec<Plot>,
                   liquidity_heatmap: &mut LiquidityHeatmap,
                   book_depth: Option<&BookDepth>| {
         let mut fp = fp;
@@ -356,7 +356,6 @@ pub fn run_backtest_progress(
         for ind in indicators.iter_mut() {
             ind.on_footprint(&mut fp, history);
         }
-        fp.plots.append(pending_event_plots);
         if let Some(book_depth) = book_depth {
             let depth = book_depth.snapshot(fp.ts_last_ns, fp.close);
             if !depth.levels.is_empty() {
@@ -399,7 +398,6 @@ pub fn run_backtest_progress(
                             &mut history,
                             &mut indicators,
                             &mut strategy,
-                            &mut pending_event_plots,
                             &mut liquidity_heatmap,
                             book_depth.as_ref(),
                         );
@@ -418,11 +416,6 @@ pub fn run_backtest_progress(
                 ind.on_event(&ev);
             }
         }
-        if strategy_interest.matches(&ev) {
-            let mut ctx = OrderCtx::new(&mut broker);
-            strategy.on_event(&ev, &mut ctx);
-            pending_event_plots.extend(ctx.take_plots());
-        }
         if let Some(book_depth) = book_depth.as_mut() {
             book_depth.on_event(&ev);
         }
@@ -436,7 +429,6 @@ pub fn run_backtest_progress(
             &mut history,
             &mut indicators,
             &mut strategy,
-            &mut pending_event_plots,
             &mut liquidity_heatmap,
             book_depth.as_ref(),
         );

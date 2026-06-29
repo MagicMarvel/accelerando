@@ -1,8 +1,8 @@
 //! Accelerando core: the spine of a high-speed, pluggable footprint backtester.
 //!
 //! Pipeline: [`DataSource`] emits one [`OrderFlowEvent`] stream. The engine fans it out to
-//! event-aware [`Indicator`]s / [`Strategy`] and to the [`FootprintAggregator`], which produces
-//! display footprints for footprint-aware indicators, strategies, and [`BacktestResult`].
+//! event-aware [`Indicator`]s and to the [`FootprintAggregator`], which produces display
+//! footprints for footprint-aware indicators, strategies, and [`BacktestResult`].
 //!
 //! Every pluggable stage is built from a data-driven [`Params`] map and advertises a
 //! [`ParamSpec`], so the same definitions feed both a single backtest and the hyperopt search.

@@ -34,7 +34,7 @@ direct code-only construction.
 | `accelerando-core` | event/footprint model, traits, engine, broker, metrics |
 | `accelerando` | facade crate that registers the built-in example adapters |
 | `accelerando-example-sources` | example data sources, including `csv` |
-| `accelerando-example-aggregators` | example aggregators, including `time` |
+| `accelerando-example-aggregators` | example aggregators, including `range` and `time` |
 | `accelerando-example-indicators` | example indicators, including `technical` |
 | `accelerando-example-strategy` | example strategy, `indicator_cross` |
 | `accelerando-hyperopt` | library-only parameter search primitives |
@@ -64,10 +64,10 @@ fn main() {
     source_params.set("buy_aggressor_code", ParamValue::Int(2));
 
     let mut agg_params = Params::default();
-    agg_params.set("bar_secs", ParamValue::Int(300));
+    agg_params.set("range_ticks", ParamValue::Int(30));
 
     let source = registry.build_source("csv", &source_params).unwrap();
-    let aggregator = registry.build_aggregator("time", &agg_params).unwrap();
+    let aggregator = registry.build_aggregator("range", &agg_params).unwrap();
     let indicator = registry.build_indicator("technical", &Params::default()).unwrap();
     let strategy = registry.build_strategy("indicator_cross", &Params::default()).unwrap();
 
