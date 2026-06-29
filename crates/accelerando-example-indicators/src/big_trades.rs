@@ -316,9 +316,9 @@ impl BigTrades {
                 price: self.price_from_key(key),
                 shape: "circle".to_string(),
                 color: "#2563eb".to_string(),
-                text: format!("BT buy {:.0}", size),
-                text_dx: Some(8.0),
-                text_dy: Some(-10.0),
+                text: format!("{:.0}", size),
+                text_dx: Some(0.0),
+                text_dy: Some(0.0),
                 group: Some("big_trades".to_string()),
             });
         }
@@ -334,9 +334,9 @@ impl BigTrades {
                 price: self.price_from_key(key),
                 shape: "circle".to_string(),
                 color: "#d97706".to_string(),
-                text: format!("BT sell {:.0}", size),
-                text_dx: Some(8.0),
-                text_dy: Some(10.0),
+                text: format!("{:.0}", size),
+                text_dx: Some(0.0),
+                text_dy: Some(0.0),
                 group: Some("big_trades".to_string()),
             });
         }

@@ -498,15 +498,67 @@ function drawLabel(ctx,text,x,y,color,layout,opts={}){
 function drawCandles(ctx,vis,L,T,ph,xStep,cw,y){
   for(let i=0;i<vis.length;i++){ const b=vis[i]; const x=L+i*xStep+xStep/2; const c=b.close>=b.open?COLORS.up:COLORS.down; ctx.strokeStyle=c;ctx.fillStyle=c; ctx.beginPath();ctx.moveTo(x,y(b.high));ctx.lineTo(x,y(b.low));ctx.stroke(); const oy=y(b.open),cy=y(b.close); ctx.fillRect(x-cw/2,Math.min(oy,cy),cw,Math.max(1,Math.abs(oy-cy))); }
 }
+function markerSize(p){
+  const text=String(p.text??"");
+  const m=text.replace(/,/g,"").match(/-?\d+(\.\d+)?/);
+  const n=m?Number(m[0]):0;
+  return Number.isFinite(n)&&n>0?n:0;
+}
+function isWarmMarker(color){ return ["#d97706","#f59e0b","#f97316"].includes(String(color||"").toLowerCase()); }
+function colorAlpha(color,a){
+  const c=String(color||"").trim();
+  const m=c.match(/^#([0-9a-f]{6})$/i);
+  if(!m)return c;
+  const n=parseInt(m[1],16), r=(n>>16)&255, g=(n>>8)&255, b=n&255;
+  return `rgba(${r},${g},${b},${a})`;
+}
+function drawBigTradeBubble(ctx,p,x,yy,r){
+  const color=p.color||"#2563eb", text=String(p.text??"");
+  ctx.save();
+  ctx.shadowColor="rgba(15,23,42,0.18)";
+  ctx.shadowBlur=5;
+  ctx.shadowOffsetY=1;
+  ctx.fillStyle=colorAlpha(color,0.74);
+  ctx.beginPath(); ctx.arc(x,yy,r,0,Math.PI*2); ctx.fill();
+  ctx.shadowColor="transparent";
+  ctx.strokeStyle=colorAlpha(color,0.88);
+  ctx.lineWidth=1.5;
+  ctx.beginPath(); ctx.arc(x,yy,Math.max(2,r-0.75),0,Math.PI*2); ctx.stroke();
+  if(text&&r>=9){
+    const fontSize=clamp(Math.floor(r*0.72),8,13);
+    ctx.font=`800 ${fontSize}px Segoe UI, Arial`;
+    ctx.textAlign="center"; ctx.textBaseline="middle";
+    ctx.fillStyle=isWarmMarker(color)?"#111827":"#ffffff";
+    const maxW=Math.max(6,r*1.72);
+    let label=text;
+    while(label.length>1&&ctx.measureText(label).width>maxW)label=label.slice(0,-1);
+    ctx.fillText(label,x,yy+0.5);
+  }
+  ctx.restore();
+}
 function drawPlotMarkers(ctx,vis,L,T,ph,xStep,y,labelLayout){
   ctx.save(); ctx.font="10px Segoe UI, Arial"; ctx.textBaseline="middle";
+  let maxBigTradeSize=0;
+  for(const b of vis){
+    for(const p of (b.plots||[])){
+      if(p.kind==="Marker"&&markerCat(p)==="big_trades")maxBigTradeSize=Math.max(maxBigTradeSize,markerSize(p));
+    }
+  }
   for(let i=0;i<vis.length;i++){
     const b=vis[i], x=L+i*xStep+xStep/2;
     for(const p of (b.plots||[])){
       if(p.kind!=="Marker"||p.price==null)continue;
       if(!overlayOn(markerCat(p)))continue;
-      const yy=y(p.price); if(yy<T-12||yy>T+ph+12)continue;
-      const color=p.color||"#111827"; ctx.fillStyle=color; ctx.strokeStyle="#ffffff"; ctx.lineWidth=2;
+      const yy=y(p.price); if(yy<T-30||yy>T+ph+30)continue;
+      const color=p.color||"#111827", cat=markerCat(p);
+      if(cat==="big_trades"){
+        const size=markerSize(p);
+        const n=maxBigTradeSize>0?Math.sqrt(size/maxBigTradeSize):0.5;
+        const r=clamp(8+n*20,10,28);
+        drawBigTradeBubble(ctx,p,x,yy,r);
+        continue;
+      }
+      ctx.fillStyle=color; ctx.strokeStyle="#ffffff"; ctx.lineWidth=2;
       ctx.beginPath();
       if(p.shape==="triangle_up"){
         ctx.moveTo(x,yy-8);ctx.lineTo(x-6,yy+5);ctx.lineTo(x+6,yy+5);ctx.closePath();

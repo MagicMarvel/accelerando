@@ -4,7 +4,7 @@
 
 use std::io::Cursor;
 
-use accelerando_core::{BacktestResult, ExperimentResult, ExperimentRunSummary};
+use accelerando_core::{result::{ExperimentResult, ExperimentRunSummary}, BacktestResult};
 use serde::Serialize;
 use tiny_http::{Header, Response, Server};
 
