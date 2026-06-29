@@ -26,7 +26,7 @@ main{padding:14px}
 .k{font-size:10px;color:#6b7280;text-transform:uppercase;letter-spacing:.4px}.v{font-size:18px;font-weight:800;margin-top:2px}
 .runs{display:flex;flex-direction:column;gap:10px}
 .run-card{border:1px solid #e5e7eb;border-radius:8px;background:#fff;overflow:hidden}
-.run-top{display:grid;grid-template-columns:minmax(180px,1.2fr) minmax(120px,.8fr) repeat(7,minmax(78px,auto)) auto;gap:8px;align-items:center;padding:10px 12px;border-bottom:1px solid #eef2f7}
+.run-top{display:grid;grid-template-columns:minmax(180px,1.2fr) minmax(120px,.8fr) repeat(8,minmax(78px,auto)) auto;gap:8px;align-items:center;padding:10px 12px;border-bottom:1px solid #eef2f7}
 .run-name{font-size:14px;font-weight:800}.muted{color:#64748b}.strategy{font-size:13px;color:#334155}
 .metric{text-align:right}.metric .k{font-size:9px}.metric .v{font-size:13px}
 .open{justify-self:end;text-decoration:none;border:1px solid #c5ccd6;border-radius:8px;padding:6px 10px;color:#111827;background:#fff;font-size:12px;font-weight:700}
@@ -120,6 +120,7 @@ async function init(){
         ${metric("pf",fmt(m.profit_factor))}
         ${metric("sharpe",fmt(m.sharpe),cls(m.sharpe))}
         ${metric("max dd","$"+fmt(m.max_drawdown),"neg")}
+        ${metric("avg mae",fmt(m.avg_max_adverse_ticks))}
         <a class="open" href="/run?id=${encodeURIComponent(r.id)}">Open chart</a>
       </div>
       <div class="params">${renderParams(r)}</div>

@@ -31,6 +31,12 @@ pub struct Trade {
     /// Take-profit price the position carried while open (`None` if no target was set).
     #[serde(default)]
     pub target: Option<f64>,
+    /// Maximum adverse excursion while the trade was open, in account currency.
+    #[serde(default)]
+    pub max_adverse_excursion: f64,
+    /// Maximum adverse excursion while the trade was open, in ticks.
+    #[serde(default)]
+    pub max_adverse_ticks: f64,
     /// Realized PnL in account currency, net of commission.
     pub pnl: f64,
     pub reason: TradeReason,

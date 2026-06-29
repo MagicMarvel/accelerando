@@ -57,6 +57,8 @@ struct Position {
     entry_ts: i64,
     stop: Option<f64>,
     target: Option<f64>,
+    max_adverse_excursion: f64,
+    max_adverse_ticks: f64,
 }
 
 /// The broker simulator: tracks one position, fills next-bar, records trades and equity.
@@ -125,6 +127,8 @@ impl Broker {
                 exit_px: px,
                 stop: pos.stop,
                 target: pos.target,
+                max_adverse_excursion: pos.max_adverse_excursion,
+                max_adverse_ticks: pos.max_adverse_ticks,
                 pnl,
                 reason,
             });
@@ -159,6 +163,8 @@ impl Broker {
             entry_ts: ts,
             stop,
             target,
+            max_adverse_excursion: 0.0,
+            max_adverse_ticks: 0.0,
         });
     }
 
@@ -178,7 +184,8 @@ impl Broker {
                 self.pending_age = 0;
             }
         }
-        // 2) Intrabar stop/target check against this bar's range.
+        // 2) Track adverse movement after entry, then check stops/targets against this bar.
+        self.update_adverse_excursion(fp);
         self.check_exits(fp);
         // 3) Mark-to-market equity at the close.
         let eq = self.mark_to_market(fp.close);
@@ -263,6 +270,27 @@ impl Broker {
                 }
             }
         }
+    }
+
+    fn update_adverse_excursion(&mut self, fp: &Footprint) {
+        let Some(pos) = self.position.as_mut() else {
+            return;
+        };
+        let adverse_px = if pos.dir > 0 {
+            let worst = pos.stop.filter(|stop| fp.low <= *stop).unwrap_or(fp.low);
+            (pos.entry_px - worst).max(0.0)
+        } else {
+            let worst = pos.stop.filter(|stop| fp.high >= *stop).unwrap_or(fp.high);
+            (worst - pos.entry_px).max(0.0)
+        };
+        let adverse_ticks = if self.tick_size > 0.0 {
+            adverse_px / self.tick_size
+        } else {
+            0.0
+        };
+        let adverse_currency = adverse_px * pos.qty * self.multiplier;
+        pos.max_adverse_ticks = pos.max_adverse_ticks.max(adverse_ticks);
+        pos.max_adverse_excursion = pos.max_adverse_excursion.max(adverse_currency);
     }
 
     fn mark_to_market(&self, px: f64) -> f64 {

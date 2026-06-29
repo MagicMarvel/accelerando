@@ -21,6 +21,10 @@ pub struct Metrics {
     pub avg_loss: f64,
     /// Average PnL per trade.
     pub expectancy: f64,
+    /// Average maximum adverse excursion per trade, in account currency.
+    pub avg_max_adverse_excursion: f64,
+    /// Average maximum adverse excursion per trade, in ticks.
+    pub avg_max_adverse_ticks: f64,
     /// Annualization-free Sharpe of per-bar equity returns.
     pub sharpe: f64,
     pub sortino: f64,
@@ -45,6 +49,8 @@ impl Metrics {
 
         let mut gross_profit = 0.0;
         let mut gross_loss = 0.0;
+        let mut adverse_excursion = 0.0;
+        let mut adverse_ticks = 0.0;
         for t in trades {
             if t.pnl >= 0.0 {
                 m.wins += 1;
@@ -53,6 +59,8 @@ impl Metrics {
                 m.losses += 1;
                 gross_loss += -t.pnl;
             }
+            adverse_excursion += t.max_adverse_excursion.max(0.0);
+            adverse_ticks += t.max_adverse_ticks.max(0.0);
         }
         m.trades = trades.len();
         m.win_rate = if m.trades > 0 {
@@ -82,6 +90,10 @@ impl Metrics {
         } else {
             0.0
         };
+        if m.trades > 0 {
+            m.avg_max_adverse_excursion = adverse_excursion / m.trades as f64;
+            m.avg_max_adverse_ticks = adverse_ticks / m.trades as f64;
+        }
 
         // Per-bar equity returns drive Sharpe/Sortino and drawdown.
         let mut peak = starting_equity;
@@ -147,5 +159,37 @@ fn sortino(rets: &[f64]) -> f64 {
         mu / dd * (rets.len() as f64).sqrt()
     } else {
         0.0
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::result::TradeReason;
+
+    fn trade(pnl: f64, max_adverse_excursion: f64, max_adverse_ticks: f64) -> Trade {
+        Trade {
+            entry_ts_ns: 1,
+            exit_ts_ns: 2,
+            dir: 1,
+            qty: 1.0,
+            entry_px: 100.0,
+            exit_px: 101.0,
+            stop: None,
+            target: None,
+            max_adverse_excursion,
+            max_adverse_ticks,
+            pnl,
+            reason: TradeReason::Signal,
+        }
+    }
+
+    #[test]
+    fn computes_average_max_adverse_excursion() {
+        let trades = vec![trade(10.0, 25.0, 2.0), trade(-5.0, 75.0, 6.0)];
+        let metrics = Metrics::compute(100_000.0, &trades, &[]);
+
+        assert_eq!(metrics.avg_max_adverse_excursion, 50.0);
+        assert_eq!(metrics.avg_max_adverse_ticks, 4.0);
     }
 }

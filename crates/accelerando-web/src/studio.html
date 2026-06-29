@@ -476,7 +476,8 @@ function renderCards(m){
   const cards=[["Net PnL","$"+fmt(m.net_pnl),sc(m.net_pnl)],["Return",fmt(m.return_pct)+"%",sc(m.return_pct)],
     ["Trades",String(m.trades),""],["Win rate",fmt(m.win_rate*100,1)+"%",""],
     ["Profit factor",fmt(m.profit_factor),sc(m.profit_factor-1)],["Sharpe",fmt(m.sharpe),sc(m.sharpe)],
-    ["Sortino",fmt(m.sortino),sc(m.sortino)],["Max DD","$"+fmt(m.max_drawdown),"neg"],["Max DD %",fmt(m.max_drawdown_pct,1)+"%","neg"]];
+    ["Sortino",fmt(m.sortino),sc(m.sortino)],["Max DD","$"+fmt(m.max_drawdown),"neg"],["Max DD %",fmt(m.max_drawdown_pct,1)+"%","neg"],
+    ["Avg MAE","$"+fmt(m.avg_max_adverse_excursion),"neg"],["Avg MAE ticks",fmt(m.avg_max_adverse_ticks),"neg"]];
   $("cards").innerHTML=cards.map(([k,v,c])=>`<div class="card"><div class="k">${k}</div><div class="v ${c}">${v}</div></div>`).join("");
 }
 function setBarsPerView(next,anchor=1){ autoYZoom("equity"); const old=barsPerView; next=Math.round(clamp(next,1,Math.max(1,fps.length))); const a=start+old*anchor; barsPerView=next; start=clamp(Math.round(a-barsPerView*anchor),0,Math.max(0,fps.length-barsPerView)); draw(); }
