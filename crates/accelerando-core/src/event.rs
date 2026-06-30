@@ -22,7 +22,8 @@ impl Side {
 ///
 /// Data sources translate their native format into this stream. A trades-only feed can emit
 /// [`OrderFlowEvent::Contract`] once followed by [`OrderFlowEvent::Trade`]s;
-/// L2-capable feeds may additionally emit [`OrderFlowEvent::AddLimit`] / [`OrderFlowEvent::ReduceLimit`].
+/// L2-capable feeds may additionally emit [`OrderFlowEvent::AddLimit`] / [`OrderFlowEvent::ReduceLimit`]
+/// (deltas) or [`OrderFlowEvent::SetLevel`] (absolute per-level sizes from a snapshot feed).
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 pub enum OrderFlowEvent {
     /// Instrument metadata, emitted once before the trade stream.
@@ -43,6 +44,16 @@ pub enum OrderFlowEvent {
     },
     /// A resting limit order was reduced or cancelled.
     ReduceLimit {
+        ts_ns: i64,
+        price: f64,
+        size: f64,
+        side: Side,
+    },
+    /// The resting size at a price level was set to an absolute value (snapshot / MBP-style feed,
+    /// e.g. Bookmap depth rows). `size == 0` clears the level on that side. Unlike
+    /// [`OrderFlowEvent::AddLimit`] / [`OrderFlowEvent::ReduceLimit`], which carry deltas, this
+    /// overwrites whatever was previously resting at `price` on `side`.
+    SetLevel {
         ts_ns: i64,
         price: f64,
         size: f64,
@@ -73,7 +84,9 @@ impl EventInterest {
         self.contains(match ev {
             OrderFlowEvent::Contract { .. } => Self::CONTRACT,
             OrderFlowEvent::Trade { .. } => Self::TRADE,
-            OrderFlowEvent::AddLimit { .. } | OrderFlowEvent::ReduceLimit { .. } => Self::L2,
+            OrderFlowEvent::AddLimit { .. }
+            | OrderFlowEvent::ReduceLimit { .. }
+            | OrderFlowEvent::SetLevel { .. } => Self::L2,
         })
     }
 }

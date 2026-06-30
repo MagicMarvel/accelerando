@@ -182,6 +182,23 @@ pub fn serve_experiment_lazy<F>(
 where
     F: Fn(&str) -> Option<BacktestResult>,
 {
+    serve_experiment_lazy_heatmap(summaries, port, load_result, |_| None)
+}
+
+/// Like [`serve_experiment_lazy`], but also routes `GET /api/heatmap?<query>` to `heatmap`, which
+/// receives the raw query string and returns a ready-to-send JSON body (or `None` for 404). This
+/// lets the host app stream a windowed, zoomable order-book heatmap without the web crate needing to
+/// know its data model.
+pub fn serve_experiment_lazy_heatmap<F, H>(
+    summaries: Vec<ExperimentRunSummary>,
+    port: u16,
+    load_result: F,
+    heatmap: H,
+) -> std::io::Result<()>
+where
+    F: Fn(&str) -> Option<BacktestResult>,
+    H: Fn(&str) -> Option<String>,
+{
     #[derive(Serialize)]
     struct SummaryPayload<'a> {
         runs: &'a [ExperimentRunSummary],
@@ -213,6 +230,13 @@ where
                         &serde_json::to_string(&result).expect("serialize selected result"),
                     ),
                     None => Response::from_string("run not found").with_status_code(404),
+                }
+            }
+            "/api/heatmap" => {
+                let query = raw_url.split_once('?').map(|(_, q)| q).unwrap_or("");
+                match heatmap(query) {
+                    Some(body) => json_response(&body),
+                    None => Response::from_string("no heatmap").with_status_code(404),
                 }
             }
             "/api/progress" => json_response(r#"{"running":false,"has_result":true}"#),

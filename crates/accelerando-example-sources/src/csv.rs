@@ -4,11 +4,17 @@
 //!   `f,<ts>,-1,REC`                                   file header (ignored)
 //!   `c,<ts>,0,<exch>,<sym>,<type>,<tick>,<mult>,<n>`  contract metadata
 //!   `T,<ts_ns>,<id>,<price>,<size>,<side>,<flag>`     trade print
-//!   `A,<ts_ns>,<id>,<price>,<size>,<side>,...`        resting liquidity added
-//!   `R,<ts_ns>,<id>,<price>,<size>,<side>,...`        resting liquidity reduced
+//!   `A,<ts_ns>,<id>,<price>,<size>,<side>,...`        resting liquidity added (delta)
+//!   `R,<ts_ns>,<id>,<price>,<size>,<side>,...`        resting liquidity reduced (delta)
+//!   `r,<ts_ns>,<id>,<side>,<price>,<size>`            absolute book level snapshot/update
 //!
-//! `side` is `1` or `2`. Which one is the buy aggressor is feed-dependent, so it is exposed as the
-//! `buy_aggressor_code` parameter (default `2`) and can be flipped without touching code.
+//! For trade / `A` / `R` rows `side` is `1` or `2`; which one is the buy aggressor is feed-dependent,
+//! so it is exposed as the `buy_aggressor_code` parameter (default `2`).
+//!
+//! Lowercase `r` rows are absolute depth levels (Bookmap-style MBP feed): each row overwrites the
+//! resting size at `price` on `side`, and `size == 0` clears the level. Note these rows use a
+//! *different* column order (`side` before `price`) and a *different* side encoding than the
+//! aggressor rows, so the bid side code is exposed separately as `bid_book_code` (default `1`).
 
 use std::fs::File;
 use std::io::{BufRead, BufReader};
@@ -22,6 +28,7 @@ use accelerando_core::{
 pub struct CsvSource {
     path: String,
     buy_aggressor_code: i64,
+    bid_book_code: i64,
     progress: Option<ProgressHandle>,
     event_interest: EventInterest,
 }
@@ -31,12 +38,14 @@ impl Configurable for CsvSource {
         ParamSpec::new()
             .fixed_str("path", "")
             .fixed_int("buy_aggressor_code", 2)
+            .fixed_int("bid_book_code", 1)
     }
 
     fn from_params(params: &Params) -> Self {
         Self {
             path: params.str("path", ""),
             buy_aggressor_code: params.int("buy_aggressor_code", 2),
+            bid_book_code: params.int("bid_book_code", 1),
             progress: None,
             event_interest: EventInterest::ALL,
         }
@@ -56,6 +65,7 @@ impl DataSource for CsvSource {
             reader,
             line: String::with_capacity(128),
             buy_aggressor_code: self.buy_aggressor_code,
+            bid_book_code: self.bid_book_code,
             progress: self.progress,
             event_interest: self.event_interest,
         })
@@ -74,6 +84,7 @@ struct CsvIter {
     reader: BufReader<File>,
     line: String,
     buy_aggressor_code: i64,
+    bid_book_code: i64,
     progress: Option<ProgressHandle>,
     event_interest: EventInterest,
 }
@@ -121,6 +132,13 @@ impl CsvIter {
             "R" | "ReduceLimit" => {
                 if self.event_interest.contains(EventInterest::L2) {
                     self.parse_l2(f, false)
+                } else {
+                    None
+                }
+            }
+            "r" => {
+                if self.event_interest.contains(EventInterest::L2) {
+                    self.parse_snapshot(f)
                 } else {
                     None
                 }
@@ -205,6 +223,33 @@ impl CsvIter {
                 side,
             })
         }
+    }
+
+    /// Parse an absolute book-level snapshot row: `r,<ts>,<id>,<side>,<price>,<size>`.
+    ///
+    /// `f` is positioned just after the leading `r` token. The column order (`side` then `price`)
+    /// and side encoding differ from the aggressor rows, so `bid_book_code` is used here.
+    fn parse_snapshot<'a>(&self, mut f: impl Iterator<Item = &'a str>) -> Option<OrderFlowEvent> {
+        let ts_ns = f.next()?.parse::<i64>().ok()?;
+        let _id = f.next()?;
+        let side_code = f.next().and_then(|v| v.parse::<i64>().ok())?;
+        let price = f.next()?.parse::<f64>().ok().filter(|v| v.is_finite())?;
+        let size = f
+            .next()?
+            .parse::<f64>()
+            .ok()
+            .filter(|v| v.is_finite() && *v >= 0.0)?;
+        let side = if side_code == self.bid_book_code {
+            Side::Buy
+        } else {
+            Side::Sell
+        };
+        Some(OrderFlowEvent::SetLevel {
+            ts_ns,
+            price,
+            size,
+            side,
+        })
     }
 }
 

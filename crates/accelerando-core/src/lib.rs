@@ -11,6 +11,7 @@ pub mod broker;
 pub mod engine;
 pub mod event;
 pub mod footprint;
+pub mod heatmap;
 pub mod metrics;
 pub mod params;
 pub mod progress;
@@ -25,6 +26,10 @@ pub use engine::{
 };
 pub use event::{EventInterest, OrderFlowEvent, Side};
 pub use footprint::{Footprint, Level, Plot, VpLevel};
+pub use heatmap::{
+    parse_heatmap_query, CompactLevel, HeatmapBucket, HeatmapMetric, HeatmapQuery, HeatmapWindow,
+    HiresHeatmap, SharedHeatmap, DEFAULT_HEATMAP_CACHE_DIR,
+};
 pub use metrics::Metrics;
 pub use params::{Configurable, ParamRange, ParamSpec, ParamValue, Params};
 pub use progress::{ProgressHandle, ProgressSnapshot};

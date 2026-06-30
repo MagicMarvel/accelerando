@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Accelerando — backtest studio</title>
+<title>Accelerando - backtest studio</title>
 <style>
   :root { color-scheme: light; font-family: Inter, "Segoe UI", Arial, sans-serif; background:#f6f7f9; color:#111827; }
   * { box-sizing: border-box; }
@@ -72,20 +72,22 @@
   .seg button { border:0; border-radius:0; height:28px; padding:0 10px; }
   .seg button + button { border-left:1px solid #cbd5e1; }
   .seg button.active { background:#0f172a; color:#fff; }
-  .charts { --equity-height:180px; display:grid; grid-template-rows:minmax(160px,1fr) 7px minmax(80px,var(--equity-height)); min-height:0; }
+  .charts { --equity-height:180px; position:relative; display:grid; grid-template-rows:minmax(160px,1fr) 7px minmax(80px,var(--equity-height)); min-height:0; }
   .charts.equity-collapsed { grid-template-rows:minmax(160px,1fr) 0 0; }
   .charts.equity-collapsed .splitter, .charts.equity-collapsed #equity { display:none; }
   .splitter { height:7px; cursor:row-resize; background:#eef2f7; border-top:1px solid #cbd5e1; border-bottom:1px solid #cbd5e1; }
   .splitter:hover, .splitter.dragging { background:#dbeafe; }
   canvas { display:block; width:100%; height:100%; background:#fbfcfe; cursor:grab; }
   canvas.dragging { cursor:grabbing; }
+  .center-price { position:absolute; top:8px; right:10px; z-index:3; width:30px; height:30px; padding:0; border-radius:50%; font-size:17px; line-height:1; background:rgba(255,255,255,0.88); color:#0f172a; box-shadow:0 1px 4px rgba(15,23,42,0.18); }
+  .center-price:hover { background:#fff; }
   .empty { display:flex; align-items:center; justify-content:center; height:100%; color:#94a3b8; font-size:14px; }
 </style>
 </head>
 <body class="viewer">
 <header>
   <a class="title brand-home" href="/" title="Back to home">ACCELERANDO</a>
-  <span class="tag">studio · the world has been accelerated</span>
+  <span class="tag">studio - the world has been accelerated</span>
   <span class="status" id="status"></span>
 </header>
 <div class="main">
@@ -94,7 +96,7 @@
       <h3>run</h3>
       <div class="body">
         <div class="runbar">
-          <button class="primary" id="runBtn" style="flex:0 0 auto;">▶ Run</button>
+          <button class="primary" id="runBtn" style="flex:0 0 auto;">Run</button>
           <div class="progress"><i id="progBar"></i></div>
         </div>
         <div class="prog-text" id="progText"></div>
@@ -138,6 +140,7 @@
       <span class="rng" id="range"></span>
     </div>
     <div class="charts">
+      <button id="centerPrice" class="center-price" type="button" title="Center current price" aria-label="Center current price">+</button>
       <canvas id="price"></canvas>
       <div id="chartSplitter" class="splitter" title="Drag to resize charts"></div>
       <canvas id="equity"></canvas>
@@ -166,13 +169,13 @@ function readStoredBool(key,fallback=false){ try{ const v=localStorage.getItem(k
 function writeStoredBool(key,value){ try{ localStorage.setItem(key,value?"1":"0"); } catch(_){} }
 let metaCollapsed=readStoredBool("accelerando.runMetaCollapsed",false);
 let equityCollapsed=readStoredBool("accelerando.equityCollapsed",false);
-const fmt=(n,d=2)=>(n===null||n===undefined||!isFinite(n))?"–":Number(n).toLocaleString(undefined,{maximumFractionDigits:d,minimumFractionDigits:d});
+const fmt=(n,d=2)=>(n===null||n===undefined||!isFinite(n))?"-":Number(n).toLocaleString(undefined,{maximumFractionDigits:d,minimumFractionDigits:d});
 const fmtTs=ns=>new Date(Number(ns)/1e6).toLocaleString();
 const fmtAxisTs=ns=>new Date(Number(ns)/1e6).toLocaleTimeString([], {hour:"2-digit", minute:"2-digit"});
 const sc=n=>n>=0?"pos":"neg";
 const esc=s=>String(s??"").replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;","'":"&#39;"}[c]));
 function fmtParam(v){
-  if(v===null||v===undefined)return "–";
+  if(v===null||v===undefined)return "-";
   if(typeof v==="number")return Number.isInteger(v)?String(v):fmt(v,4);
   if(typeof v==="boolean")return v?"true":"false";
   return esc(v);
@@ -210,7 +213,7 @@ function renderRunMeta(){
   const groups=groupedParams(summary.params);
   host.classList.add("visible");
   const label=summary.label||summary.id||"run", strategy=summary.strategy||"";
-  host.innerHTML=`<div class="run-meta-bar"><button id="toggleRunMeta" class="meta-toggle" type="button" aria-expanded="${String(!metaCollapsed)}"></button><div class="run-meta-title">Parameters</div><div class="run-meta-sub">${esc(label)}${strategy?` · ${esc(strategy)}`:""}</div></div>`+
+  host.innerHTML=`<div class="run-meta-bar"><button id="toggleRunMeta" class="meta-toggle" type="button" aria-expanded="${String(!metaCollapsed)}"></button><div class="run-meta-title">Parameters</div><div class="run-meta-sub">${esc(label)}${strategy?` - ${esc(strategy)}`:""}</div></div>`+
     `<div class="run-meta-body"><div class="meta-head"><b>${esc(label)}</b><span>${esc(strategy)}</span></div>`+
     groups.map(g=>`<div class="meta-group"><div class="meta-title">${esc(g.name)}</div><div class="meta-items">${g.items.map(p=>`<span class="meta-param" title="${esc(p.name)} = ${esc(fmtParam(p.value))}"><b>${esc(p.name)}</b><span>${fmtParam(p.value)}</span></span>`).join("")}</div></div>`).join("")+
     `</div>`;
@@ -383,7 +386,7 @@ async function checkProgress(){
   else if(p.running){ bar.style.width="100%"; bar.style.opacity=0.4; }
   const mb=x=>(x/1048576).toFixed(0);
   txt.textContent = p.running
-    ? `running… ${p.pct!=null?(p.pct*100).toFixed(1)+"% · ":""}${mb(p.bytes)}/${p.total?mb(p.total):"?"} MB · ${p.footprints} footprints`
+    ? `running... ${p.pct!=null?(p.pct*100).toFixed(1)+"% - ":""}${mb(p.bytes)}/${p.total?mb(p.total):"?"} MB - ${p.footprints} footprints`
     : (p.error? "" : (p.has_result? "done." : "idle"));
   if(p.error){ $("runErr").textContent=p.error; }
   if(!p.running){
@@ -406,7 +409,7 @@ async function refreshRuns(){
   if(!runs.length){ el.innerHTML='<div style="color:#94a3b8;font-size:12px;">No saved runs yet</div>'; return; }
   for(const r of runs){
     const d=document.createElement("div"); d.className="run";
-    d.innerHTML=`<span class="nm">${r.name}</span><span class="mt"><span class="${r.net_pnl>=0?'pos':'neg'}">$${fmt(r.net_pnl,0)}</span> · ${r.trades}t · S${fmt(r.sharpe,2)}</span>`;
+    d.innerHTML=`<span class="nm">${r.name}</span><span class="mt"><span class="${r.net_pnl>=0?'pos':'neg'}">$${fmt(r.net_pnl,0)}</span> - ${r.trades}t - S${fmt(r.sharpe,2)}</span>`;
     d.onclick=()=>loadRun(r.name);
     el.append(d);
   }
@@ -421,6 +424,7 @@ async function loadRun(name){
 // ---------- chart rendering ----------
 function renderResult(data){
   DATA=data; fps=data.footprints||[]; eq=data.equity||[]; trades=data.trades||[];
+  heatView=null; heatData=null; heatImg=null; // reset zoomable heatmap window for the new run
   for(const t of trades){ t._ei=idxForEntryTs(t.entry_ts_ns); t._xi=idxForTs(t.exit_ts_ns); }
   renderCards(data.metrics);
   renderRunMeta();
@@ -481,8 +485,24 @@ function renderCards(m){
   $("cards").innerHTML=cards.map(([k,v,c])=>`<div class="card"><div class="k">${k}</div><div class="v ${c}">${v}</div></div>`).join("");
 }
 function setBarsPerView(next,anchor=1){ autoYZoom("equity"); const old=barsPerView; next=Math.round(clamp(next,1,Math.max(1,fps.length))); const a=start+old*anchor; barsPerView=next; start=clamp(Math.round(a-barsPerView*anchor),0,Math.max(0,fps.length-barsPerView)); draw(); }
-function resize(){ for(const c of [price,equity]){ const r=c.getBoundingClientRect(); const dpr=window.devicePixelRatio||1; c.width=Math.max(1,Math.floor(r.width*dpr)); c.height=Math.max(1,Math.floor(r.height*dpr)); c.getContext("2d").setTransform(dpr,0,0,dpr,0,0);} draw(); }
+function resize(){ for(const c of [price,equity]){ const r=c.getBoundingClientRect(); const dpr=window.devicePixelRatio||1; c.width=Math.max(1,Math.floor(r.width*dpr)); c.height=Math.max(1,Math.floor(r.height*dpr)); c.getContext("2d").setTransform(dpr,0,0,dpr,0,0);} draw(); if(chartMode==="heatmap")scheduleHeatFetch(); }
 function viewRange(){ const end=Math.min(fps.length,start+barsPerView); return [start,end]; }
+function visibleFootprints(){ const [s,e]=viewRange(); return fps.slice(s,e); }
+function currentVisiblePrice(){ const vis=visibleFootprints(); const b=vis[vis.length-1]||fps[fps.length-1]; return b&&isFinite(b.close)?b.close:null; }
+function centerCurrentPrice(){
+  const px=currentVisiblePrice(); if(px==null)return;
+  if(chartMode==="heatmap"){
+    if(!heatView)initHeatView(); if(!heatView)return;
+    const span=Math.max(0.5,heatView.pmax-heatView.pmin);
+    heatView.pmin=px-span/2; heatView.pmax=px+span/2;
+    draw(); scheduleHeatFetch(); return;
+  }
+  const st=yZoom.price; let span=(st&&isFinite(st.lo)&&isFinite(st.hi)&&st.hi>st.lo)?st.hi-st.lo:null;
+  if(!(span>0)){
+    const vis=visibleFootprints(); let lo=Infinity,hi=-Infinity; for(const b of vis){lo=Math.min(lo,b.low);hi=Math.max(hi,b.high);} span=(isFinite(lo)&&isFinite(hi)&&hi>lo)?(hi-lo)*1.12:8;
+  }
+  st.manual=true; st.lo=px-span/2; st.hi=px+span/2; draw();
+}
 function sortedTrades(){ return trades.filter(t=>Number.isFinite(t._ei)).sort((a,b)=>a._ei-b._ei); }
 function currentTradeIdx(list){
   if(!list.length)return -1;
@@ -510,7 +530,7 @@ function jumpToTrade(which){
   buildOverlayToggles();
   draw();
 }
-function setChartMode(mode){ chartMode=mode; $("modeCandles").classList.toggle("active",mode==="candles"); $("modeFootprint").classList.toggle("active",mode==="footprint"); $("modeHeatmap").classList.toggle("active",mode==="heatmap"); draw(); }
+function setChartMode(mode){ chartMode=mode; $("modeCandles").classList.toggle("active",mode==="candles"); $("modeFootprint").classList.toggle("active",mode==="footprint"); $("modeHeatmap").classList.toggle("active",mode==="heatmap"); if(mode==="heatmap"){ heatView=null; heatData=null; heatImg=null; ensureHeat(); } draw(); }
 function tickSizeFor(vis){
   if(DATA&&DATA.tick_size>0)return DATA.tick_size;
   let best=Infinity;
@@ -603,12 +623,17 @@ function drawBigTradeBubble(ctx,p,x,yy,r){
 }
 function drawPlotMarkers(ctx,vis,L,T,ph,xStep,y,labelLayout){
   ctx.save(); ctx.font="10px Segoe UI, Arial"; ctx.textBaseline="middle";
-  let maxBigTradeSize=0;
+  let maxBigTradeSize=0, minBigTradeSize=Infinity;
   for(const b of vis){
     for(const p of (b.plots||[])){
-      if(p.kind==="Marker"&&markerCat(p)==="big_trades")maxBigTradeSize=Math.max(maxBigTradeSize,markerSize(p));
+      if(p.kind==="Marker"&&markerCat(p)==="big_trades"){
+        const size=markerSize(p);
+        if(size>0){ maxBigTradeSize=Math.max(maxBigTradeSize,size); minBigTradeSize=Math.min(minBigTradeSize,size); }
+      }
     }
   }
+  const bubbleMin=clamp(xStep*0.18,3.5,8);
+  const bubbleMax=clamp(Math.min(xStep*0.48,ph*0.035),9,34);
   for(let i=0;i<vis.length;i++){
     const b=vis[i], x=L+i*xStep+xStep/2;
     for(const p of (b.plots||[])){
@@ -618,8 +643,10 @@ function drawPlotMarkers(ctx,vis,L,T,ph,xStep,y,labelLayout){
       const color=p.color||"#111827", cat=markerCat(p);
       if(cat==="big_trades"){
         const size=markerSize(p);
-        const n=maxBigTradeSize>0?Math.sqrt(size/maxBigTradeSize):0.5;
-        const r=clamp(8+n*20,10,28);
+        const minSize=isFinite(minBigTradeSize)?minBigTradeSize:0;
+        const denom=Math.max(1e-9,maxBigTradeSize-minSize);
+        const n=maxBigTradeSize>0?Math.sqrt((size-minSize)/denom):0.5;
+        const r=clamp(bubbleMin+n*(bubbleMax-bubbleMin),bubbleMin,bubbleMax);
         drawBigTradeBubble(ctx,p,x,yy,r);
         continue;
       }
@@ -839,59 +866,119 @@ function drawPrice(){
   if(hover&&hover.canvas==="price"){ const idx=clamp(Math.floor((hover.x-L)/xStep),0,vis.length-1); const b=vis[idx]; if(b){ const x=L+idx*xStep+xStep/2; pctx.strokeStyle="#111827";pctx.beginPath();pctx.moveTo(x,T);pctx.lineTo(x,T+ph);pctx.stroke(); const tags=b.tags?Object.entries(b.tags).map(([k,v])=>`${k}:${v}`).join(" "):""; const base=`${s+idx+1}/${fps.length}  ${fmtTs(b.ts_last_ns)}  O ${b.open.toFixed(2)} H ${b.high.toFixed(2)} L ${b.low.toFixed(2)} C ${b.close.toFixed(2)}  D ${fmt(b.delta,0)}  ${tags}`; if(chartMode==="footprint"){ const totals=footprintTotals(b); const priceAt=hi-(hover.y-T)/Math.max(1,ph)*(hi-lo); const lv=nearestFootprintLevel(b,priceAt); $("status").textContent=base+`  bar sell/buy ${fmt(totals.sell,0)}/${fmt(totals.buy,0)}  level ${lv?lv.price.toFixed(2):priceAt.toFixed(2)} sell/buy ${lv?fmt(lv.sell_vol,0):"-"}/${lv?fmt(lv.buy_vol,0):"-"}`; } else { $("status").textContent=base; } } }
   $("range").textContent=`bars ${s+1}-${e} / ${fps.length}`;
 }
-function heatColor(v,maxAbs,metric){
-  if(!(maxAbs>0)||!isFinite(v)||v<=0)return "rgba(148,163,184,0.03)";
-  const n=Math.min(1,v/maxAbs), a=0.08+0.78*n;
-  if(metric==="bid")return colorAlpha(COLORS.buy,a);
-  if(metric==="ask")return colorAlpha(COLORS.sell,a);
-  return `rgba(234,179,8,${a})`;
+// Bookmap-style heat ramp: dark depth base -> blue -> cyan -> red -> yellow as resting size grows.
+// ===== Zoomable, server-windowed Bookmap heatmap =====
+// The first stop is opaque instead of transparent so zero-liquidity buckets do not expose hard
+// canvas gaps; neighbouring interpolation then gives the continuous Bookmap-like look.
+const HEAT_LUT=(()=>{
+  const stops=[[0,[5,24,36,255]],[0.04,[6,44,66,255]],[0.16,[7,78,105,255]],[0.32,[0,126,142,255]],[0.50,[0,174,144,255]],[0.67,[245,58,24,255]],[0.84,[255,128,0,255]],[1,[255,242,38,255]]];
+  const lut=new Uint8ClampedArray(256*4);
+  for(let i=0;i<256;i++){ const n=i/255; let c=[0,0,0,0];
+    for(let s=1;s<stops.length;s++){ if(n<=stops[s][0]){ const [t0,c0]=stops[s-1],[t1,c1]=stops[s]; const f=(n-t0)/Math.max(1e-6,t1-t0); c=[0,1,2,3].map(k=>Math.round(c0[k]+(c1[k]-c0[k])*f)); break; } }
+    lut[i*4]=c[0];lut[i*4+1]=c[1];lut[i*4+2]=c[2];lut[i*4+3]=c[3]; }
+  return lut;
+})();
+let heatCanvas=null, heatView=null, heatData=null, heatImg=null, heatPending=false, heatTimer=null, heatReqId=0;
+function heatDataSpan(){ if(!fps.length)return null; return {t0:Number(fps[0].ts_first_ns), t1:Number(fps[fps.length-1].ts_last_ns)}; }
+function initHeatView(){
+  const sp=heatDataSpan(); if(!sp)return;
+  const [s,e]=viewRange(); const vis=fps.slice(s,e); const src=vis.length?vis:fps;
+  let lo=Infinity,hi=-Infinity; for(const b of src){lo=Math.min(lo,b.low);hi=Math.max(hi,b.high);} if(!isFinite(lo)){lo=0;hi=1;}
+  const first=src[0], last=src[src.length-1];
+  const t0=first?Number(first.ts_first_ns):sp.t0, t1=last?Number(last.ts_last_ns):sp.t1;
+  const pad=Math.max(0.5,(hi-lo)*0.08); heatView={t0,t1:Math.max(t0+1,t1),pmin:lo-pad,pmax:hi+pad};
 }
-function heatValue(level,metric){
-  const bid=level.bid_size||0, ask=level.ask_size||0;
-  if(metric==="bid")return bid;
-  if(metric==="ask")return ask;
-  return bid+ask;
-}
-function liquiditySnapshots(){ return (DATA&&DATA.liquidity_heatmap&&DATA.liquidity_heatmap.snapshots)||[]; }
-function drawHeatmap(ctx,canvas,hoverCanvas){
-  const W=canvas.clientWidth,H=canvas.clientHeight; ctx.clearRect(0,0,W,H); ctx.fillStyle="#f8fafc"; ctx.fillRect(0,0,W,H);
-  if(!fps.length){ ctx.fillStyle="#94a3b8"; ctx.font="13px Segoe UI"; ctx.fillText("liquidity heatmap",20,H/2); return; }
-  const depth=liquiditySnapshots();
-  const [s,e]=viewRange(); const vis=fps.slice(s,e); const L=64,R=16,T=10,B=30; const pw=Math.max(1,W-L-R),ph=Math.max(1,H-T-B);
-  let lo=Infinity,hi=-Infinity; for(const b of vis){lo=Math.min(lo,b.low);hi=Math.max(hi,b.high);} const pad=Math.max(0.25,(hi-lo)*0.06); lo-=pad;hi+=pad; [lo,hi]=applyYZoom("price",lo,hi); yZoom.price.lo=lo; yZoom.price.hi=hi;
-  const y=p=>T+(hi-p)/(hi-lo)*ph, xStep=pw/Math.max(1,vis.length), tick=tickSizeFor(vis);
-  ctx.strokeStyle=COLORS.grid; ctx.fillStyle=COLORS.axis; ctx.font="11px Segoe UI, Arial"; ctx.lineWidth=1;
-  for(let i=0;i<=3;i++){ const yy=T+ph*i/3,pr=hi-(hi-lo)*i/3; ctx.beginPath();ctx.moveTo(L,yy);ctx.lineTo(W-R,yy);ctx.stroke(); ctx.fillText(pr.toFixed(2),6,yy+4); }
-  if(!depth.length){
-    ctx.fillStyle="#64748b"; ctx.font="12px Segoe UI, Arial"; ctx.fillText("No L2 resting-liquidity snapshots in this result",L+8,T+22);
-  } else {
-    const firstTs=Number(vis[0].ts_first_ns), lastTs=Number(vis[vis.length-1].ts_last_ns);
-    const visibleDepth=depth.filter(d=>Number(d.ts_ns)>=firstTs&&Number(d.ts_ns)<=lastTs);
-    let maxAbs=0;
-    for(const d of visibleDepth){ for(const lv of (d.levels||[])){ maxAbs=Math.max(maxAbs,heatValue(lv,heatMetric)); } }
-    for(const d of visibleDepth){
-      const idx=clamp(idxForTs(d.ts_ns)-s,0,vis.length-1), x=L+idx*xStep, w=Math.max(1,xStep);
-      for(const lv of (d.levels||[])){
-        const top=y(lv.price+tick/2), bot=y(lv.price-tick/2); const yy=Math.min(top,bot), hh=Math.max(1,Math.abs(bot-top));
-        if(yy>T+ph||yy+hh<T)continue;
-        ctx.fillStyle=heatColor(heatValue(lv,heatMetric),maxAbs,heatMetric); ctx.fillRect(x,yy,w,hh);
+function b64ToBytes(b64){ const bin=atob(b64); const out=new Uint8Array(bin.length); for(let i=0;i<bin.length;i++)out[i]=bin.charCodeAt(i); return out; }
+function buildHeatImg(d){
+  const bytes=b64ToBytes(d.grid_b64), img=new ImageData(d.cols,d.rows);
+  const sample=(x,y)=>bytes[clamp(y,0,d.rows-1)*d.cols+clamp(x,0,d.cols-1)]||0;
+  for(let y=0;y<d.rows;y++){
+    for(let x=0;x<d.cols;x++){
+      const i=y*d.cols+x;
+      let v=sample(x,y);
+      if(v===0){
+        let sum=0,w=0;
+        for(let dy=-1;dy<=1;dy++){
+          for(let dx=-1;dx<=1;dx++){
+            if(dx===0&&dy===0)continue;
+            const nv=sample(x+dx,y+dy);
+            if(nv>0){ const wt=(dx===0||dy===0)?1:0.7; sum+=nv*wt; w+=wt; }
+          }
+        }
+        if(w>0)v=Math.round(sum/w*0.38);
       }
+      const li=clamp(v,0,255)<<2, oi=i*4;
+      img.data[oi]=HEAT_LUT[li]; img.data[oi+1]=HEAT_LUT[li+1]; img.data[oi+2]=HEAT_LUT[li+2]; img.data[oi+3]=HEAT_LUT[li+3];
     }
   }
-  drawTimeAxis(ctx,vis,L,T,pw,ph,W,R);
-  const labelLayout={boxes:[],L,T,pw,ph};
-  ctx.save(); clipPlot(ctx,L,T,pw,ph);
-  drawPriceBoxes(ctx,vis,L,T,pw,ph,xStep,y,labelLayout);
-  drawVolumeProfiles(ctx,vis,L,T,pw,ph,xStep,y,tick,labelLayout);
-  drawPlotMarkers(ctx,vis,L,T,ph,xStep,y,labelLayout);
-  if(overlayOn("trades")) drawTradePositions(ctx,trades,s,e,L,T,ph,xStep,y,labelLayout);
-  ctx.restore();
-  ctx.fillStyle="#334155"; ctx.font="11px Segoe UI, Arial"; ctx.fillText(`book liquidity: ${heatMetric}`,L+4,T+13);
-  ctx.strokeStyle="#9aa4b2"; ctx.strokeRect(L,T,pw,ph);
-  if(hover&&hover.canvas===hoverCanvas){
-    const idx=clamp(Math.floor((hover.x-L)/xStep),0,vis.length-1); const b=vis[idx];
-    if(b){ const x=L+idx*xStep+xStep/2; ctx.strokeStyle="#111827"; ctx.beginPath();ctx.moveTo(x,T);ctx.lineTo(x,T+ph);ctx.stroke(); const priceAt=hi-(hover.y-T)/Math.max(1,ph)*(hi-lo); const ts=Number(b.ts_last_ns); let snap=null; for(const d of depth){ if(Number(d.ts_ns)<=ts)snap=d; else break; } const nearest=snap?(snap.levels||[]).reduce((best,lv)=>!best||Math.abs(lv.price-priceAt)<Math.abs(best.price-priceAt)?lv:best,null):null; const hv=nearest?heatValue(nearest,heatMetric):0; $("status").textContent=`book ${s+idx+1}/${fps.length}  ${fmtTs(b.ts_last_ns)}  px ${nearest?nearest.price.toFixed(2):priceAt.toFixed(2)}  ${heatMetric} ${fmt(hv,0)}  bid ${nearest?fmt(nearest.bid_size,0):"-"} ask ${nearest?fmt(nearest.ask_size,0):"-"}`; }
+  if(!heatCanvas)heatCanvas=document.createElement("canvas"); heatCanvas.width=d.cols; heatCanvas.height=d.rows;
+  heatCanvas.getContext("2d").putImageData(img,0,0); heatImg=heatCanvas;
+}
+function ensureHeat(){ if(!heatView)initHeatView(); if(heatView)fetchHeat(); }
+function scheduleHeatFetch(){ if(heatTimer)clearTimeout(heatTimer); heatTimer=setTimeout(fetchHeat,90); }
+async function fetchHeat(){
+  if(!heatView)return;
+  const W=price.clientWidth,H=price.clientHeight,L=64,R=16,T=10,B=30,pw=Math.max(50,W-L-R),ph=Math.max(50,H-T-B);
+  const cols=Math.max(60,Math.min(800,Math.round(pw*0.55)));
+  const spanMs=Math.max(1,(heatView.t1-heatView.t0)/1e6);
+  const bucketMs=Math.max(250,Math.min(5000,Math.round(spanMs/Math.max(1,cols))));
+  // One raster row per price tick so levels tile seamlessly (no horizontal striping).
+  const tick=(DATA&&DATA.tick_size)||0.25;
+  const rows=Math.max(40,Math.min(900,Math.round((heatView.pmax-heatView.pmin)/tick)||Math.round(ph)));
+  const id=typeof RUN_ID==="string"?RUN_ID:"";
+  const url=`/api/heatmap?id=${encodeURIComponent(id)}&t0=${Math.round(heatView.t0)}&t1=${Math.round(heatView.t1)}&pmin=${heatView.pmin}&pmax=${heatView.pmax}&cols=${cols}&rows=${rows}&metric=${heatMetric}&bucket_ms=${bucketMs}`;
+  const myId=++heatReqId; heatPending=true;
+  try{ const r=await fetch(url); if(!r.ok){heatPending=false;draw();return;} const d=await r.json(); if(myId!==heatReqId)return; heatData=d; buildHeatImg(d); heatPending=false; draw(); }
+  catch(e){ heatPending=false; }
+}
+function fmtHeatAxis(t,spanNs){ const d=new Date(t/1e6); const hh=String(d.getHours()).padStart(2,"0"),mm=String(d.getMinutes()).padStart(2,"0"),ss=String(d.getSeconds()).padStart(2,"0"); if(spanNs>6*3600e9)return `${d.getMonth()+1}/${d.getDate()} ${hh}:${mm}`; if(spanNs>10*60e9)return `${hh}:${mm}`; return `${hh}:${mm}:${ss}`; }
+function drawHeatTimeAxis(ctx,L,T,pw,ph,W,R,t0,t1){
+  ctx.fillStyle="#94a3b8"; ctx.font="11px Segoe UI,Arial"; ctx.textAlign="center"; const span=t1-t0;
+  for(let i=0;i<=6;i++){ const t=t0+span*i/6,x=L+pw*i/6; ctx.strokeStyle="rgba(148,163,184,0.10)"; ctx.beginPath();ctx.moveTo(x,T);ctx.lineTo(x,T+ph);ctx.stroke(); ctx.fillText(fmtHeatAxis(t,span),Math.min(W-28,Math.max(L+24,x)),T+ph+16); }
+  ctx.textAlign="left";
+}
+function drawHeatTraces(ctx,d,L,T,pw,ph,xT,y){
+  const cols=d.cols,t0=d.t0_ns,t1=d.t1_ns,colT=i=>t0+(i+0.5)/cols*(t1-t0);
+  ctx.save(); ctx.beginPath(); ctx.rect(L,T,pw,ph); ctx.clip();
+  const line=(arr,style)=>{ ctx.strokeStyle=style; ctx.lineWidth=1; ctx.beginPath(); let started=false; for(let i=0;i<cols;i++){ const v=arr[i]; if(!(v>0)){started=false;continue;} const x=xT(colT(i)),yy=y(v); started?ctx.lineTo(x,yy):ctx.moveTo(x,yy); started=true; } ctx.stroke(); };
+  line(d.col_bid,"rgba(52,224,180,0.6)");
+  line(d.col_ask,"rgba(255,93,122,0.6)");
+  line(d.col_last,"rgba(226,232,240,0.55)");
+  let maxDelta=0; for(let i=0;i<cols;i++){ const delta=(d.col_buy[i]||0)-(d.col_sell[i]||0); maxDelta=Math.max(maxDelta,Math.abs(delta)); }
+  if(maxDelta>0){
+    const pxPerCol=pw/cols, binCols=Math.max(1,Math.round(7/Math.max(0.001,pxPerCol))), rMax=Math.max(3,Math.min(binCols*pxPerCol*0.55,16));
+    for(let i=0;i<cols;i+=binCols){
+      let bv=0,sv=0,lastP=-1; const j1=Math.min(cols,i+binCols); for(let j=i;j<j1;j++){ bv+=d.col_buy[j]||0; sv+=d.col_sell[j]||0; if(d.col_last[j]>0)lastP=d.col_last[j]; }
+      const delta=bv-sv, mag=Math.abs(delta); if(mag<=0||lastP<=0)continue;
+      const x=xT(colT(i+binCols/2)),yy=y(lastP); if(yy<T-rMax||yy>T+ph+rMax)continue;
+      const r=2.5+rMax*Math.sqrt(mag/maxDelta);
+      ctx.beginPath(); ctx.arc(x,yy,r,0,Math.PI*2);
+      ctx.fillStyle=colorAlpha(delta>=0?COLORS.buy:COLORS.sell,0.9); ctx.fill();
+      ctx.lineWidth=1; ctx.strokeStyle="rgba(255,255,255,0.24)"; ctx.stroke();
+    }
   }
+  ctx.restore();
+}
+// Heatmap zoom/pan operate on the time/price window (heatView), then refetch a fresh raster.
+function heatZoomTime(factor,fx){ const v=heatView; if(!v)return; const sp=heatDataSpan(); const span=v.t1-v.t0; let ns=Math.max(2e9,Math.min(span*factor,(sp.t1-sp.t0)*1.25)); const center=v.t0+fx*span; v.t0=center-fx*ns; v.t1=center+(1-fx)*ns; }
+function heatZoomPrice(factor,fy){ const v=heatView; if(!v)return; const span=v.pmax-v.pmin; const sp=Math.max(0.5,span*factor); const center=v.pmax-fy*span; v.pmin=center-(1-fy)*sp; v.pmax=center+fy*sp; }
+function heatPan(dxPx,dyPx,pw,ph,base){ const v=heatView; if(!v||!base)return; const dt=-dxPx/Math.max(1,pw)*(base.t1-base.t0); v.t0=base.t0+dt; v.t1=base.t1+dt; const dp=dyPx/Math.max(1,ph)*(base.pmax-base.pmin); v.pmin=base.pmin+dp; v.pmax=base.pmax+dp; }
+function drawHeatmap(ctx,canvas,hoverCanvas){
+  const W=canvas.clientWidth,H=canvas.clientHeight; ctx.clearRect(0,0,W,H); ctx.fillStyle="#070b14"; ctx.fillRect(0,0,W,H);
+  if(!fps.length){ ctx.fillStyle="#94a3b8"; ctx.font="13px Segoe UI"; ctx.fillText("liquidity heatmap",20,H/2); return; }
+  if(!heatView){ initHeatView(); ensureHeat(); }
+  const L=64,R=16,T=10,B=30,pw=Math.max(1,W-L-R),ph=Math.max(1,H-T-B),v=heatView;
+  const y=p=>T+(v.pmax-p)/Math.max(1e-9,v.pmax-v.pmin)*ph, xT=t=>L+(t-v.t0)/Math.max(1,v.t1-v.t0)*pw;
+  ctx.strokeStyle="rgba(148,163,184,0.14)"; ctx.fillStyle="#94a3b8"; ctx.font="11px Segoe UI,Arial"; ctx.lineWidth=1; ctx.textAlign="left";
+  for(let i=0;i<=4;i++){ const yy=T+ph*i/4,pr=v.pmax-(v.pmax-v.pmin)*i/4; ctx.beginPath();ctx.moveTo(L,yy);ctx.lineTo(W-R,yy);ctx.stroke(); ctx.fillText(pr.toFixed(2),6,yy+4); }
+  if(heatImg&&heatData){ ctx.imageSmoothingEnabled=true; ctx.imageSmoothingQuality="high"; const dx0=xT(heatData.t0_ns),dx1=xT(heatData.t1_ns),dy0=y(heatData.pmax),dy1=y(heatData.pmin); ctx.save(); ctx.beginPath(); ctx.rect(L,T,pw,ph); ctx.clip(); ctx.drawImage(heatImg,dx0,dy0,Math.max(1,dx1-dx0),Math.max(1,dy1-dy0)); ctx.restore(); }
+  else { ctx.fillStyle="#cbd5e1"; ctx.font="12px Segoe UI,Arial"; ctx.fillText(heatPending?"loading heatmap...":"no heatmap data (run with --serve)",L+8,T+22); }
+  drawHeatTimeAxis(ctx,L,T,pw,ph,W,R,v.t0,v.t1);
+  if(heatData)drawHeatTraces(ctx,heatData,L,T,pw,ph,xT,y);
+  ctx.strokeStyle="#1e293b"; ctx.strokeRect(L,T,pw,ph);
+  ctx.fillStyle="#cbd5e1"; ctx.font="11px Segoe UI,Arial"; ctx.fillText(`book ${heatMetric}${heatPending?" - loading...":""}  -  drag = pan - wheel = zoom time - shift/left-edge wheel = zoom price`,L+4,T+13);
+  $("range").textContent=`${fmtTs(v.t0)}  ->  ${fmtTs(v.t1)}`;
+  if(hover&&hover.canvas===hoverCanvas&&hover.x>=L&&hover.x<=L+pw&&hover.y>=T&&hover.y<=T+ph){ const x=hover.x; ctx.strokeStyle="rgba(255,255,255,0.28)"; ctx.beginPath();ctx.moveTo(x,T);ctx.lineTo(x,T+ph);ctx.stroke(); const tAt=v.t0+(x-L)/pw*(v.t1-v.t0),pAt=v.pmax-(hover.y-T)/Math.max(1,ph)*(v.pmax-v.pmin); $("status").textContent=`${fmtTs(tAt)}   px ${pAt.toFixed(2)}`; }
 }
 function drawEquity(){
   const W=equity.clientWidth,H=equity.clientHeight; ectx.clearRect(0,0,W,H); ectx.fillStyle="#fff"; ectx.fillRect(0,0,W,H);
@@ -914,9 +1001,13 @@ function drawEquity(){
 function draw(){ drawPrice(); if(!equityCollapsed)drawEquity(); }
 
 function attach(canvas,name){
-  canvas.addEventListener("wheel",ev=>{ev.preventDefault(); const r=canvas.getBoundingClientRect(); const x=ev.clientX-r.left; if(ev.shiftKey||x<64){ const top=name==="price"?14:12,bottom=name==="price"?34:30; const frac=clamp((ev.clientY-r.top-top)/Math.max(1,r.height-top-bottom),0,1); zoomY(name,ev.deltaY<0?1.18:1/1.18,frac); } else { const ratio=clamp((x-64)/Math.max(1,r.width-80),0,1); setBarsPerView(barsPerView*(ev.deltaY<0?0.82:1.22),ratio); }},{passive:false});
-  canvas.addEventListener("mousedown",ev=>{lockYZoom(name); const st=yZoom[name]; drag={x:ev.clientX,y:ev.clientY,start,name,lo:st?.lo,hi:st?.hi}; canvas.classList.add("dragging");});
-  canvas.addEventListener("mousemove",ev=>{const r=canvas.getBoundingClientRect(); hover={canvas:name,x:ev.clientX-r.left,y:ev.clientY-r.top}; if(drag){const pw=Math.max(1,r.width-80); const d=Math.round((drag.x-ev.clientX)/pw*barsPerView); start=clamp(drag.start+d,0,Math.max(0,fps.length-barsPerView)); if(drag.name==="price")autoYZoom("equity"); if(drag.name===name&&isFinite(drag.lo)&&isFinite(drag.hi)&&drag.hi>drag.lo){ const top=name==="price"?14:12,bottom=name==="price"?34:30; const ph=Math.max(1,r.height-top-bottom); const dy=ev.clientY-drag.y; const shift=dy/ph*(drag.hi-drag.lo); const st=yZoom[name]; st.manual=true; st.lo=drag.lo+shift; st.hi=drag.hi+shift; }} draw();});
+  canvas.addEventListener("wheel",ev=>{ev.preventDefault(); const r=canvas.getBoundingClientRect(); const x=ev.clientX-r.left;
+    if(chartMode==="heatmap"&&name==="price"&&heatView){ const L=64,top=10,bottom=30,pw=Math.max(1,r.width-L-16),ph=Math.max(1,r.height-top-bottom),factor=ev.deltaY<0?0.82:1.22; if(ev.shiftKey||x<L){ heatZoomPrice(factor,clamp((ev.clientY-r.top-top)/ph,0,1)); } else { heatZoomTime(factor,clamp((x-L)/pw,0,1)); } draw(); scheduleHeatFetch(); return; }
+    if(ev.shiftKey||x<64){ const top=name==="price"?14:12,bottom=name==="price"?34:30; const frac=clamp((ev.clientY-r.top-top)/Math.max(1,r.height-top-bottom),0,1); zoomY(name,ev.deltaY<0?1.18:1/1.18,frac); } else { const ratio=clamp((x-64)/Math.max(1,r.width-80),0,1); setBarsPerView(barsPerView*(ev.deltaY<0?0.82:1.22),ratio); }},{passive:false});
+  canvas.addEventListener("mousedown",ev=>{lockYZoom(name); const st=yZoom[name]; drag={x:ev.clientX,y:ev.clientY,start,name,lo:st?.lo,hi:st?.hi,heat:(chartMode==="heatmap"&&heatView)?{t0:heatView.t0,t1:heatView.t1,pmin:heatView.pmin,pmax:heatView.pmax}:null}; canvas.classList.add("dragging");});
+  canvas.addEventListener("mousemove",ev=>{const r=canvas.getBoundingClientRect(); hover={canvas:name,x:ev.clientX-r.left,y:ev.clientY-r.top};
+    if(drag&&chartMode==="heatmap"&&drag.name==="price"&&drag.heat){ const L=64,top=10,bottom=30,pw=Math.max(1,r.width-L-16),ph=Math.max(1,r.height-top-bottom); heatPan(ev.clientX-drag.x,ev.clientY-drag.y,pw,ph,drag.heat); draw(); scheduleHeatFetch(); return; }
+    if(drag){const pw=Math.max(1,r.width-80); const d=Math.round((drag.x-ev.clientX)/pw*barsPerView); start=clamp(drag.start+d,0,Math.max(0,fps.length-barsPerView)); if(drag.name==="price")autoYZoom("equity"); if(drag.name===name&&isFinite(drag.lo)&&isFinite(drag.hi)&&drag.hi>drag.lo){ const top=name==="price"?14:12,bottom=name==="price"?34:30; const ph=Math.max(1,r.height-top-bottom); const dy=ev.clientY-drag.y; const shift=dy/ph*(drag.hi-drag.lo); const st=yZoom[name]; st.manual=true; st.lo=drag.lo+shift; st.hi=drag.hi+shift; }} draw();});
   canvas.addEventListener("mouseleave",()=>{hover=null;draw();});
 }
 window.addEventListener("mouseup",()=>{drag=null; price.classList.remove("dragging"); equity.classList.remove("dragging");});
@@ -934,6 +1025,7 @@ window.addEventListener("mousemove",ev=>{
 });
 window.addEventListener("mouseup",()=>{splitDrag=null; splitter.classList.remove("dragging");});
 attach(price,"price"); attach(equity,"equity");
+$("centerPrice").onclick=centerCurrentPrice;
 $("tradeFirst").onclick=()=>jumpToTrade("first");
 $("tradePrev").onclick=()=>jumpToTrade("prev");
 $("tradeNext").onclick=()=>jumpToTrade("next");
@@ -941,7 +1033,7 @@ $("tradeLast").onclick=()=>jumpToTrade("last");
 $("modeCandles").onclick=()=>setChartMode("candles");
 $("modeFootprint").onclick=()=>setChartMode("footprint");
 $("modeHeatmap").onclick=()=>setChartMode("heatmap");
-$("heatMetric").onchange=e=>{heatMetric=e.target.value;draw();};
+$("heatMetric").onchange=e=>{heatMetric=e.target.value; if(chartMode==="heatmap")fetchHeat(); else draw();};
 $("toggleEquity").onclick=()=>setEquityCollapsed(!equityCollapsed);
 setEquityCollapsed(equityCollapsed,false);
 $("runBtn").onclick=runBacktest;

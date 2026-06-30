@@ -45,7 +45,28 @@ impl BookDepth {
             OrderFlowEvent::ReduceLimit {
                 price, size, side, ..
             } => self.add(price, -size, side.sign()),
+            OrderFlowEvent::SetLevel {
+                price, size, side, ..
+            } => self.set(price, size, side.sign()),
             OrderFlowEvent::Trade { .. } => {}
+        }
+    }
+
+    /// Overwrite the resting size on one side of `price` with an absolute value. `size <= 0` clears
+    /// that side, and the level is dropped once both sides are empty.
+    fn set(&mut self, price: f64, size: f64, side_sign: f64) {
+        if !(price.is_finite() && size.is_finite()) {
+            return;
+        }
+        let key = self.price_key(price);
+        let level = self.levels.entry(key).or_default();
+        if side_sign > 0.0 {
+            level.bid_size = size.max(0.0);
+        } else {
+            level.ask_size = size.max(0.0);
+        }
+        if level.bid_size <= f64::EPSILON && level.ask_size <= f64::EPSILON {
+            self.levels.remove(&key);
         }
     }
 

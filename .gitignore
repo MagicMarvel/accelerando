@@ -5,3 +5,5 @@
 es_slice.csv
 result.json
 /runs
+/heatmap-cache
+.idea/
