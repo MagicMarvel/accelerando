@@ -59,6 +59,11 @@ struct Position {
     target: Option<f64>,
     max_adverse_excursion: f64,
     max_adverse_ticks: f64,
+    /// True when the entry was a limit filled *inside* the bar (not at the open). On such a bar the
+    /// profit target must not be credited, because the favorable extreme may have occurred before
+    /// the fill — counting it would be look-ahead. The adverse extreme is reached after the fill, so
+    /// the stop stays active.
+    entered_intrabar: bool,
 }
 
 /// The broker simulator: tracks one position, fills next-bar, records trades and equity.
@@ -136,6 +141,7 @@ impl Broker {
     }
 
     /// Open a fresh position at `px` (slippage already applied), charging entry commission.
+    #[allow(clippy::too_many_arguments)]
     fn open_position(
         &mut self,
         dir: i32,
@@ -144,6 +150,7 @@ impl Broker {
         ts: i64,
         stop_ticks: f64,
         target_ticks: f64,
+        entered_intrabar: bool,
     ) {
         self.realized -= self.commission(qty); // entry-side commission
         let stop = if stop_ticks > 0.0 {
@@ -165,6 +172,7 @@ impl Broker {
             target,
             max_adverse_excursion: 0.0,
             max_adverse_ticks: 0.0,
+            entered_intrabar,
         });
     }
 
@@ -235,15 +243,31 @@ impl Broker {
         if !price_in_band(fill_px, entry_min, entry_max) {
             return false;
         }
+        // A limit order that fills at its limit price (rather than at the bar's open) was filled
+        // somewhere inside the bar; flag it so the entry bar's target is not credited.
+        let entered_intrabar = entry_limit.is_some() && fill_px != open;
         if self.position.is_some() {
             self.close_position(self.slip(open, -cur_dir), ts, TradeReason::Signal);
         }
-        self.open_position(want_dir, qty, self.slip(fill_px, want_dir), ts, st, tt);
+        self.open_position(
+            want_dir,
+            qty,
+            self.slip(fill_px, want_dir),
+            ts,
+            st,
+            tt,
+            entered_intrabar,
+        );
         false
     }
 
     fn check_exits(&mut self, fp: &Footprint) {
         let Some(pos) = self.position else { return };
+        // On the bar an intrabar limit entry filled, the favorable extreme may predate the fill, so
+        // the target is not eligible yet (avoids look-ahead). The adverse extreme is reached after
+        // the fill, so the stop stays active. From the next bar on, both are eligible normally.
+        let on_entry_bar = pos.entry_ts == fp.ts_first_ns;
+        let target_eligible = !(on_entry_bar && pos.entered_intrabar);
         // Conservative ordering: assume stop is touched before target within the bar.
         if pos.dir > 0 {
             if let Some(stop) = pos.stop {
@@ -252,9 +276,11 @@ impl Broker {
                     return;
                 }
             }
-            if let Some(target) = pos.target {
-                if fp.high >= target {
-                    self.close_position(target, fp.ts_last_ns, TradeReason::TakeProfit);
+            if target_eligible {
+                if let Some(target) = pos.target {
+                    if fp.high >= target {
+                        self.close_position(target, fp.ts_last_ns, TradeReason::TakeProfit);
+                    }
                 }
             }
         } else {
@@ -264,9 +290,11 @@ impl Broker {
                     return;
                 }
             }
-            if let Some(target) = pos.target {
-                if fp.low <= target {
-                    self.close_position(target, fp.ts_last_ns, TradeReason::TakeProfit);
+            if target_eligible {
+                if let Some(target) = pos.target {
+                    if fp.low <= target {
+                        self.close_position(target, fp.ts_last_ns, TradeReason::TakeProfit);
+                    }
                 }
             }
         }
