@@ -1,0 +1,297 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Accelerando — experiment</title>
+<style>
+:root{font-family:Inter,"Segoe UI",Arial,sans-serif;background:#f6f7f9;color:#111827}
+body{margin:0}
+header{padding:10px 16px;background:#0f172a;color:white;display:flex;gap:12px;align-items:baseline}
+.title{font-size:16px;font-weight:800;letter-spacing:.3px}.brand-home{color:#fff;text-decoration:none;flex:0 0 auto}.brand-home:hover{text-decoration:underline}.tag{font-size:12px;color:#94a3b8}
+main{padding:14px}
+.cards{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:12px}
+.card{min-width:120px;padding:8px 10px;border:1px solid #e5e7eb;border-radius:8px;background:#fff}
+.k{font-size:10px;color:#6b7280;text-transform:uppercase;letter-spacing:.4px}.v{font-size:18px;font-weight:800;margin-top:2px}
+.pos{color:#2563eb}.neg{color:#d97706}
+.toolbar{display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:12px}
+.toolbar input[type=text]{flex:1;min-width:180px;max-width:360px;padding:7px 10px;border:1px solid #c5ccd6;border-radius:8px;font-size:13px}
+.toolbar input[type=number]{width:110px;padding:7px 10px;border:1px solid #c5ccd6;border-radius:8px;font-size:13px}
+.toolbar button{padding:7px 12px;border:1px solid #c5ccd6;border-radius:8px;background:#fff;font-size:12px;font-weight:700;cursor:pointer}
+.toolbar button:hover{background:#eff6ff;border-color:#bfdbfe}
+.shared{border:1px solid #e5e7eb;border-radius:8px;background:#fff;margin-bottom:12px;padding:0 12px}
+.shared summary{cursor:pointer;padding:10px 0;font-size:12px;font-weight:800;color:#475569;text-transform:uppercase;letter-spacing:.4px}
+.shared-groups{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:8px;padding-bottom:12px}
+.param-group{border:1px solid #eef2f7;border-radius:8px;background:#fbfcfe;padding:8px}
+.param-title{font-size:10px;color:#475569;text-transform:uppercase;letter-spacing:.4px;font-weight:800;margin-bottom:6px}
+.param-list{display:flex;flex-wrap:wrap;gap:6px}
+.param{display:inline-flex;gap:4px;align-items:baseline;border:1px solid #e5e7eb;border-radius:6px;padding:3px 6px;background:#fff;font-size:12px;max-width:100%}
+.param b{color:#475569;font-weight:600}.param span{font-family:Consolas,"SFMono-Regular",monospace;color:#111827}
+#tree{border:1px solid #e5e7eb;border-radius:8px;background:#fff;overflow:hidden}
+.node-row,.leaf-row{display:flex;gap:8px;align-items:center;padding:6px 12px;border-bottom:1px solid #f1f5f9;font-size:13px}
+.node-row{cursor:pointer;user-select:none}
+.node-row:hover{background:#f8fafc}
+.node-chips{display:flex;flex-wrap:wrap;gap:4px 6px;align-items:baseline;flex:1;min-width:0}
+.caret{flex:0 0 14px;color:#64748b;font-size:11px;transition:transform .1s;display:inline-block}
+.open>.node-row .caret{transform:rotate(90deg)}
+.chip{display:inline-flex;gap:4px;align-items:baseline;border:1px solid #dbeafe;border-radius:6px;padding:2px 7px;background:#eff6ff;font-size:12px;white-space:nowrap}
+.chip b{color:#1e40af;font-weight:600}.chip span{font-family:Consolas,monospace;color:#111827;font-weight:700}
+.chip.implied{border-color:#e5e7eb;background:#f8fafc;opacity:.75}
+.chip.implied b{color:#64748b}
+.chip.strategy-chip{border-color:#c7d2fe;background:#eef2ff;font-weight:800}
+.chip.strategy-chip b{color:#3730a3}
+.node-stats{margin-left:auto;display:flex;gap:14px;align-items:baseline;white-space:nowrap;color:#64748b;font-size:12px}
+.node-stats .best{font-weight:800;font-size:13px}
+.children{display:none}
+.open>.children{display:block}
+.leaf-row{background:#fff}
+.leaf-row:hover{background:#f8fafc}
+.leaf-name{font-weight:700;font-size:12.5px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-width:120px}
+.leaf-metrics{margin-left:auto;display:flex;gap:12px;align-items:baseline;white-space:nowrap}
+.lm{text-align:right}.lm .k{font-size:9px}.lm .v{font-size:12.5px;font-weight:700;margin-top:0}
+.leaf-open{text-decoration:none;border:1px solid #c5ccd6;border-radius:6px;padding:4px 9px;color:#111827;background:#fff;font-size:11px;font-weight:700;flex:0 0 auto}
+.leaf-open:hover{background:#eff6ff;border-color:#bfdbfe}
+.empty{padding:24px;text-align:center;color:#64748b;font-size:13px}
+@media(max-width:900px){.leaf-metrics{flex-wrap:wrap}.node-stats{flex-wrap:wrap}}
+</style>
+</head>
+<body>
+<header><a class="title brand-home" href="/" title="Back to home">ACCELERANDO</a><span class="tag">experiment · parameter tree</span></header>
+<main>
+  <div class="cards" id="cards"></div>
+  <div class="toolbar">
+    <input type="text" id="search" placeholder="filter runs by label...">
+    <input type="number" id="minTrades" min="0" placeholder="min trades">
+    <button id="expandAll">Expand all</button>
+    <button id="collapseAll">Collapse all</button>
+  </div>
+  <details class="shared" id="shared"><summary>Shared parameters (same for every run)</summary><div class="shared-groups" id="sharedGroups"></div></details>
+  <div id="tree"></div>
+</main>
+<script>
+const fmt=(n,d=2)=>(n===null||n===undefined||!isFinite(n))?"-":Number(n).toLocaleString(undefined,{maximumFractionDigits:d,minimumFractionDigits:d});
+const cls=n=>n>=0?"pos":"neg";
+const html=s=>String(s??"").replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;","'":"&#39;"}[c]));
+function fmtParam(v){
+  if(v===null||v===undefined)return "-";
+  if(typeof v==="number")return Number.isInteger(v)?String(v):fmt(v,4);
+  if(typeof v==="boolean")return v?"true":"false";
+  return String(v);
+}
+function flattenParams(value,prefix="",out=[]){
+  if(value===null||value===undefined)return out;
+  if(Array.isArray(value)){
+    value.forEach((item,i)=>{flattenParams(item,prefix||String(i+1),out);});
+    return out;
+  }
+  if(typeof value==="object"){
+    if(value.adapter&&value.params&&typeof value.params==="object"){
+      const base=prefix?`${prefix}.${value.adapter}`:value.adapter;
+      flattenParams(value.params,base,out);
+      return out;
+    }
+    for(const [k,v] of Object.entries(value)){
+      if(k==="adapter")continue;
+      flattenParams(v,prefix?`${prefix}.${k}`:k,out);
+    }
+    return out;
+  }
+  out.push({key:prefix,value});
+  return out;
+}
+const shortName=key=>key.split(".").pop();
+
+let ALL_RUNS=[];
+
+// ---- tree construction ------------------------------------------------------
+
+// Distinct stringified values of `key` within `runs`.
+function distinctValues(runs,key){
+  const set=new Set();
+  for(const r of runs) set.add(r._pmap.has(key)?fmtParam(r._pmap.get(key)):"—");
+  return set;
+}
+
+// Build one subtree: branch on the first remaining key that still varies inside
+// `runs`; keys that just collapsed to a single value are attached to the node as
+// "implied" chips so each branch spells out everything choosing it entails.
+function buildTree(runs,keys){
+  const active=[],implied=[];
+  for(const k of keys){
+    if(distinctValues(runs,k).size>1) active.push(k);
+  }
+  if(active.length===0||runs.length===1){
+    return runs.map(r=>({leaf:true,run:r}));
+  }
+  const branchKey=active[0];
+  const groups=new Map();
+  for(const r of runs){
+    const v=r._pmap.has(branchKey)?fmtParam(r._pmap.get(branchKey)):"—";
+    if(!groups.has(v)) groups.set(v,[]);
+    groups.get(v).push(r);
+  }
+  const rest=active.slice(1);
+  const nodes=[];
+  for(const [value,members] of groups){
+    // Params that became single-valued once this branch was chosen.
+    const impliedChips=[];
+    for(const k of rest){
+      const vals=distinctValues(members,k);
+      if(vals.size===1&&distinctValues(runs,k).size>1) impliedChips.push({key:k,value:[...vals][0]});
+    }
+    const children=buildTree(members,rest);
+    nodes.push({
+      leaf:false,
+      key:branchKey,value,implied:impliedChips,
+      runs:members,children,
+      best:members.reduce((a,r)=>Math.max(a,r.metrics.net_pnl),-Infinity),
+      bestRun:members.reduce((a,r)=>a===null||r.metrics.net_pnl>a.metrics.net_pnl?r:a,null),
+    });
+  }
+  nodes.sort((a,b)=>b.best-a.best);
+  return nodes;
+}
+
+// ---- rendering --------------------------------------------------------------
+
+function chipHtml(key,value,extraClass=""){
+  return `<span class="chip ${extraClass}"><b>${html(shortName(key))}</b><span>${html(value)}</span></span>`;
+}
+function metricHtml(k,v,c=""){
+  return `<div class="lm"><div class="k">${k}</div><div class="v ${c}">${v}</div></div>`;
+}
+function leafHtml(run){
+  const m=run.metrics;
+  return `<div class="leaf-row">
+    <span class="caret" style="visibility:hidden">▶</span>
+    <span class="leaf-name" title="${html(run.label)}">${html(run.label)}</span>
+    <div class="leaf-metrics">
+      ${metricHtml("net pnl","$"+fmt(m.net_pnl),cls(m.net_pnl))}
+      ${metricHtml("return",fmt(m.return_pct)+"%",cls(m.return_pct))}
+      ${metricHtml("trades",m.trades)}
+      ${metricHtml("win",fmt(m.win_rate*100,1)+"%")}
+      ${metricHtml("pf",fmt(m.profit_factor))}
+      ${metricHtml("sharpe",fmt(m.sharpe),cls(m.sharpe))}
+      ${metricHtml("max dd","$"+fmt(m.max_drawdown),"neg")}
+      ${metricHtml("mae",fmt(m.avg_max_adverse_ticks))}
+    </div>
+    <a class="leaf-open" href="/run?id=${encodeURIComponent(run.id)}">Open chart</a>
+  </div>`;
+}
+function nodeHtml(node,depth,openPath){
+  if(node.leaf){
+    const pad=12+depth*18;
+    return leafHtml(node.run).replace('class="leaf-row"',`class="leaf-row" style="padding-left:${pad}px"`);
+  }
+  const pad=12+depth*18;
+  const onBestPath=openPath&&node.runs.includes(openPath);
+  const chips=(node.strategyLabel
+    ?chipHtml("strategy",node.strategyLabel,"strategy-chip")
+    :chipHtml(node.key,node.value))
+    +node.implied.map(c=>chipHtml(c.key,c.value,"implied")).join("");
+  const stats=`<div class="node-stats">
+    <span>${node.runs.length} run${node.runs.length>1?"s":""}</span>
+    <span class="best ${cls(node.best)}">best $${fmt(node.best)}</span>
+  </div>`;
+  const children=node.children.map(c=>nodeHtml(c,depth+1,openPath)).join("");
+  return `<div class="node${onBestPath?" open":""}">
+    <div class="node-row" style="padding-left:${pad}px"><span class="caret">▶</span><div class="node-chips">${chips}</div>${stats}</div>
+    <div class="children">${children}</div>
+  </div>`;
+}
+
+function render(){
+  const q=document.getElementById("search").value.trim().toLowerCase();
+  const minTrades=parseInt(document.getElementById("minTrades").value,10)||0;
+  const runs=ALL_RUNS.filter(r=>(!q||r.label.toLowerCase().includes(q))&&r.metrics.trades>=minTrades);
+  const tree=document.getElementById("tree");
+  if(runs.length===0){tree.innerHTML=`<div class="empty">no runs match the current filter</div>`;return;}
+
+  const globalBest=[...runs].sort((a,b)=>b.metrics.net_pnl-a.metrics.net_pnl)[0];
+
+  // Group by strategy first; each strategy gets its own varying-key ordering.
+  const byStrategy=new Map();
+  for(const r of runs){
+    if(!byStrategy.has(r.strategy)) byStrategy.set(r.strategy,[]);
+    byStrategy.get(r.strategy).push(r);
+  }
+  const roots=[];
+  for(const [strategy,members] of byStrategy){
+    const keySet=new Set();
+    for(const r of members) for(const k of r._pmap.keys()) keySet.add(k);
+    // Branch on low-cardinality params first so the top of the tree stays narrow.
+    const varying=[...keySet]
+      .filter(k=>distinctValues(members,k).size>1)
+      .sort((a,b)=>distinctValues(members,a).size-distinctValues(members,b).size||a.localeCompare(b));
+    // Params constant inside this strategy but not in the global shared panel.
+    const implied=[...keySet]
+      .filter(k=>!GLOBAL_SHARED.has(k)&&members.every(r=>r._pmap.has(k))&&distinctValues(members,k).size===1)
+      .sort()
+      .map(k=>({key:k,value:fmtParam(members[0]._pmap.get(k))}));
+    roots.push({
+      leaf:false,strategyLabel:strategy,key:"strategy",value:strategy,implied,
+      runs:members,children:buildTree(members,varying),
+      best:members.reduce((a,r)=>Math.max(a,r.metrics.net_pnl),-Infinity),
+    });
+  }
+  roots.sort((a,b)=>b.best-a.best);
+  tree.innerHTML=roots.map(r=>nodeHtml(r,0,globalBest)).join("");
+}
+
+let GLOBAL_SHARED=new Set();
+function renderShared(){
+  // Params identical across every run go to the shared panel once.
+  if(ALL_RUNS.length===0)return;
+  const keySet=new Set();
+  for(const r of ALL_RUNS) for(const k of r._pmap.keys()) keySet.add(k);
+  const shared=[];
+  for(const k of keySet){
+    if(distinctValues(ALL_RUNS,k).size===1&&ALL_RUNS.every(r=>r._pmap.has(k)))
+      shared.push({key:k,value:fmtParam(ALL_RUNS[0]._pmap.get(k))});
+  }
+  GLOBAL_SHARED=new Set(shared.map(s=>s.key));
+  const groups=new Map();
+  for(const item of shared){
+    const parts=item.key.split(".");
+    const group=parts.slice(0,-1).join(".")||"params";
+    if(!groups.has(group)) groups.set(group,[]);
+    groups.get(group).push(item);
+  }
+  document.getElementById("sharedGroups").innerHTML=[...groups.entries()].map(([name,items])=>
+    `<div class="param-group"><div class="param-title">${html(name)}</div><div class="param-list">${
+      items.map(p=>`<span class="param"><b>${html(shortName(p.key))}</b><span>${html(p.value)}</span></span>`).join("")
+    }</div></div>`).join("");
+}
+
+async function init(){
+  const exp=await (await fetch("/api/experiment")).json();
+  ALL_RUNS=exp.runs||[];
+  for(const r of ALL_RUNS){
+    const flat=flattenParams(r.params||{});
+    r._pmap=new Map(flat.map(p=>[p.key,p.value]));
+  }
+  const best=[...ALL_RUNS].sort((a,b)=>b.metrics.net_pnl-a.metrics.net_pnl)[0];
+  const totalTrades=ALL_RUNS.reduce((a,r)=>a+r.metrics.trades,0);
+  document.getElementById("cards").innerHTML=[
+    ["Runs",ALL_RUNS.length,""],["Best",best?best.label:"-",""],["Best PnL",best?"$"+fmt(best.metrics.net_pnl):"-",best?cls(best.metrics.net_pnl):""],["Total Trades",totalTrades,""]
+  ].map(([k,v,c])=>`<div class="card"><div class="k">${k}</div><div class="v ${c}">${v}</div></div>`).join("");
+  renderShared();
+  render();
+
+  document.getElementById("tree").addEventListener("click",e=>{
+    const row=e.target.closest(".node-row");
+    if(row) row.parentElement.classList.toggle("open");
+  });
+  document.getElementById("search").addEventListener("input",render);
+  document.getElementById("minTrades").addEventListener("input",render);
+  document.getElementById("expandAll").addEventListener("click",()=>{
+    document.querySelectorAll("#tree .node").forEach(n=>n.classList.add("open"));
+  });
+  document.getElementById("collapseAll").addEventListener("click",()=>{
+    document.querySelectorAll("#tree .node").forEach(n=>n.classList.remove("open"));
+  });
+}
+init();
+</script>
+</body>
+</html>

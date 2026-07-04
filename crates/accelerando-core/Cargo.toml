@@ -5,6 +5,13 @@ edition.workspace = true
 license.workspace = true
 description = "Core model, traits, engine, broker and metrics for the Accelerando backtesting framework."
 
+[features]
+default = []
+footprint-image = ["dep:ab_glyph", "dep:image", "dep:imageproc"]
+
 [dependencies]
+ab_glyph = { version = "0.2", optional = true }
+image = { version = "0.25", default-features = false, features = ["jpeg"], optional = true }
+imageproc = { version = "0.25", optional = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

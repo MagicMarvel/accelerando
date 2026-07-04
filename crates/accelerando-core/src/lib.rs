@@ -11,6 +11,8 @@ pub mod broker;
 pub mod engine;
 pub mod event;
 pub mod footprint;
+#[cfg(feature = "footprint-image")]
+pub mod footprint_image;
 pub mod heatmap;
 pub mod metrics;
 pub mod params;
@@ -26,6 +28,12 @@ pub use engine::{
 };
 pub use event::{EventInterest, OrderFlowEvent, Side};
 pub use footprint::{Footprint, Level, Plot, VpLevel};
+#[cfg(feature = "footprint-image")]
+pub use footprint_image::{
+    nearest_footprint, sample_trade_footprint_jpegs, TradeImageError, TradeImageManifest,
+    TradeImageOptions, TradeImageRunMetrics, TradeImageSample, TradeImageWindow,
+    TradeOutcomeFilter,
+};
 pub use heatmap::{
     parse_heatmap_query, CompactLevel, HeatmapBucket, HeatmapMetric, HeatmapQuery, HeatmapWindow,
     HiresHeatmap, SharedHeatmap, DEFAULT_HEATMAP_CACHE_DIR,

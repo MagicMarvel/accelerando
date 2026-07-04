@@ -81,6 +81,14 @@
   canvas.dragging { cursor:grabbing; }
   .center-price { position:absolute; top:8px; right:10px; z-index:3; width:30px; height:30px; padding:0; border-radius:50%; font-size:17px; line-height:1; background:rgba(255,255,255,0.88); color:#0f172a; box-shadow:0 1px 4px rgba(15,23,42,0.18); }
   .center-price:hover { background:#fff; }
+  .anno-tools { display:none; align-items:center; gap:6px; padding:2px 6px; border:1px solid #cbd5e1; border-radius:8px; background:#f8fafc; }
+  .anno-tools.visible { display:inline-flex; }
+  .anno-tools select { height:26px; border:1px solid #cbd5e1; border-radius:6px; font-size:12px; background:#fff; }
+  .anno-tools button { height:26px; padding:0 8px; border-radius:6px; font-size:12px; }
+  .anno-hint { font-size:11px; color:#475569; white-space:nowrap; }
+  .annotation-help { display:none; position:absolute; left:72px; top:12px; z-index:4; max-width:min(760px,calc(100% - 150px)); padding:7px 9px; border:1px solid #cbd5e1; border-radius:8px; background:rgba(255,255,255,0.94); color:#334155; box-shadow:0 2px 8px rgba(15,23,42,0.12); font-size:12px; line-height:1.35; pointer-events:none; }
+  .annotation-help.visible { display:block; }
+  .annotation-help b { color:#0f172a; }
   .empty { display:flex; align-items:center; justify-content:center; height:100%; color:#94a3b8; font-size:14px; }
 </style>
 </head>
@@ -137,10 +145,18 @@
       <span id="overlayToggles" style="display:inline-flex;gap:10px;align-items:center;flex-wrap:wrap;"></span>
       <label style="font-size:12px;color:#374151;display:inline-flex;gap:6px;align-items:center;">heat <select id="heatMetric" style="height:26px;border:1px solid #cbd5e1;border-radius:6px;font-size:12px;"><option value="total">total</option><option value="bid">bid</option><option value="ask">ask</option></select></label>
       <button id="toggleEquity" class="tool-toggle active" type="button" title="Hide equity" aria-pressed="true">Equity</button>
+      <button id="toggleAnnotate" class="tool-toggle" type="button" title="Toggle annotation mode (A)" aria-pressed="false" style="display:none;">Annotate</button>
+      <span id="annoTools" class="anno-tools">
+        <select id="annoLabel" title="Annotation label"></select>
+        <button id="annoSave" type="button" title="Save current box (Enter)" disabled>Save</button>
+        <button id="annoCancel" type="button" title="Cancel current box (Esc)" disabled>Cancel</button>
+        <span id="annoHint" class="anno-hint"></span>
+      </span>
       <span class="rng" id="range"></span>
     </div>
     <div class="charts">
       <button id="centerPrice" class="center-price" type="button" title="Center current price" aria-label="Center current price">+</button>
+      <div id="annotationHelp" class="annotation-help"></div>
       <canvas id="price"></canvas>
       <div id="chartSplitter" class="splitter" title="Drag to resize charts"></div>
       <canvas id="equity"></canvas>
@@ -154,6 +170,8 @@ let barsPerView=300, start=0, hover=null, drag=null, splitDrag=null, chartMode="
 // Overlay visibility, keyed by category ("bands", "trades", or a marker group). Persisted across
 // re-renders so a hidden overlay stays hidden when the result is reloaded.
 let overlayState={};
+let annotationConfig={enabled:false,labels:[]};
+let annotations=[], annotationMode=false, annotationDraft=null, priceScale=null;
 const overlayLabel=cat=>cat==="bands"?"bands":cat==="trades"?"trades":cat.replace(/_/g," ");
 const overlayOn=cat=>overlayState[cat]!==false;
 const markerCat=p=>p.group||"markers";
@@ -400,6 +418,7 @@ async function loadResult(){
   const data=await r.json();
   if(data&&data.error) throw new Error(data.error);
   renderResult(data);
+  await loadAnnotations();
 }
 
 // ---------- saved runs ----------
@@ -848,7 +867,7 @@ function drawPrice(){
   if(chartMode==="heatmap"){ drawHeatmap(pctx,price,"price"); const [s,e]=viewRange(); $("range").textContent=`bars ${s+1}-${e} / ${fps.length}`; return; }
   const [s,e]=viewRange(); const vis=fps.slice(s,e); const L=64,R=16,T=14,B=34; const pw=Math.max(1,W-L-R),ph=Math.max(1,H-T-B);
   let lo=Infinity,hi=-Infinity; for(const b of vis){lo=Math.min(lo,b.low);hi=Math.max(hi,b.high);}
-  const pad=Math.max(0.25,(hi-lo)*0.06); lo-=pad;hi+=pad; [lo,hi]=applyYZoom("price",lo,hi); yZoom.price.lo=lo; yZoom.price.hi=hi; const y=p=>T+(hi-p)/(hi-lo)*ph; const xStep=pw/Math.max(1,vis.length); const cw=Math.max(1,Math.min(16,xStep*0.7)); const tick=tickSizeFor(vis);
+  const pad=Math.max(0.25,(hi-lo)*0.06); lo-=pad;hi+=pad; [lo,hi]=applyYZoom("price",lo,hi); yZoom.price.lo=lo; yZoom.price.hi=hi; const y=p=>T+(hi-p)/(hi-lo)*ph; const xStep=pw/Math.max(1,vis.length); priceScale={s,e,L,T,pw,ph,lo,hi,xStep}; const cw=Math.max(1,Math.min(16,xStep*0.7)); const tick=tickSizeFor(vis);
   if(overlayOn("bands")){ let i=0; while(i<vis.length){ const band=(vis[i].plots||[]).find(p=>p.kind==="BackgroundBand"); const col=band?band.color:null; let j=i+1; const same=k=>{const bb=(vis[k].plots||[]).find(p=>p.kind==="BackgroundBand"); return (bb?bb.color:null)===col;}; while(j<vis.length&&same(j))j++; if(col){pctx.fillStyle=col; pctx.fillRect(L+i*xStep,T,(j-i)*xStep,ph);} i=j; } }
   pctx.strokeStyle=COLORS.grid; pctx.fillStyle=COLORS.axis; pctx.font="11px Segoe UI, Arial"; pctx.lineWidth=1;
   for(let i=0;i<=6;i++){ const yy=T+ph*i/6,pr=hi-(hi-lo)*i/6; pctx.beginPath();pctx.moveTo(L,yy);pctx.lineTo(W-R,yy);pctx.stroke(); pctx.fillText(pr.toFixed(2),6,yy+4); }
@@ -858,6 +877,7 @@ function drawPrice(){
   if(chartMode==="footprint") drawFootprints(pctx,vis,L,T,ph,xStep,y,tick);
   else drawCandles(pctx,vis,L,T,ph,xStep,cw,y);
   drawPriceBoxes(pctx,vis,L,T,pw,ph,xStep,y,labelLayout);
+  drawAnnotations(pctx,L,T,pw,ph,xStep,y,s,e);
   drawVolumeProfiles(pctx,vis,L,T,pw,ph,xStep,y,tick,labelLayout);
   drawPlotMarkers(pctx,vis,L,T,ph,xStep,y,labelLayout);
   if(overlayOn("trades")) drawTradePositions(pctx,trades,s,e,L,T,ph,xStep,y,labelLayout);
@@ -865,6 +885,154 @@ function drawPrice(){
   pctx.strokeStyle="#9aa4b2"; pctx.strokeRect(L,T,pw,ph);
   if(hover&&hover.canvas==="price"){ const idx=clamp(Math.floor((hover.x-L)/xStep),0,vis.length-1); const b=vis[idx]; if(b){ const x=L+idx*xStep+xStep/2; pctx.strokeStyle="#111827";pctx.beginPath();pctx.moveTo(x,T);pctx.lineTo(x,T+ph);pctx.stroke(); const tags=b.tags?Object.entries(b.tags).map(([k,v])=>`${k}:${v}`).join(" "):""; const base=`${s+idx+1}/${fps.length}  ${fmtTs(b.ts_last_ns)}  O ${b.open.toFixed(2)} H ${b.high.toFixed(2)} L ${b.low.toFixed(2)} C ${b.close.toFixed(2)}  D ${fmt(b.delta,0)}  ${tags}`; if(chartMode==="footprint"){ const totals=footprintTotals(b); const priceAt=hi-(hover.y-T)/Math.max(1,ph)*(hi-lo); const lv=nearestFootprintLevel(b,priceAt); $("status").textContent=base+`  bar sell/buy ${fmt(totals.sell,0)}/${fmt(totals.buy,0)}  level ${lv?lv.price.toFixed(2):priceAt.toFixed(2)} sell/buy ${lv?fmt(lv.sell_vol,0):"-"}/${lv?fmt(lv.buy_vol,0):"-"}`; } else { $("status").textContent=base; } } }
   $("range").textContent=`bars ${s+1}-${e} / ${fps.length}`;
+}
+function annotationLabels(){ return (annotationConfig.labels||[]).filter(Boolean); }
+function annotationRunId(){ return typeof globalThis.RUN_ID==="string"?globalThis.RUN_ID:""; }
+function annotationColor(label){
+  if(label==="strong_sr"||label==="good_trade")return "#2563eb";
+  if(label==="weak_sr")return "#64748b";
+  if(label==="ignore"||label==="bad_trade")return "#dc2626";
+  if(label==="expired_but_visible")return "#d97706";
+  return "#7c3aed";
+}
+function setupAnnotations(){
+  annotationConfig=(globalThis.ANNOTATION_CONFIG&&typeof globalThis.ANNOTATION_CONFIG==="object")?globalThis.ANNOTATION_CONFIG:{enabled:false,labels:[]};
+  if(!annotationConfig.enabled)return;
+  const btn=$("toggleAnnotate"), tools=$("annoTools"), select=$("annoLabel");
+  const labels=annotationLabels();
+  if(!labels.length)return;
+  btn.style.display="";
+  select.innerHTML=labels.map((label,i)=>`<option value="${esc(label)}">${i+1}. ${esc(label)}</option>`).join("");
+  $("annoHint").textContent=annotationHintText();
+  btn.onclick=()=>setAnnotationMode(!annotationMode);
+  $("annoSave").onclick=saveAnnotationDraft;
+  $("annoCancel").onclick=cancelAnnotationDraft;
+  select.onchange=()=>{ if(annotationDraft)annotationDraft.label=select.value; draw(); updateAnnotationUi(); };
+  tools.classList.toggle("visible",annotationMode);
+  updateAnnotationHelp();
+}
+function annotationHintText(){
+  const labels=annotationLabels().map((label,i)=>`${i+1} ${label}`).join(" | ");
+  return `A toggle | drag box | ${labels} | Enter save | Esc cancel`;
+}
+function setAnnotationMode(on){
+  if(!annotationConfig.enabled)return;
+  annotationMode=!!on;
+  if(!annotationMode)annotationDraft=null;
+  $("toggleAnnotate").classList.toggle("active",annotationMode);
+  $("toggleAnnotate").setAttribute("aria-pressed",String(annotationMode));
+  $("annoTools").classList.toggle("visible",annotationMode);
+  updateAnnotationUi();
+  updateAnnotationHelp();
+  draw();
+}
+function updateAnnotationUi(){
+  const hasDraft=!!annotationDraft;
+  const save=$("annoSave"), cancel=$("annoCancel");
+  if(save)save.disabled=!hasDraft;
+  if(cancel)cancel.disabled=!hasDraft;
+}
+function updateAnnotationHelp(){
+  const help=$("annotationHelp");
+  if(!help)return;
+  if(!(annotationConfig.enabled&&annotationMode)){ help.classList.remove("visible"); help.innerHTML=""; return; }
+  help.classList.add("visible");
+  help.innerHTML=`<b>Annotation mode</b>: drag on the price chart to draw a box. ${esc(annotationHintText())}. Saved boxes go to ${esc(annotationConfig.save_path||"annotation JSONL")}.`;
+}
+async function loadAnnotations(){
+  if(!annotationConfig.enabled){ annotations=[]; return; }
+  try{
+    const r=await fetch("/api/annotations?id="+encodeURIComponent(annotationRunId()));
+    if(!r.ok)return;
+    const data=await r.json();
+    annotations=Array.isArray(data.annotations)?data.annotations:[];
+    draw();
+  }catch(_){}
+}
+function pointToAnnotationCoord(ev){
+  if(!priceScale)return null;
+  const r=price.getBoundingClientRect();
+  const x=ev.clientX-r.left, y=ev.clientY-r.top;
+  const {s,e,L,T,ph,lo,hi,xStep}=priceScale;
+  if(e<=s)return null;
+  const idx=clamp(Math.floor((x-L)/Math.max(1e-9,xStep)),0,e-s-1)+s;
+  const yy=clamp(y,T,T+ph);
+  const px=hi-(yy-T)/Math.max(1,ph)*(hi-lo);
+  return {idx,price:px};
+}
+function startAnnotationDraft(ev){
+  const p=pointToAnnotationCoord(ev);
+  if(!p)return false;
+  annotationDraft={startIdx:p.idx,endIdx:p.idx,priceA:p.price,priceB:p.price,label:$("annoLabel").value,dragging:true};
+  updateAnnotationUi();
+  draw();
+  ev.preventDefault();
+  return true;
+}
+function updateAnnotationDraft(ev){
+  if(!annotationDraft)return false;
+  const p=pointToAnnotationCoord(ev);
+  if(!p)return false;
+  annotationDraft.endIdx=p.idx;
+  annotationDraft.priceB=p.price;
+  updateAnnotationUi();
+  draw();
+  return true;
+}
+function annotationObjectFromDraft(){
+  if(!annotationDraft)return null;
+  const a=annotationDraft;
+  const i0=Math.min(a.startIdx,a.endIdx), i1=Math.max(a.startIdx,a.endIdx);
+  const low=Math.min(a.priceA,a.priceB), high=Math.max(a.priceA,a.priceB);
+  return {
+    id:`ann_${Date.now()}_${Math.random().toString(16).slice(2)}`,
+    label:a.label,
+    bar_start:i0+1,
+    bar_end:i1+1,
+    price_low:Number(low.toFixed(2)),
+    price_high:Number(high.toFixed(2)),
+    ts_first_ns:fps[i0]?fps[i0].ts_first_ns:null,
+    ts_last_ns:fps[i1]?fps[i1].ts_last_ns:null
+  };
+}
+async function saveAnnotationDraft(){
+  const ann=annotationObjectFromDraft();
+  if(!ann)return;
+  try{
+    const r=await fetch("/api/annotations?id="+encodeURIComponent(annotationRunId()),{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(ann)});
+    const data=await r.json().catch(()=>({}));
+    if(!r.ok||data.ok===false)throw new Error(data.error||`save failed: ${r.status}`);
+    annotations.push(data.annotation||ann);
+    annotationDraft=null;
+    updateAnnotationUi();
+    draw();
+  }catch(err){ $("status").textContent=`annotation save failed: ${err&&err.message?err.message:err}`; }
+}
+function cancelAnnotationDraft(){ annotationDraft=null; updateAnnotationUi(); draw(); }
+function drawAnnotationBox(ctx,ann,L,T,pw,ph,xStep,y,s,e,draft=false){
+  if(!ann||ann.price_low==null||ann.price_high==null||ann.bar_start==null||ann.bar_end==null)return;
+  const a0=Math.max(0,Math.min(ann.bar_start,ann.bar_end)-1), a1=Math.max(0,Math.max(ann.bar_start,ann.bar_end)-1);
+  if(a1<s||a0>=e)return;
+  const x0=clamp(L+(a0-s)*xStep,L,L+pw), x1=clamp(L+(a1+1-s)*xStep,L,L+pw);
+  const top=y(Math.max(ann.price_low,ann.price_high)), bot=y(Math.min(ann.price_low,ann.price_high));
+  const yy=Math.min(top,bot), hh=Math.max(2,Math.abs(bot-top)), w=Math.max(2,x1-x0);
+  const color=annotationColor(ann.label);
+  ctx.save();
+  ctx.fillStyle=colorAlpha(color,draft?0.10:0.07);
+  ctx.fillRect(x0,yy,w,hh);
+  ctx.strokeStyle=colorAlpha(color,draft?0.95:0.78);
+  ctx.lineWidth=draft?2:1.5;
+  if(draft)ctx.setLineDash([6,4]);
+  ctx.strokeRect(x0,yy,w,hh);
+  ctx.setLineDash([]);
+  ctx.fillStyle=color;
+  ctx.font="11px Segoe UI, Arial";
+  ctx.fillText(`${draft?"draft ":""}${ann.label}`,x0+4,Math.max(T+12,yy-5));
+  ctx.restore();
+}
+function drawAnnotations(ctx,L,T,pw,ph,xStep,y,s,e){
+  for(const ann of annotations)drawAnnotationBox(ctx,ann,L,T,pw,ph,xStep,y,s,e,false);
+  if(annotationDraft)drawAnnotationBox(ctx,annotationObjectFromDraft(),L,T,pw,ph,xStep,y,s,e,true);
 }
 // Bookmap-style heat ramp: dark depth base -> blue -> cyan -> red -> yellow as resting size grows.
 // ===== Zoomable, server-windowed Bookmap heatmap =====
@@ -1004,13 +1172,14 @@ function attach(canvas,name){
   canvas.addEventListener("wheel",ev=>{ev.preventDefault(); const r=canvas.getBoundingClientRect(); const x=ev.clientX-r.left;
     if(chartMode==="heatmap"&&name==="price"&&heatView){ const L=64,top=10,bottom=30,pw=Math.max(1,r.width-L-16),ph=Math.max(1,r.height-top-bottom),factor=ev.deltaY<0?0.82:1.22; if(ev.shiftKey||x<L){ heatZoomPrice(factor,clamp((ev.clientY-r.top-top)/ph,0,1)); } else { heatZoomTime(factor,clamp((x-L)/pw,0,1)); } draw(); scheduleHeatFetch(); return; }
     if(ev.shiftKey||x<64){ const top=name==="price"?14:12,bottom=name==="price"?34:30; const frac=clamp((ev.clientY-r.top-top)/Math.max(1,r.height-top-bottom),0,1); zoomY(name,ev.deltaY<0?1.18:1/1.18,frac); } else { const ratio=clamp((x-64)/Math.max(1,r.width-80),0,1); setBarsPerView(barsPerView*(ev.deltaY<0?0.82:1.22),ratio); }},{passive:false});
-  canvas.addEventListener("mousedown",ev=>{lockYZoom(name); const st=yZoom[name]; drag={x:ev.clientX,y:ev.clientY,start,name,lo:st?.lo,hi:st?.hi,heat:(chartMode==="heatmap"&&heatView)?{t0:heatView.t0,t1:heatView.t1,pmin:heatView.pmin,pmax:heatView.pmax}:null}; canvas.classList.add("dragging");});
+  canvas.addEventListener("mousedown",ev=>{ if(annotationMode&&name==="price"&&chartMode!=="heatmap"&&ev.button===0){ startAnnotationDraft(ev); return; } lockYZoom(name); const st=yZoom[name]; drag={x:ev.clientX,y:ev.clientY,start,name,lo:st?.lo,hi:st?.hi,heat:(chartMode==="heatmap"&&heatView)?{t0:heatView.t0,t1:heatView.t1,pmin:heatView.pmin,pmax:heatView.pmax}:null}; canvas.classList.add("dragging");});
   canvas.addEventListener("mousemove",ev=>{const r=canvas.getBoundingClientRect(); hover={canvas:name,x:ev.clientX-r.left,y:ev.clientY-r.top};
+    if(annotationMode&&name==="price"&&annotationDraft&&annotationDraft.dragging){ updateAnnotationDraft(ev); return; }
     if(drag&&chartMode==="heatmap"&&drag.name==="price"&&drag.heat){ const L=64,top=10,bottom=30,pw=Math.max(1,r.width-L-16),ph=Math.max(1,r.height-top-bottom); heatPan(ev.clientX-drag.x,ev.clientY-drag.y,pw,ph,drag.heat); draw(); scheduleHeatFetch(); return; }
     if(drag){const pw=Math.max(1,r.width-80); const d=Math.round((drag.x-ev.clientX)/pw*barsPerView); start=clamp(drag.start+d,0,Math.max(0,fps.length-barsPerView)); if(drag.name==="price")autoYZoom("equity"); if(drag.name===name&&isFinite(drag.lo)&&isFinite(drag.hi)&&drag.hi>drag.lo){ const top=name==="price"?14:12,bottom=name==="price"?34:30; const ph=Math.max(1,r.height-top-bottom); const dy=ev.clientY-drag.y; const shift=dy/ph*(drag.hi-drag.lo); const st=yZoom[name]; st.manual=true; st.lo=drag.lo+shift; st.hi=drag.hi+shift; }} draw();});
   canvas.addEventListener("mouseleave",()=>{hover=null;draw();});
 }
-window.addEventListener("mouseup",()=>{drag=null; price.classList.remove("dragging"); equity.classList.remove("dragging");});
+window.addEventListener("mouseup",()=>{ if(annotationDraft)annotationDraft.dragging=false; drag=null; price.classList.remove("dragging"); equity.classList.remove("dragging"); updateAnnotationUi(); });
 splitter.addEventListener("mousedown",ev=>{
   splitDrag={y:ev.clientY,h:equity.getBoundingClientRect().height};
   splitter.classList.add("dragging");
@@ -1039,10 +1208,21 @@ setEquityCollapsed(equityCollapsed,false);
 $("runBtn").onclick=runBacktest;
 $("saveBtn").onclick=async()=>{ const name=$("saveName").value.trim(); if(!name){$("runErr").textContent="Enter a save name";return;} const r=await (await fetch("/api/save",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({name})})).json(); if(!r.ok){$("runErr").textContent=r.error||"save failed";} else { $("saveName").value=""; refreshRuns(); } };
 window.addEventListener("resize",resize);
+window.addEventListener("keydown",ev=>{
+  if(!annotationConfig.enabled)return;
+  const tag=(document.activeElement&&document.activeElement.tagName||"").toLowerCase();
+  const editing=tag==="input"||tag==="textarea"||tag==="select";
+  if(!editing&&ev.key.toLowerCase()==="a"){ setAnnotationMode(!annotationMode); ev.preventDefault(); return; }
+  if(!annotationMode||editing)return;
+  if(ev.key>="1"&&ev.key<="9"){ const idx=Number(ev.key)-1, labels=annotationLabels(); if(labels[idx]){ $("annoLabel").value=labels[idx]; if(annotationDraft)annotationDraft.label=labels[idx]; draw(); updateAnnotationUi(); ev.preventDefault(); } return; }
+  if(ev.key==="Enter"){ saveAnnotationDraft(); ev.preventDefault(); return; }
+  if(ev.key==="Escape"){ cancelAnnotationDraft(); ev.preventDefault(); }
+});
 
 async function init(){
   document.body.classList.add("viewer");
   $("status").textContent="result viewer";
+  setupAnnotations();
   resize();
   try{ await loadResult(); }
   catch(err){ $("status").textContent="Unable to load result: "+(err&&err.message?err.message:err); }
