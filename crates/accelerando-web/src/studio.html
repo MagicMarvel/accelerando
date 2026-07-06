@@ -43,6 +43,7 @@
   .err { color:#b45309; font-size:12px; }
   .content { display:grid; grid-template-rows:auto auto auto 1fr; min-height:0; }
   .cards { display:flex; gap:8px; flex-wrap:wrap; padding:10px 14px; background:#fff; border-bottom:1px solid #e2e8f0; }
+  .cards.collapsed { display:none; }
   .card { min-width:104px; padding:6px 10px; border:1px solid #e5e7eb; border-radius:8px; background:#fbfcfe; }
   .card .k { font-size:10px; color:#6b7280; text-transform:uppercase; letter-spacing:.4px; }
   .card .v { font-size:16px; font-weight:700; margin-top:2px; }
@@ -144,6 +145,7 @@
       </span>
       <span id="overlayToggles" style="display:inline-flex;gap:10px;align-items:center;flex-wrap:wrap;"></span>
       <label style="font-size:12px;color:#374151;display:inline-flex;gap:6px;align-items:center;">heat <select id="heatMetric" style="height:26px;border:1px solid #cbd5e1;border-radius:6px;font-size:12px;"><option value="total">total</option><option value="bid">bid</option><option value="ask">ask</option></select></label>
+      <button id="toggleMetrics" class="tool-toggle active" type="button" title="Hide metrics" aria-pressed="true">Metrics</button>
       <button id="toggleEquity" class="tool-toggle active" type="button" title="Hide equity" aria-pressed="true">Equity</button>
       <button id="toggleAnnotate" class="tool-toggle" type="button" title="Toggle annotation mode (A)" aria-pressed="false" style="display:none;">Annotate</button>
       <span id="annoTools" class="anno-tools">
@@ -187,6 +189,7 @@ function readStoredBool(key,fallback=false){ try{ const v=localStorage.getItem(k
 function writeStoredBool(key,value){ try{ localStorage.setItem(key,value?"1":"0"); } catch(_){} }
 let metaCollapsed=readStoredBool("accelerando.runMetaCollapsed",false);
 let equityCollapsed=readStoredBool("accelerando.equityCollapsed",false);
+let cardsCollapsed=readStoredBool("accelerando.cardsCollapsed",false);
 const fmt=(n,d=2)=>(n===null||n===undefined||!isFinite(n))?"-":Number(n).toLocaleString(undefined,{maximumFractionDigits:d,minimumFractionDigits:d});
 const fmtTs=ns=>new Date(Number(ns)/1e6).toLocaleString();
 const fmtAxisTs=ns=>new Date(Number(ns)/1e6).toLocaleTimeString([], {hour:"2-digit", minute:"2-digit"});
@@ -252,6 +255,20 @@ function setMetaCollapsed(collapsed,persist=true){
     }
   }
   if(persist)writeStoredBool("accelerando.runMetaCollapsed",metaCollapsed);
+  requestAnimationFrame(resize);
+}
+
+function setCardsCollapsed(collapsed,persist=true){
+  cardsCollapsed=!!collapsed;
+  const host=$("cards");
+  if(host)host.classList.toggle("collapsed",cardsCollapsed);
+  const btn=$("toggleMetrics");
+  if(btn){
+    btn.classList.toggle("active",!cardsCollapsed);
+    btn.title=cardsCollapsed?"Show metrics":"Hide metrics";
+    btn.setAttribute("aria-pressed",String(!cardsCollapsed));
+  }
+  if(persist)writeStoredBool("accelerando.cardsCollapsed",cardsCollapsed);
   requestAnimationFrame(resize);
 }
 
@@ -1203,6 +1220,8 @@ $("modeCandles").onclick=()=>setChartMode("candles");
 $("modeFootprint").onclick=()=>setChartMode("footprint");
 $("modeHeatmap").onclick=()=>setChartMode("heatmap");
 $("heatMetric").onchange=e=>{heatMetric=e.target.value; if(chartMode==="heatmap")fetchHeat(); else draw();};
+$("toggleMetrics").onclick=()=>setCardsCollapsed(!cardsCollapsed);
+setCardsCollapsed(cardsCollapsed,false);
 $("toggleEquity").onclick=()=>setEquityCollapsed(!equityCollapsed);
 setEquityCollapsed(equityCollapsed,false);
 $("runBtn").onclick=runBacktest;
