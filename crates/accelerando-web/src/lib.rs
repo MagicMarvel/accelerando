@@ -2,6 +2,8 @@
 //!
 //! No node, no build step: pass a [`BacktestResult`] to [`serve`] and open the printed localhost URL.
 
+mod replay;
+
 use std::fs::{self, File, OpenOptions};
 use std::io::{BufRead, BufReader, Cursor, Write};
 use std::path::Path;
@@ -12,8 +14,10 @@ use serde::Serialize;
 use serde_json::Value;
 use tiny_http::{Header, Method, Request, Response, Server};
 
+pub use replay::ReplayManager;
+
 const STUDIO_HTML: &str = include_str!("studio.html");
-const EXPERIMENT_HTML: &str = include_str!("experiment.html");
+pub(crate) const EXPERIMENT_HTML: &str = include_str!("experiment.html");
 
 /// The embedded result/studio page HTML.
 ///
@@ -135,6 +139,46 @@ where
     F: Fn(&str) -> Option<BacktestResult>,
     H: Fn(&str) -> Option<String>,
 {
+    serve_experiment_dashboard(summaries, port, load_result, heatmap, annotation_config, None)
+}
+
+/// Like [`serve_experiment_lazy_heatmap_with_annotations`], additionally serving an interactive
+/// manual bar-replay session at `/replay`: paper-trade market/limit/breakout orders bar by bar,
+/// with each session persisted by [`ReplayManager`].
+pub fn serve_experiment_lazy_heatmap_with_replay<F, H>(
+    summaries: Vec<ExperimentRunSummary>,
+    port: u16,
+    load_result: F,
+    heatmap: H,
+    annotation_config: AnnotationConfig,
+    replay: ReplayManager,
+) -> std::io::Result<()>
+where
+    F: Fn(&str) -> Option<BacktestResult>,
+    H: Fn(&str) -> Option<String>,
+{
+    serve_experiment_dashboard(
+        summaries,
+        port,
+        load_result,
+        heatmap,
+        annotation_config,
+        Some(replay),
+    )
+}
+
+fn serve_experiment_dashboard<F, H>(
+    summaries: Vec<ExperimentRunSummary>,
+    port: u16,
+    load_result: F,
+    heatmap: H,
+    annotation_config: AnnotationConfig,
+    replay: Option<ReplayManager>,
+) -> std::io::Result<()>
+where
+    F: Fn(&str) -> Option<BacktestResult>,
+    H: Fn(&str) -> Option<String>,
+{
     #[derive(Serialize)]
     struct SummaryPayload<'a> {
         runs: &'a [ExperimentRunSummary],
@@ -144,6 +188,11 @@ where
         serde_json::to_string(&SummaryPayload { runs: &summaries }).expect("serialize summaries");
     let annotation_json =
         serde_json::to_string(&annotation_config).expect("serialize annotation config");
+    let index_html = if replay.is_some() {
+        replay::experiment_html_with_replay_button()
+    } else {
+        EXPERIMENT_HTML.to_string()
+    };
     let addr = format!("0.0.0.0:{port}");
     let server = Server::http(&addr)
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, format!("bind {addr}: {e}")))?;
@@ -153,9 +202,9 @@ where
         let raw_url = request.url().to_string();
         let path = raw_url.split('?').next().unwrap_or("/");
         let method = request.method().clone();
-        let response = match path {
-            "/" | "/index.html" => html_response(EXPERIMENT_HTML),
-            "/run" | "/run.html" => {
+        let response = match (method, path) {
+            (Method::Get, "/" | "/index.html") => html_response(&index_html),
+            (Method::Get, "/run" | "/run.html") => {
                 let run_id = query_param(&raw_url, "id").unwrap_or_default();
                 html_response(&studio_html_for_run(
                     &run_id,
@@ -163,8 +212,15 @@ where
                     &annotation_json,
                 ))
             }
-            "/api/experiment" => json_response(&summary_json),
-            "/api/result" | "/result.json" => {
+            (Method::Get, "/replay" | "/replay.html") => match &replay {
+                Some(_) => {
+                    let run_id = query_param(&raw_url, "id").unwrap_or_default();
+                    html_response(&replay::replay_html(&run_id, &annotation_json))
+                }
+                None => Response::from_string("replay disabled").with_status_code(404),
+            },
+            (Method::Get, "/api/experiment") => json_response(&summary_json),
+            (Method::Get, "/api/result" | "/result.json") => {
                 let run_id = query_param(&raw_url, "id")
                     .or_else(|| summaries.first().map(|run| run.id.clone()))
                     .unwrap_or_default();
@@ -175,18 +231,119 @@ where
                     None => Response::from_string("run not found").with_status_code(404),
                 }
             }
-            "/api/heatmap" => {
+            (Method::Get, "/api/heatmap") => {
                 let query = raw_url.split_once('?').map(|(_, q)| q).unwrap_or("");
-                match heatmap(query) {
-                    Some(body) => json_response(&body),
-                    None => Response::from_string("no heatmap").with_status_code(404),
+                let id = query_param_from_query(query, "id").unwrap_or_default();
+                let replay_blocked = id.starts_with("replay_")
+                    && !replay
+                        .as_ref()
+                        .is_some_and(|r| r.validate_heatmap_query(&id, query));
+                if replay_blocked {
+                    Response::from_string("no replay heatmap beyond current bar")
+                        .with_status_code(404)
+                } else {
+                    match heatmap(query) {
+                        Some(body) => json_response(&body),
+                        None => Response::from_string("no heatmap").with_status_code(404),
+                    }
                 }
             }
-            "/api/annotations" => {
+            (Method::Post, "/api/replay/new") => match &replay {
+                Some(replay) => match replay.create_session() {
+                    Ok(state) => json_response(
+                        &serde_json::json!({ "ok": true, "id": state.id, "url": format!("/replay?id={}", state.id), "replay": state })
+                            .to_string(),
+                    ),
+                    Err(e) => json_error(400, &e),
+                },
+                None => json_error(404, "replay disabled"),
+            },
+            (Method::Get, "/api/replay/state") => match &replay {
+                Some(replay) => {
+                    let id = query_param(&raw_url, "id").unwrap_or_default();
+                    match replay.state_value(&id) {
+                        Ok(value) => json_response(&value.to_string()),
+                        Err(e) => json_error(404, &e),
+                    }
+                }
+                None => json_error(404, "replay disabled"),
+            },
+            (Method::Post, "/api/replay/order") => match &replay {
+                Some(replay) => {
+                    let id = query_param(&raw_url, "id").unwrap_or_default();
+                    match replay::read_json(&mut request)
+                        .and_then(|body| replay.place_order(&id, body))
+                    {
+                        Ok(state) => {
+                            json_response(&serde_json::json!({ "ok": true, "replay": state }).to_string())
+                        }
+                        Err(e) => json_error(400, &e),
+                    }
+                }
+                None => json_error(404, "replay disabled"),
+            },
+            (Method::Post, "/api/replay/step") => match &replay {
+                Some(replay) => {
+                    let id = query_param(&raw_url, "id").unwrap_or_default();
+                    let body = replay::read_json(&mut request)
+                        .unwrap_or(replay::StepRequest { count: Some(1) });
+                    match replay.advance(&id, body.count.unwrap_or(1)) {
+                        Ok(state) => {
+                            json_response(&serde_json::json!({ "ok": true, "replay": state }).to_string())
+                        }
+                        Err(e) => json_error(400, &e),
+                    }
+                }
+                None => json_error(404, "replay disabled"),
+            },
+            (Method::Post, "/api/replay/update") => match &replay {
+                Some(replay) => {
+                    let id = query_param(&raw_url, "id").unwrap_or_default();
+                    match replay::read_json(&mut request)
+                        .and_then(|body| replay.update_active_order(&id, body))
+                    {
+                        Ok(state) => {
+                            json_response(&serde_json::json!({ "ok": true, "replay": state }).to_string())
+                        }
+                        Err(e) => json_error(400, &e),
+                    }
+                }
+                None => json_error(404, "replay disabled"),
+            },
+            (Method::Post, "/api/replay/cancel") => match &replay {
+                Some(replay) => {
+                    let id = query_param(&raw_url, "id").unwrap_or_default();
+                    match replay.cancel_pending(&id) {
+                        Ok(state) => {
+                            json_response(&serde_json::json!({ "ok": true, "replay": state }).to_string())
+                        }
+                        Err(e) => json_error(400, &e),
+                    }
+                }
+                None => json_error(404, "replay disabled"),
+            },
+            (Method::Post, "/api/replay/flatten") => match &replay {
+                Some(replay) => {
+                    let id = query_param(&raw_url, "id").unwrap_or_default();
+                    match replay.flatten(&id) {
+                        Ok(state) => {
+                            json_response(&serde_json::json!({ "ok": true, "replay": state }).to_string())
+                        }
+                        Err(e) => json_error(400, &e),
+                    }
+                }
+                None => json_error(404, "replay disabled"),
+            },
+            (Method::Get, "/api/annotations") | (Method::Post, "/api/annotations") => {
                 let run_id = query_param(&raw_url, "id").unwrap_or_default();
-                handle_annotations(&annotation_config, &run_id, method, &mut request)
+                handle_annotations(
+                    &annotation_config,
+                    &run_id,
+                    request.method().clone(),
+                    &mut request,
+                )
             }
-            "/api/progress" => json_response(r#"{"running":false,"has_result":true}"#),
+            (Method::Get, "/api/progress") => json_response(r#"{"running":false,"has_result":true}"#),
             _ => Response::from_string("not found").with_status_code(404),
         };
         let _ = request.respond(response);
@@ -317,6 +474,10 @@ fn append_annotation(
 
 fn query_param(url: &str, key: &str) -> Option<String> {
     let query = url.split_once('?')?.1;
+    query_param_from_query(query, key)
+}
+
+pub(crate) fn query_param_from_query(query: &str, key: &str) -> Option<String> {
     for pair in query.split('&') {
         let (k, v) = pair.split_once('=').unwrap_or((pair, ""));
         if k == key {
@@ -363,7 +524,7 @@ fn hex(b: u8) -> Option<u8> {
     }
 }
 
-fn json_string(value: &str) -> String {
+pub(crate) fn json_string(value: &str) -> String {
     serde_json::to_string(value).expect("serialize json string")
 }
 
