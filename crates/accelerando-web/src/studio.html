@@ -148,6 +148,7 @@
       <label style="font-size:12px;color:#374151;display:inline-flex;gap:6px;align-items:center;">heat <select id="heatMetric" style="height:26px;border:1px solid #cbd5e1;border-radius:6px;font-size:12px;"><option value="total">total</option><option value="bid">bid</option><option value="ask">ask</option></select></label>
       <button id="toggleMetrics" class="tool-toggle active" type="button" title="Hide metrics" aria-pressed="true">Metrics</button>
       <button id="toggleEquity" class="tool-toggle active" type="button" title="Hide equity" aria-pressed="true">Equity</button>
+      <button id="toggleVp" class="tool-toggle" type="button" title="Draw a volume/delta profile: drag a box, click an existing one to remove it (V)" aria-pressed="false">Volume Profile</button>
       <button id="toggleAnnotate" class="tool-toggle" type="button" title="Toggle annotation mode (A)" aria-pressed="false" style="display:none;">Annotate</button>
       <span id="annoTools" class="anno-tools">
         <select id="annoLabel" title="Annotation label"></select>
@@ -175,6 +176,10 @@ let barsPerView=300, start=0, hover=null, drag=null, splitDrag=null, chartMode="
 let overlayState={};
 let annotationConfig={enabled:false,labels:[]};
 let annotations=[], annotationMode=false, annotationDraft=null, priceScale=null;
+// User-drawn volume/delta profiles (Fixed Range Volume Profile, TradingView-style): drag a box on
+// the price chart to add one, click an existing one to remove it. Client-side only (computed from
+// the already-loaded footprint ladders), not persisted across reloads.
+let vpProfiles=[], vpMode=false, vpDraft=null;
 const overlayLabel=cat=>cat==="bands"?"bands":cat==="trades"?"trades":cat.replace(/_/g," ");
 const overlayOn=cat=>overlayState[cat]!==false;
 const markerCat=p=>p.group||"markers";
@@ -916,6 +921,7 @@ function drawPrice(){
   drawPriceBoxes(pctx,vis,L,T,pw,ph,xStep,y,labelLayout);
   drawAnnotations(pctx,L,T,pw,ph,xStep,y,s,e);
   drawVolumeProfiles(pctx,vis,L,T,pw,ph,xStep,y,tick,labelLayout);
+  drawVpProfiles(pctx,L,T,pw,ph,xStep,y,tick,s,e,labelLayout);
   drawPlotMarkers(pctx,vis,L,T,ph,xStep,y,labelLayout);
   if(overlayOn("trades")) drawTradePositions(pctx,trades,s,e,L,T,ph,xStep,y,labelLayout);
   pctx.restore();
@@ -1046,6 +1052,111 @@ async function saveAnnotationDraft(){
   }catch(err){ $("status").textContent=`annotation save failed: ${err&&err.message?err.message:err}`; }
 }
 function cancelAnnotationDraft(){ annotationDraft=null; updateAnnotationUi(); draw(); }
+
+// ---------- volume/delta profile draw tool ----------
+function setVpMode(on){
+  vpMode=!!on;
+  if(!vpMode)vpDraft=null;
+  const btn=$("toggleVp");
+  if(btn){ btn.classList.toggle("active",vpMode); btn.setAttribute("aria-pressed",String(vpMode)); }
+  draw();
+}
+function startVpDraft(ev){
+  const p=pointToAnnotationCoord(ev);
+  if(!p)return false;
+  vpDraft={startIdx:p.idx,endIdx:p.idx,dragging:true};
+  draw();
+  ev.preventDefault();
+  return true;
+}
+function updateVpDraft(ev){
+  if(!vpDraft)return false;
+  const p=pointToAnnotationCoord(ev);
+  if(!p)return false;
+  vpDraft.endIdx=p.idx;
+  draw();
+  return true;
+}
+// Aggregate every bar's price ladder across [i0,i1] into one price -> buy/sell volume profile.
+// Ladder prices are already snapped to the tick grid, so grouping by exact price is safe.
+function computeVpLevels(i0,i1){
+  const map=new Map();
+  for(let i=i0;i<=i1&&i<fps.length;i++){
+    for(const lv of (fps[i].ladder||[])){
+      const cur=map.get(lv.price)||{price:lv.price,buy_vol:0,sell_vol:0};
+      cur.buy_vol+=lv.buy_vol||0; cur.sell_vol+=lv.sell_vol||0;
+      map.set(lv.price,cur);
+    }
+  }
+  return [...map.values()].sort((a,b)=>a.price-b.price);
+}
+function vpTotals(levels){
+  let buy=0,sell=0; for(const lv of levels){buy+=lv.buy_vol;sell+=lv.sell_vol;}
+  return {buy,sell,total:buy+sell,delta:buy-sell};
+}
+function finalizeVpDraft(){
+  if(!vpDraft)return;
+  const i0=Math.min(vpDraft.startIdx,vpDraft.endIdx), i1=Math.max(vpDraft.startIdx,vpDraft.endIdx);
+  vpDraft=null;
+  if(i1<=i0){
+    // A plain click (no real drag): remove the topmost existing profile under the cursor, if any.
+    const hit=[...vpProfiles].reverse().find(p=>i0>=p.i0&&i0<=p.i1);
+    if(hit)vpProfiles=vpProfiles.filter(p=>p!==hit);
+    draw();
+    return;
+  }
+  const levels=computeVpLevels(i0,i1);
+  if(levels.length)vpProfiles.push({id:`vp_${Date.now()}_${Math.random().toString(16).slice(2)}`,i0,i1,levels});
+  draw();
+}
+// Renders as two back-to-back histograms per price level, split at a center spine: delta grows
+// left (colored by sign), total volume grows right (grey, POC row highlighted) -- same visual
+// language as the strategy-emitted VolumeProfile plot, just for a user-picked bar range.
+function drawVpProfileBox(ctx,i0,i1,levels,L,T,pw,ph,xStep,y,tick,s,e,labelLayout,draft){
+  if(i1<s||i0>=e||!levels.length)return;
+  const x0=clamp(L+(i0-s)*xStep,L,L+pw), x1=clamp(L+(i1+1-s)*xStep,L,L+pw);
+  const width=Math.max(2,x1-x0), half=width/2, mid=x0+half;
+  let maxTotal=0,maxDelta=0;
+  for(const lv of levels){ maxTotal=Math.max(maxTotal,lv.buy_vol+lv.sell_vol); maxDelta=Math.max(maxDelta,Math.abs(lv.buy_vol-lv.sell_vol)); }
+  if(!(maxTotal>0))return;
+  let poc=levels[0];
+  for(const lv of levels){ if(lv.buy_vol+lv.sell_vol>poc.buy_vol+poc.sell_vol)poc=lv; }
+  ctx.save();
+  ctx.fillStyle=draft?"rgba(37,99,235,0.06)":"rgba(100,116,139,0.05)";
+  ctx.fillRect(x0,T,width,ph);
+  let minY=Infinity;
+  for(const lv of levels){
+    const top=y(lv.price+tick/2), bot=y(lv.price-tick/2);
+    const yy=Math.min(top,bot), hh=Math.max(1,Math.abs(bot-top));
+    if(yy>T+ph||yy+hh<T)continue;
+    minY=Math.min(minY,yy);
+    const total=lv.buy_vol+lv.sell_vol, delta=lv.buy_vol-lv.sell_vol;
+    const deltaW=maxDelta>0?half*Math.min(1,Math.abs(delta)/maxDelta):0;
+    const totalW=half*Math.min(1,total/maxTotal);
+    ctx.fillStyle=delta>=0?colorAlpha(COLORS.buy,0.85):colorAlpha(COLORS.sell,0.85);
+    ctx.fillRect(mid-deltaW,yy,Math.max(1,deltaW),hh);
+    ctx.fillStyle=lv===poc?"#f59e0b":"rgba(100,116,139,0.75)";
+    ctx.fillRect(mid,yy,Math.max(1,totalW),hh);
+  }
+  ctx.strokeStyle=draft?"rgba(37,99,235,0.9)":"rgba(17,24,39,0.5)";
+  ctx.setLineDash(draft?[6,4]:[]);
+  ctx.lineWidth=draft?1.6:1;
+  ctx.strokeRect(x0,T,width,ph);
+  ctx.beginPath(); ctx.moveTo(mid,T); ctx.lineTo(mid,T+ph); ctx.strokeStyle="rgba(17,24,39,0.3)"; ctx.lineWidth=1; ctx.stroke();
+  ctx.setLineDash([]);
+  ctx.restore();
+  if(isFinite(minY)){
+    const t=vpTotals(levels);
+    drawLabel(ctx,`VP  vol ${fmt(t.total,0)}  Δ ${t.delta>=0?"+":""}${fmt(t.delta,0)}`,x0+4,Math.max(T+10,minY-8),draft?"#2563eb":"#334155",labelLayout);
+  }
+}
+function drawVpProfiles(ctx,L,T,pw,ph,xStep,y,tick,s,e,labelLayout){
+  for(const p of vpProfiles)drawVpProfileBox(ctx,p.i0,p.i1,p.levels,L,T,pw,ph,xStep,y,tick,s,e,labelLayout,false);
+  if(vpDraft){
+    const i0=Math.min(vpDraft.startIdx,vpDraft.endIdx), i1=Math.max(vpDraft.startIdx,vpDraft.endIdx);
+    if(i1>i0)drawVpProfileBox(ctx,i0,i1,computeVpLevels(i0,i1),L,T,pw,ph,xStep,y,tick,s,e,labelLayout,true);
+  }
+}
 function drawAnnotationBox(ctx,ann,L,T,pw,ph,xStep,y,s,e,draft=false){
   if(!ann||ann.price_low==null||ann.price_high==null||ann.bar_start==null||ann.bar_end==null)return;
   const a0=Math.max(0,Math.min(ann.bar_start,ann.bar_end)-1), a1=Math.max(0,Math.max(ann.bar_start,ann.bar_end)-1);
@@ -1209,14 +1320,15 @@ function attach(canvas,name){
   canvas.addEventListener("wheel",ev=>{ev.preventDefault(); const r=canvas.getBoundingClientRect(); const x=ev.clientX-r.left;
     if(chartMode==="heatmap"&&name==="price"&&heatView){ const L=64,top=10,bottom=30,pw=Math.max(1,r.width-L-16),ph=Math.max(1,r.height-top-bottom),factor=ev.deltaY<0?0.82:1.22; if(ev.shiftKey||x<L){ heatZoomPrice(factor,clamp((ev.clientY-r.top-top)/ph,0,1)); } else { heatZoomTime(factor,clamp((x-L)/pw,0,1)); } draw(); scheduleHeatFetch(); return; }
     if(ev.shiftKey||x<64){ const top=name==="price"?14:12,bottom=name==="price"?34:30; const frac=clamp((ev.clientY-r.top-top)/Math.max(1,r.height-top-bottom),0,1); zoomY(name,ev.deltaY<0?1.18:1/1.18,frac); } else { const ratio=clamp((x-64)/Math.max(1,r.width-80),0,1); setBarsPerView(barsPerView*(ev.deltaY<0?0.82:1.22),ratio); }},{passive:false});
-  canvas.addEventListener("mousedown",ev=>{ if(annotationMode&&name==="price"&&chartMode!=="heatmap"&&ev.button===0){ startAnnotationDraft(ev); return; } lockYZoom(name); const st=yZoom[name]; drag={x:ev.clientX,y:ev.clientY,start,name,lo:st?.lo,hi:st?.hi,heat:(chartMode==="heatmap"&&heatView)?{t0:heatView.t0,t1:heatView.t1,pmin:heatView.pmin,pmax:heatView.pmax}:null}; canvas.classList.add("dragging");});
+  canvas.addEventListener("mousedown",ev=>{ if(annotationMode&&name==="price"&&chartMode!=="heatmap"&&ev.button===0){ startAnnotationDraft(ev); return; } if(vpMode&&name==="price"&&chartMode!=="heatmap"&&ev.button===0){ startVpDraft(ev); return; } lockYZoom(name); const st=yZoom[name]; drag={x:ev.clientX,y:ev.clientY,start,name,lo:st?.lo,hi:st?.hi,heat:(chartMode==="heatmap"&&heatView)?{t0:heatView.t0,t1:heatView.t1,pmin:heatView.pmin,pmax:heatView.pmax}:null}; canvas.classList.add("dragging");});
   canvas.addEventListener("mousemove",ev=>{const r=canvas.getBoundingClientRect(); hover={canvas:name,x:ev.clientX-r.left,y:ev.clientY-r.top};
     if(annotationMode&&name==="price"&&annotationDraft&&annotationDraft.dragging){ updateAnnotationDraft(ev); return; }
+    if(vpMode&&name==="price"&&vpDraft&&vpDraft.dragging){ updateVpDraft(ev); return; }
     if(drag&&chartMode==="heatmap"&&drag.name==="price"&&drag.heat){ const L=64,top=10,bottom=30,pw=Math.max(1,r.width-L-16),ph=Math.max(1,r.height-top-bottom); heatPan(ev.clientX-drag.x,ev.clientY-drag.y,pw,ph,drag.heat); draw(); scheduleHeatFetch(); return; }
     if(drag){const pw=Math.max(1,r.width-80); const d=Math.round((drag.x-ev.clientX)/pw*barsPerView); start=clamp(drag.start+d,0,maxStart()); if(drag.name==="price")autoYZoom("equity"); if(drag.name===name&&isFinite(drag.lo)&&isFinite(drag.hi)&&drag.hi>drag.lo){ const top=name==="price"?14:12,bottom=name==="price"?34:30; const ph=Math.max(1,r.height-top-bottom); const dy=ev.clientY-drag.y; const shift=dy/ph*(drag.hi-drag.lo); const st=yZoom[name]; st.manual=true; st.lo=drag.lo+shift; st.hi=drag.hi+shift; }} draw();});
   canvas.addEventListener("mouseleave",()=>{hover=null;draw();});
 }
-window.addEventListener("mouseup",()=>{ if(annotationDraft)annotationDraft.dragging=false; drag=null; price.classList.remove("dragging"); equity.classList.remove("dragging"); updateAnnotationUi(); });
+window.addEventListener("mouseup",()=>{ if(annotationDraft)annotationDraft.dragging=false; if(vpDraft)finalizeVpDraft(); drag=null; price.classList.remove("dragging"); equity.classList.remove("dragging"); updateAnnotationUi(); });
 splitter.addEventListener("mousedown",ev=>{
   splitDrag={y:ev.clientY,h:equity.getBoundingClientRect().height};
   splitter.classList.add("dragging");
@@ -1244,18 +1356,25 @@ $("toggleMetrics").onclick=()=>setCardsCollapsed(!cardsCollapsed);
 setCardsCollapsed(cardsCollapsed,false);
 $("toggleEquity").onclick=()=>setEquityCollapsed(!equityCollapsed);
 setEquityCollapsed(equityCollapsed,false);
+$("toggleVp").onclick=()=>setVpMode(!vpMode);
 $("runBtn").onclick=runBacktest;
 $("saveBtn").onclick=async()=>{ const name=$("saveName").value.trim(); if(!name){$("runErr").textContent="Enter a save name";return;} const r=await (await fetch("/api/save",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({name})})).json(); if(!r.ok){$("runErr").textContent=r.error||"save failed";} else { $("saveName").value=""; refreshRuns(); } };
 window.addEventListener("resize",resize);
 window.addEventListener("keydown",ev=>{
-  if(!annotationConfig.enabled)return;
   const tag=(document.activeElement&&document.activeElement.tagName||"").toLowerCase();
   const editing=tag==="input"||tag==="textarea"||tag==="select";
-  if(!editing&&ev.key.toLowerCase()==="a"){ setAnnotationMode(!annotationMode); ev.preventDefault(); return; }
-  if(!annotationMode||editing)return;
+  if(editing)return;
+  if(annotationConfig.enabled&&ev.key.toLowerCase()==="a"){ setAnnotationMode(!annotationMode); ev.preventDefault(); return; }
+  if(ev.key.toLowerCase()==="v"){ setVpMode(!vpMode); ev.preventDefault(); return; }
+  if(ev.key==="Escape"){
+    if(vpDraft){ vpDraft=null; draw(); ev.preventDefault(); return; }
+    if(vpMode){ setVpMode(false); ev.preventDefault(); return; }
+    if(annotationMode){ cancelAnnotationDraft(); ev.preventDefault(); }
+    return;
+  }
+  if(!(annotationConfig.enabled&&annotationMode))return;
   if(ev.key>="1"&&ev.key<="9"){ const idx=Number(ev.key)-1, labels=annotationLabels(); if(labels[idx]){ $("annoLabel").value=labels[idx]; if(annotationDraft)annotationDraft.label=labels[idx]; draw(); updateAnnotationUi(); ev.preventDefault(); } return; }
-  if(ev.key==="Enter"){ saveAnnotationDraft(); ev.preventDefault(); return; }
-  if(ev.key==="Escape"){ cancelAnnotationDraft(); ev.preventDefault(); }
+  if(ev.key==="Enter"){ saveAnnotationDraft(); ev.preventDefault(); }
 });
 
 async function init(){
