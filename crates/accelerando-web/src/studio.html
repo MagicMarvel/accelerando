@@ -43,7 +43,8 @@
   .err { color:#b45309; font-size:12px; }
   .content { display:grid; grid-template-rows:auto auto auto 1fr; min-height:0; }
   .cards { display:flex; gap:8px; flex-wrap:wrap; padding:10px 14px; background:#fff; border-bottom:1px solid #e2e8f0; }
-  .cards.collapsed { display:none; }
+  .cards.collapsed { padding:0; border-bottom:0; }
+  .cards.collapsed > * { display:none; }
   .card { min-width:104px; padding:6px 10px; border:1px solid #e5e7eb; border-radius:8px; background:#fbfcfe; }
   .card .k { font-size:10px; color:#6b7280; text-transform:uppercase; letter-spacing:.4px; }
   .card .v { font-size:16px; font-weight:700; margin-top:2px; }
