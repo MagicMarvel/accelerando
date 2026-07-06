@@ -977,8 +977,8 @@ function installReplayUi(){
   drawPrice=function(){oldDraw();drawReplayOverlay();};
   $("modeHeatmap").style.display="none";
   const heat=$("heatMetric"); if(heat&&heat.parentElement)heat.parentElement.style.display="none";
-  $("replayStep").onclick=()=>replayAction("/api/replay/step",{count:1});
-  $("replayStep5").onclick=()=>replayAction("/api/replay/step",{count:5});
+  $("replayStep").onclick=async()=>{ if(await replayAction("/api/replay/step",{count:1}))jumpToLatestCentered(); };
+  $("replayStep5").onclick=async()=>{ if(await replayAction("/api/replay/step",{count:5}))jumpToLatestCentered(); };
   $("replayCancel").onclick=()=>replayAction("/api/replay/cancel",{});
   $("replayFlat").onclick=()=>replayAction("/api/replay/flatten",{});
   for(const id of ["replayQty"]){
@@ -1146,10 +1146,19 @@ function panPriceViewToReveal(rawPrice){
   draw();
   return rawPrice;
 }
+// Dragging past the visible edge pans the view to reveal more room (see panPriceViewToReveal),
+// but a straight linear extrapolation of price-per-pixel makes that pan feel too fast/twitchy
+// once the cursor is well past the edge. Damp price movement in the overflow zone so the user
+// has to move further to get the same amount of pan, while in-bounds dragging stays 1:1.
+const REPLAY_EDGE_PAN_DAMPING=0.15;
 function replayPriceFromEventForDrag(ev){
   const r=price.getBoundingClientRect(), y=ev.clientY-r.top;
   const {T,ph,lo,hi}=priceScale;
-  const raw=hi-(y-T)/Math.max(1,ph)*(hi-lo);
+  const pxToPrice=(hi-lo)/Math.max(1,ph);
+  let raw;
+  if(y<T) raw=hi+(T-y)*pxToPrice*REPLAY_EDGE_PAN_DAMPING;
+  else if(y>T+ph) raw=lo-(y-(T+ph))*pxToPrice*REPLAY_EDGE_PAN_DAMPING;
+  else raw=hi-(y-T)*pxToPrice;
   return snapPrice(panPriceViewToReveal(raw));
 }
 function replayHoverMove(ev){

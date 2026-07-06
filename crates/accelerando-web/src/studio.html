@@ -310,13 +310,13 @@ function zoomY(name,factor,frac){
   st.manual=true; st.lo=nextLo; st.hi=nextLo+nextSpan;
   draw();
 }
-function drawTimeAxis(ctx,vis,L,T,pw,ph,W,R,tsKey="ts_last_ns"){
+function drawTimeAxis(ctx,vis,L,T,pw,ph,W,R,tsKey="ts_last_ns",xStep=pw/Math.max(1,vis.length)){
   if(!vis.length)return;
   ctx.save(); ctx.strokeStyle=COLORS.grid; ctx.fillStyle=COLORS.axis; ctx.font="10px Segoe UI, Arial"; ctx.textAlign="center"; ctx.textBaseline="top";
   const ticks=Math.min(5,vis.length);
   for(let i=0;i<ticks;i++){
     const idx=ticks===1?0:Math.round((vis.length-1)*i/(ticks-1));
-    const x=L+(idx+0.5)*pw/Math.max(1,vis.length);
+    const x=L+(idx+0.5)*xStep;
     const ts=vis[idx][tsKey]??vis[idx].ts_last_ns??vis[idx].ts_ns;
     ctx.beginPath();ctx.moveTo(x,T+ph);ctx.lineTo(x,T+ph+4);ctx.stroke();
     ctx.fillText(fmtAxisTs(ts),x,T+ph+7);
@@ -476,7 +476,7 @@ function renderResult(data){
     resetYZoom();
   } else {
     barsPerView=Math.min(barsPerView,Math.max(1,fps.length));
-    start=clamp(start,0,Math.max(0,fps.length-barsPerView));
+    start=clamp(start,0,maxStart());
   }
   resize();
 }
@@ -531,9 +531,18 @@ function renderCards(m){
     ["Avg MAE","$"+fmt(m.avg_max_adverse_excursion),"neg"],["Avg MAE ticks",fmt(m.avg_max_adverse_ticks),"neg"]];
   $("cards").innerHTML=cards.map(([k,v,c])=>`<div class="card"><div class="k">${k}</div><div class="v ${c}">${v}</div></div>`).join("");
 }
-function setBarsPerView(next,anchor=1){ autoYZoom("equity"); const old=barsPerView; next=Math.round(clamp(next,1,Math.max(1,fps.length))); const a=start+old*anchor; barsPerView=next; start=clamp(Math.round(a-barsPerView*anchor),0,Math.max(0,fps.length-barsPerView)); draw(); }
+function setBarsPerView(next,anchor=1){ autoYZoom("equity"); const old=barsPerView; next=Math.round(clamp(next,1,Math.max(1,fps.length))); const a=start+old*anchor; barsPerView=next; start=clamp(Math.round(a-barsPerView*anchor),0,maxStart()); draw(); }
 function resize(){ for(const c of [price,equity]){ const r=c.getBoundingClientRect(); const dpr=window.devicePixelRatio||1; c.width=Math.max(1,Math.floor(r.width*dpr)); c.height=Math.max(1,Math.floor(r.height*dpr)); c.getContext("2d").setTransform(dpr,0,0,dpr,0,0);} draw(); if(chartMode==="heatmap")scheduleHeatFetch(); }
 function viewRange(){ const end=Math.min(fps.length,start+barsPerView); return [start,end]; }
+// Furthest the view is allowed to scroll: at least the very last bar stays inside the window, so
+// the latest bar can be dragged/centered away from the hard right edge, leaving blank space after it.
+function maxStart(){ return Math.max(0,fps.length-1); }
+function jumpToLatestCentered(){
+  if(!fps.length)return;
+  autoYZoom("equity");
+  start=clamp(fps.length-Math.ceil(barsPerView/2),0,maxStart());
+  draw();
+}
 function visibleFootprints(){ const [s,e]=viewRange(); return fps.slice(s,e); }
 function currentVisiblePrice(){ const vis=visibleFootprints(); const b=vis[vis.length-1]||fps[fps.length-1]; return b&&isFinite(b.close)?b.close:null; }
 function centerCurrentPrice(){
@@ -895,11 +904,11 @@ function drawPrice(){
   if(chartMode==="heatmap"){ drawHeatmap(pctx,price,"price"); const [s,e]=viewRange(); $("range").textContent=`bars ${s+1}-${e} / ${fps.length}`; return; }
   const [s,e]=viewRange(); const vis=fps.slice(s,e); const L=64,R=16,T=14,B=34; const pw=Math.max(1,W-L-R),ph=Math.max(1,H-T-B);
   let lo=Infinity,hi=-Infinity; for(const b of vis){lo=Math.min(lo,b.low);hi=Math.max(hi,b.high);}
-  const pad=Math.max(0.25,(hi-lo)*0.06); lo-=pad;hi+=pad; [lo,hi]=applyYZoom("price",lo,hi); yZoom.price.lo=lo; yZoom.price.hi=hi; const y=p=>T+(hi-p)/(hi-lo)*ph; const xStep=pw/Math.max(1,vis.length); priceScale={s,e,L,T,pw,ph,lo,hi,xStep}; const cw=Math.max(1,Math.min(16,xStep*0.7)); const tick=tickSizeFor(vis);
+  const pad=Math.max(0.25,(hi-lo)*0.06); lo-=pad;hi+=pad; [lo,hi]=applyYZoom("price",lo,hi); yZoom.price.lo=lo; yZoom.price.hi=hi; const y=p=>T+(hi-p)/(hi-lo)*ph; const xStep=pw/Math.max(1,barsPerView); priceScale={s,e,L,T,pw,ph,lo,hi,xStep}; const cw=Math.max(1,Math.min(16,xStep*0.7)); const tick=tickSizeFor(vis);
   if(overlayOn("bands")){ let i=0; while(i<vis.length){ const band=(vis[i].plots||[]).find(p=>p.kind==="BackgroundBand"); const col=band?band.color:null; let j=i+1; const same=k=>{const bb=(vis[k].plots||[]).find(p=>p.kind==="BackgroundBand"); return (bb?bb.color:null)===col;}; while(j<vis.length&&same(j))j++; if(col){pctx.fillStyle=col; pctx.fillRect(L+i*xStep,T,(j-i)*xStep,ph);} i=j; } }
   pctx.strokeStyle=COLORS.grid; pctx.fillStyle=COLORS.axis; pctx.font="11px Segoe UI, Arial"; pctx.lineWidth=1;
   for(let i=0;i<=6;i++){ const yy=T+ph*i/6,pr=hi-(hi-lo)*i/6; pctx.beginPath();pctx.moveTo(L,yy);pctx.lineTo(W-R,yy);pctx.stroke(); pctx.fillText(pr.toFixed(2),6,yy+4); }
-  drawTimeAxis(pctx,vis,L,T,pw,ph,W,R);
+  drawTimeAxis(pctx,vis,L,T,pw,ph,W,R,"ts_last_ns",xStep);
   const labelLayout={boxes:[],L,T,pw,ph};
   pctx.save(); clipPlot(pctx,L,T,pw,ph);
   if(chartMode==="footprint") drawFootprints(pctx,vis,L,T,ph,xStep,y,tick);
@@ -1184,10 +1193,10 @@ function drawEquity(){
   const L=64,R=16,T=12,B=30; const pw=Math.max(1,W-L-R),ph=Math.max(1,H-T-B);
   let lo=Infinity,hi=-Infinity; for(const p of vis){lo=Math.min(lo,p.equity);hi=Math.max(hi,p.equity);} if(!(isFinite(lo)&&isFinite(hi))||lo===hi){lo-=1;hi+=1;} const pad=(hi-lo)*0.08; lo-=pad;hi+=pad;
   [lo,hi]=applyYZoom("equity",lo,hi); yZoom.equity.lo=lo; yZoom.equity.hi=hi;
-  const y=v=>T+(hi-v)/(hi-lo)*ph; const xStep=pw/Math.max(1,vis.length); const startEq=DATA&&DATA.metrics?DATA.metrics.starting_equity:(vis[0]?vis[0].equity:0);
+  const y=v=>T+(hi-v)/(hi-lo)*ph; const xStep=pw/Math.max(1,barsPerView); const startEq=DATA&&DATA.metrics?DATA.metrics.starting_equity:(vis[0]?vis[0].equity:0);
   ectx.strokeStyle=COLORS.grid; ectx.fillStyle=COLORS.axis; ectx.font="11px Segoe UI, Arial";
   for(let i=0;i<=3;i++){ const yy=T+ph*i/3,vv=hi-(hi-lo)*i/3; ectx.beginPath();ectx.moveTo(L,yy);ectx.lineTo(W-R,yy);ectx.stroke(); ectx.fillText("$"+vv.toFixed(0),6,yy+4); }
-  drawTimeAxis(ectx,vis,L,T,pw,ph,W,R,"ts_ns");
+  drawTimeAxis(ectx,vis,L,T,pw,ph,W,R,"ts_ns",xStep);
   ectx.save(); clipPlot(ectx,L,T,pw,ph);
   if(startEq>=lo&&startEq<=hi){ ectx.strokeStyle="#cbd5e1";ectx.setLineDash([4,4]); ectx.beginPath();ectx.moveTo(L,y(startEq));ectx.lineTo(W-R,y(startEq));ectx.stroke();ectx.setLineDash([]); }
   ectx.strokeStyle="#2563eb"; ectx.lineWidth=1.6; ectx.beginPath(); for(let i=0;i<vis.length;i++){const x=L+(i+0.5)*xStep,yy=y(vis[i].equity); i?ectx.lineTo(x,yy):ectx.moveTo(x,yy);} ectx.stroke(); ectx.lineWidth=1;
@@ -1204,7 +1213,7 @@ function attach(canvas,name){
   canvas.addEventListener("mousemove",ev=>{const r=canvas.getBoundingClientRect(); hover={canvas:name,x:ev.clientX-r.left,y:ev.clientY-r.top};
     if(annotationMode&&name==="price"&&annotationDraft&&annotationDraft.dragging){ updateAnnotationDraft(ev); return; }
     if(drag&&chartMode==="heatmap"&&drag.name==="price"&&drag.heat){ const L=64,top=10,bottom=30,pw=Math.max(1,r.width-L-16),ph=Math.max(1,r.height-top-bottom); heatPan(ev.clientX-drag.x,ev.clientY-drag.y,pw,ph,drag.heat); draw(); scheduleHeatFetch(); return; }
-    if(drag){const pw=Math.max(1,r.width-80); const d=Math.round((drag.x-ev.clientX)/pw*barsPerView); start=clamp(drag.start+d,0,Math.max(0,fps.length-barsPerView)); if(drag.name==="price")autoYZoom("equity"); if(drag.name===name&&isFinite(drag.lo)&&isFinite(drag.hi)&&drag.hi>drag.lo){ const top=name==="price"?14:12,bottom=name==="price"?34:30; const ph=Math.max(1,r.height-top-bottom); const dy=ev.clientY-drag.y; const shift=dy/ph*(drag.hi-drag.lo); const st=yZoom[name]; st.manual=true; st.lo=drag.lo+shift; st.hi=drag.hi+shift; }} draw();});
+    if(drag){const pw=Math.max(1,r.width-80); const d=Math.round((drag.x-ev.clientX)/pw*barsPerView); start=clamp(drag.start+d,0,maxStart()); if(drag.name==="price")autoYZoom("equity"); if(drag.name===name&&isFinite(drag.lo)&&isFinite(drag.hi)&&drag.hi>drag.lo){ const top=name==="price"?14:12,bottom=name==="price"?34:30; const ph=Math.max(1,r.height-top-bottom); const dy=ev.clientY-drag.y; const shift=dy/ph*(drag.hi-drag.lo); const st=yZoom[name]; st.manual=true; st.lo=drag.lo+shift; st.hi=drag.hi+shift; }} draw();});
   canvas.addEventListener("mouseleave",()=>{hover=null;draw();});
 }
 window.addEventListener("mouseup",()=>{ if(annotationDraft)annotationDraft.dragging=false; drag=null; price.classList.remove("dragging"); equity.classList.remove("dragging"); updateAnnotationUi(); });
