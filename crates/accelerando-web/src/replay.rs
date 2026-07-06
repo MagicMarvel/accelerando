@@ -1134,6 +1134,24 @@ function replayPriceFromEvent(ev){
   const r=price.getBoundingClientRect(), y=ev.clientY-r.top;
   return replayPriceFromCanvasY(y);
 }
+function panPriceViewToReveal(rawPrice){
+  if(!priceScale)return rawPrice;
+  const {lo,hi}=priceScale;
+  if(rawPrice>=lo&&rawPrice<=hi)return rawPrice;
+  const range=Math.max(1e-9,hi-lo), margin=range*0.08;
+  const st=yZoom.price;
+  st.manual=true;
+  if(rawPrice>hi){ const shift=rawPrice-hi+margin; st.lo=lo+shift; st.hi=hi+shift; }
+  else { const shift=lo-rawPrice+margin; st.lo=lo-shift; st.hi=hi-shift; }
+  draw();
+  return rawPrice;
+}
+function replayPriceFromEventForDrag(ev){
+  const r=price.getBoundingClientRect(), y=ev.clientY-r.top;
+  const {T,ph,lo,hi}=priceScale;
+  const raw=hi-(y-T)/Math.max(1,ph)*(hi-lo);
+  return snapPrice(panPriceViewToReveal(raw));
+}
 function replayHoverMove(ev){
   if(!replaySpace||REPLAY.pending_order||REPLAY.open_position||chartMode==="heatmap"||!priceScale)return;
   replayHoverPrice=replayPriceFromEvent(ev);
@@ -1166,7 +1184,7 @@ function replayMouseDown(ev){
 }
 function replayMouseMove(ev){
   if(!replayDrag)return;
-  const p=replayPriceFromEvent(ev);
+  const p=replayPriceFromEventForDrag(ev);
   if(replayDrag.mode==="create"){
     replayDraft=replayDraftFrom(replayDrag.entry,replayDrag.dir,p);
   } else {

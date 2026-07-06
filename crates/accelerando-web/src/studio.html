@@ -460,14 +460,24 @@ async function loadRun(name){
 
 // ---------- chart rendering ----------
 function renderResult(data){
+  // A manual-replay session re-fetches this same run on every step/order/drag, so only
+  // snap the view (bars-per-page, x scroll position, y zoom) back to the auto-fit default
+  // on the first load; otherwise a user's manual pan/zoom would get wiped out by every
+  // subsequent update (most jarringly right as an SL/TP drag completes).
+  const isReplay=data.replay!=null, firstLoad=fps.length===0;
   DATA=data; fps=data.footprints||[]; eq=data.equity||[]; trades=data.trades||[];
   heatView=null; heatData=null; heatImg=null; // reset zoomable heatmap window for the new run
   for(const t of trades){ t._ei=idxForEntryTs(t.entry_ts_ns); t._xi=idxForTs(t.exit_ts_ns); }
   renderCards(data.metrics);
   renderRunMeta();
   buildOverlayToggles();
-  barsPerView=Math.min(300,Math.max(20,fps.length)); start=Math.max(0,fps.length-barsPerView);
-  resetYZoom();
+  if(!isReplay||firstLoad){
+    barsPerView=Math.min(300,Math.max(20,fps.length)); start=Math.max(0,fps.length-barsPerView);
+    resetYZoom();
+  } else {
+    barsPerView=Math.min(barsPerView,Math.max(1,fps.length));
+    start=clamp(start,0,Math.max(0,fps.length-barsPerView));
+  }
   resize();
 }
 // Collect the overlay categories actually present in the loaded result, in a stable order:
