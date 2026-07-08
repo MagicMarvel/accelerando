@@ -285,9 +285,15 @@ where
             (Method::Post, "/api/replay/step") => match &replay {
                 Some(replay) => {
                     let id = query_param(&raw_url, "id").unwrap_or_default();
-                    let body = replay::read_json(&mut request)
-                        .unwrap_or(replay::StepRequest { count: Some(1) });
-                    match replay.advance(&id, body.count.unwrap_or(1)) {
+                    let body = replay::read_json(&mut request).unwrap_or(replay::StepRequest {
+                        count: Some(1),
+                        to_ts_ms: None,
+                    });
+                    let stepped = match body.to_ts_ms {
+                        Some(ts_ms) => replay.advance_to_ts(&id, ts_ms.saturating_mul(1_000_000)),
+                        None => replay.advance(&id, body.count.unwrap_or(1)),
+                    };
+                    match stepped {
                         Ok(state) => {
                             json_response(&serde_json::json!({ "ok": true, "replay": state }).to_string())
                         }

@@ -186,7 +186,40 @@ impl ReplayManager {
     }
 
     pub(crate) fn advance(&self, id: &str, count: usize) -> Result<ReplayPublicState, String> {
-        let count = count.max(1).min(500);
+        let count = count.clamp(1, 20_000);
+        self.advance_while(id, move |stepped, _| stepped < count)
+    }
+
+    /// Jump forward until the current bar's close time reaches `to_ts_ns` (or data ends).
+    /// Replay is forward-only, so a target at or before the current bar is an error.
+    pub(crate) fn advance_to_ts(&self, id: &str, to_ts_ns: i64) -> Result<ReplayPublicState, String> {
+        {
+            let sessions = self
+                .sessions
+                .lock()
+                .map_err(|_| "replay session lock poisoned".to_string())?;
+            let session = sessions
+                .get(id)
+                .ok_or_else(|| format!("replay session not found: {id}"))?;
+            if let Some(fp) = self.prepared.footprints.get(session.cursor) {
+                if fp.ts_last_ns >= to_ts_ns {
+                    return Err("target time is not after the current bar (replay cannot rewind)"
+                        .to_string());
+                }
+            }
+        }
+        self.advance_while(id, move |_, next_fp_ts_last_ns| {
+            next_fp_ts_last_ns <= to_ts_ns
+        })
+    }
+
+    /// Step the session forward, consuming the next bar as long as
+    /// `keep_going(bars_stepped_so_far, next bar's ts_last_ns)` returns true.
+    fn advance_while(
+        &self,
+        id: &str,
+        keep_going: impl Fn(usize, i64) -> bool,
+    ) -> Result<ReplayPublicState, String> {
         let session = {
             let mut sessions = self
                 .sessions
@@ -195,12 +228,14 @@ impl ReplayManager {
             let session = sessions
                 .get_mut(id)
                 .ok_or_else(|| format!("replay session not found: {id}"))?;
-            for _ in 0..count {
-                if session.cursor + 1 >= self.prepared.footprints.len() {
+            let mut stepped = 0usize;
+            while let Some(next_fp) = self.prepared.footprints.get(session.cursor + 1) {
+                if !keep_going(stepped, next_fp.ts_last_ns) {
                     break;
                 }
                 session.cursor += 1;
                 self.process_current_bar(session)?;
+                stepped += 1;
             }
             session.updated_at_ms = now_ms();
             session.clone()
@@ -669,6 +704,8 @@ pub(crate) struct OrderRequest {
 #[derive(Debug, Deserialize)]
 pub(crate) struct StepRequest {
     pub(crate) count: Option<usize>,
+    /// Jump forward until the current bar's close time reaches this UTC millisecond timestamp.
+    pub(crate) to_ts_ms: Option<i64>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -966,6 +1003,8 @@ function installReplayUi(){
   const panel=document.createElement("div");
   panel.className="replay-panel";
   panel.innerHTML=`<button id="replayStep" class="primary">Next K</button><button id="replayStep5">+5</button>
+    <label>Skip <input id="replaySkipN" type="number" min="1" max="20000" step="1" value="20" style="width:64px"></label><button id="replaySkip" title="Skip forward this many bars">Skip</button>
+    <label>Go to <input id="replayGoTime" type="datetime-local" step="60" style="width:168px"></label><button id="replayGoto" title="Jump forward to this time">Go</button>
     <label>Qty <input id="replayQty" type="number" min="0.01" step="0.01" value="1"></label>
     <span id="replayMode" class="mode">Hold Space</span>
     <button id="replayCancel">Cancel order</button><button id="replayFlat" class="danger">Flat</button>
@@ -979,6 +1018,18 @@ function installReplayUi(){
   const heat=$("heatMetric"); if(heat&&heat.parentElement)heat.parentElement.style.display="none";
   $("replayStep").onclick=async()=>{ if(await replayAction("/api/replay/step",{count:1}))jumpToLatestCentered(); };
   $("replayStep5").onclick=async()=>{ if(await replayAction("/api/replay/step",{count:5}))jumpToLatestCentered(); };
+  $("replaySkip").onclick=async()=>{
+    const n=Math.max(1,Math.min(20000,Math.round(parseFloat($("replaySkipN").value)||0)));
+    if(!n){$("replayErr").textContent="enter how many bars to skip";return;}
+    if(await replayAction("/api/replay/step",{count:n}))jumpToLatestCentered();
+  };
+  $("replayGoto").onclick=async()=>{
+    const v=$("replayGoTime").value;
+    if(!v){$("replayErr").textContent="pick a target time first";return;}
+    const ts=new Date(v).getTime();
+    if(!Number.isFinite(ts)){$("replayErr").textContent="invalid target time";return;}
+    if(await replayAction("/api/replay/step",{to_ts_ms:ts}))jumpToLatestCentered();
+  };
   $("replayCancel").onclick=()=>replayAction("/api/replay/cancel",{});
   $("replayFlat").onclick=()=>replayAction("/api/replay/flatten",{});
   for(const id of ["replayQty"]){
@@ -999,6 +1050,11 @@ function installReplayUi(){
 function syncReplayUi(){
   const st=$("replayState");
   st.textContent=REPLAY.id?`bar ${Math.min(REPLAY.cursor+1,REPLAY.total_bars)} / ${REPLAY.total_bars}  trades ${REPLAY.trades||0}  saved ${REPLAY.record_path||""}`:"";
+  const goEl=$("replayGoTime");
+  if(goEl&&document.activeElement!==goEl&&fps.length){
+    const d=new Date(Number(fps[fps.length-1].ts_last_ns)/1e6), pad=n=>String(n).padStart(2,"0");
+    goEl.value=`${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
+  }
   if(REPLAY.pending_order){
     const o=REPLAY.pending_order; setNum("replayQty",o.qty);
   } else if(REPLAY.open_position){
