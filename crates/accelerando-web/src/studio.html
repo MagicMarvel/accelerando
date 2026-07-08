@@ -91,6 +91,13 @@
   .annotation-help { display:none; position:absolute; left:72px; top:12px; z-index:4; max-width:min(760px,calc(100% - 150px)); padding:7px 9px; border:1px solid #cbd5e1; border-radius:8px; background:rgba(255,255,255,0.94); color:#334155; box-shadow:0 2px 8px rgba(15,23,42,0.12); font-size:12px; line-height:1.35; pointer-events:none; }
   .annotation-help.visible { display:block; }
   .annotation-help b { color:#0f172a; }
+  .ff-event-popover { display:none; position:absolute; z-index:6; width:min(380px,calc(100% - 24px)); max-height:min(430px,calc(100% - 24px)); overflow:auto; padding:14px 16px 14px 18px; border-left:4px solid #a855f7; border-radius:8px; background:#fff; color:#111827; box-shadow:0 12px 32px rgba(15,23,42,0.24); font-size:12px; line-height:1.35; }
+  .ff-event-popover.visible { display:block; }
+  .ff-event-popover .ff-head { display:flex; align-items:center; gap:8px; margin-bottom:10px; font-weight:800; font-size:15px; }
+  .ff-event-popover .ff-bolt { display:inline-flex; width:24px; height:24px; align-items:center; justify-content:center; border:1px solid #a855f7; border-radius:50%; color:#a855f7; font-size:16px; line-height:1; }
+  .ff-event-popover .ff-time { color:#64748b; font-size:12px; font-weight:500; }
+  .ff-event-popover .ff-item { padding:10px 0; border-top:1px solid #eef2f7; }
+  .ff-event-popover .ff-title { font-weight:750; font-size:13px; color:#111827; }
   .empty { display:flex; align-items:center; justify-content:center; height:100%; color:#94a3b8; font-size:14px; }
 </style>
 </head>
@@ -161,6 +168,7 @@
     <div class="charts">
       <button id="centerPrice" class="center-price" type="button" title="Center current price" aria-label="Center current price">+</button>
       <div id="annotationHelp" class="annotation-help"></div>
+      <div id="ffEventPopover" class="ff-event-popover"></div>
       <canvas id="price"></canvas>
       <div id="chartSplitter" class="splitter" title="Drag to resize charts"></div>
       <canvas id="equity"></canvas>
@@ -176,11 +184,12 @@ let barsPerView=300, start=0, hover=null, drag=null, splitDrag=null, chartMode="
 let overlayState={};
 let annotationConfig={enabled:false,labels:[]};
 let annotations=[], annotationMode=false, annotationDraft=null, priceScale=null;
+let econEventGroups=[], econEventMarkers=[], pinnedEconEvent=null;
 // User-drawn volume/delta profiles (Fixed Range Volume Profile, TradingView-style): drag a box on
 // the price chart to add one, click an existing one to remove it. Client-side only (computed from
 // the already-loaded footprint ladders), not persisted across reloads.
 let vpProfiles=[], vpMode=false, vpDraft=null;
-const overlayLabel=cat=>cat==="bands"?"bands":cat==="trades"?"trades":cat.replace(/_/g," ");
+const overlayLabel=cat=>cat==="bands"?"bands":cat==="trades"?"trades":cat==="ff_high_events"?"High events":cat.replace(/_/g," ");
 const overlayOn=cat=>overlayState[cat]!==false;
 const markerCat=p=>p.group||"markers";
 const volumeProfileCat=p=>(p.id||"").startsWith("entry_vp_")?"entry_vp":"volume_profiles";
@@ -471,8 +480,10 @@ function renderResult(data){
   // subsequent update (most jarringly right as an SL/TP drag completes).
   const isReplay=data.replay!=null, firstLoad=fps.length===0;
   DATA=data; fps=data.footprints||[]; eq=data.equity||[]; trades=data.trades||[];
+  pinnedEconEvent=null; econEventMarkers=[]; hideEconomicEventPopover(true);
   heatView=null; heatData=null; heatImg=null; // reset zoomable heatmap window for the new run
   for(const t of trades){ t._ei=idxForEntryTs(t.entry_ts_ns); t._xi=idxForTs(t.exit_ts_ns); }
+  econEventGroups=economicEventGroupsFromFootprints();
   renderCards(data.metrics);
   renderRunMeta();
   buildOverlayToggles();
@@ -526,6 +537,100 @@ function idxForEntryTs(ns){
   while(lo<=hi){ const m=(lo+hi)>>1; if(Number(fps[m].ts_first_ns)<=x){best=m;lo=m+1;} else hi=m-1; }
   if(fps[best] && x<=Number(fps[best].ts_last_ns)) return best;
   return idxForTs(ns);
+}
+function economicMarkerPlots(b){
+  return (b.plots||[]).filter(p=>p.kind==="Marker"&&markerCat(p)==="ff_high_events");
+}
+function economicEventLines(text){
+  return String(text||"").split(/\n|\s*\|\|\s*/).map(s=>s.trim()).filter(Boolean);
+}
+function economicEventGroupsFromFootprints(){
+  const groups=[];
+  for(let i=0;i<fps.length;i++){
+    const b=fps[i], plots=economicMarkerPlots(b);
+    if(!plots.length)continue;
+    const events=[];
+    for(const p of plots){
+      const lines=economicEventLines(p.text);
+      if(lines.length)events.push(...lines.map(line=>({title:line,color:p.color||"#a855f7"})));
+      else events.push({title:"High-impact event",color:p.color||"#a855f7"});
+    }
+    groups.push({idx:i,ts_ms:Number(b.ts_last_ns)/1e6,events});
+  }
+  return groups;
+}
+function economicEventTime(group){
+  return new Date(group.ts_ms).toLocaleString([], {month:"short", day:"2-digit", hour:"2-digit", minute:"2-digit"});
+}
+function showEconomicEventPopover(group,x,y,pinned=false){
+  const pop=$("ffEventPopover"); if(!pop||!group)return;
+  const count=group.events.length;
+  pop.innerHTML=`<div class="ff-head"><span class="ff-bolt">&#9889;</span><div><div>High-impact events${count>1?` (${count})`:""}</div><div class="ff-time">${esc(economicEventTime(group))}</div></div></div>`+
+    group.events.map(ev=>`<div class="ff-item"><div class="ff-title">${esc(ev.title)}</div></div>`).join("");
+  pop.classList.add("visible");
+  const cr=charts.getBoundingClientRect(), pr=price.getBoundingClientRect();
+  const baseLeft=pr.left-cr.left+x+14, baseTop=pr.top-cr.top+y-10;
+  const w=pop.offsetWidth||360, h=pop.offsetHeight||180;
+  let left=baseLeft, top=baseTop-h;
+  if(left+w>cr.width-12)left=baseLeft-w-28;
+  left=Math.max(12,Math.min(Math.max(12,cr.width-w-12),left));
+  top=Math.max(12,Math.min(Math.max(12,cr.height-h-12),top));
+  pop.style.left=`${Math.round(left)}px`;
+  pop.style.top=`${Math.round(top)}px`;
+  pop.dataset.pinned=pinned?"1":"0";
+}
+function hideEconomicEventPopover(force=false){
+  if(!force&&pinnedEconEvent)return;
+  const pop=$("ffEventPopover"); if(pop)pop.classList.remove("visible");
+}
+function hitEconomicEventMarker(x,y){
+  for(let i=econEventMarkers.length-1;i>=0;i--){
+    const m=econEventMarkers[i], dx=x-m.x, dy=y-m.y;
+    if(dx*dx+dy*dy<=Math.pow(m.r+5,2))return m;
+  }
+  return null;
+}
+function drawEconomicEvents(ctx,s,e,L,T,pw,ph,xStep){
+  econEventMarkers=[];
+  if(!overlayOn("ff_high_events")||!econEventGroups.length){
+    hideEconomicEventPopover(true);
+    return;
+  }
+  ctx.save();
+  ctx.font="800 15px Segoe UI, Arial";
+  ctx.textAlign="center"; ctx.textBaseline="middle";
+  for(const group of econEventGroups){
+    const idx=group.idx;
+    if(idx<s||idx>=e)continue;
+    const x=L+(idx-s+0.5)*xStep, cy=T+ph-13, r=12;
+    ctx.save(); ctx.beginPath(); ctx.rect(L,T,pw,ph); ctx.clip();
+    ctx.setLineDash([5,5]);
+    ctx.strokeStyle="rgba(168,85,247,0.68)";
+    ctx.lineWidth=1.2;
+    ctx.beginPath(); ctx.moveTo(x,T); ctx.lineTo(x,T+ph); ctx.stroke();
+    ctx.restore();
+    ctx.setLineDash([]);
+    ctx.shadowColor="rgba(88,28,135,0.28)";
+    ctx.shadowBlur=6; ctx.shadowOffsetY=1;
+    ctx.fillStyle="#a855f7";
+    ctx.beginPath(); ctx.arc(x,cy,r,0,Math.PI*2); ctx.fill();
+    ctx.shadowColor="transparent";
+    ctx.lineWidth=1.5; ctx.strokeStyle="#ffffff"; ctx.stroke();
+    ctx.fillStyle="#ffffff";
+    ctx.fillText(String.fromCharCode(9889),x,cy+0.5);
+    if(group.events.length>1){
+      ctx.fillStyle="#111827"; ctx.beginPath(); ctx.arc(x+r-2,cy-r+3,7,0,Math.PI*2); ctx.fill();
+      ctx.fillStyle="#ffffff"; ctx.font="800 9px Segoe UI, Arial"; ctx.fillText(String(group.events.length),x+r-2,cy-r+3.5);
+      ctx.font="800 15px Segoe UI, Arial";
+    }
+    econEventMarkers.push({x,y:cy,r,group});
+  }
+  ctx.restore();
+  if(pinnedEconEvent){
+    const marker=econEventMarkers.find(m=>m.group===pinnedEconEvent);
+    if(marker)showEconomicEventPopover(marker.group,marker.x,marker.y,true);
+    else hideEconomicEventPopover(true);
+  }
 }
 function renderCards(m){
   if(!m){ $("cards").innerHTML=""; return; }
@@ -702,6 +807,7 @@ function drawPlotMarkers(ctx,vis,L,T,ph,xStep,y,labelLayout){
       if(!overlayOn(markerCat(p)))continue;
       const yy=y(p.price); if(yy<T-30||yy>T+ph+30)continue;
       const color=p.color||"#111827", cat=markerCat(p);
+      if(cat==="ff_high_events")continue;
       if(cat==="big_trades"){
         const size=markerSize(p);
         const minSize=isFinite(minBigTradeSize)?minBigTradeSize:0;
@@ -925,6 +1031,7 @@ function drawPrice(){
   drawPlotMarkers(pctx,vis,L,T,ph,xStep,y,labelLayout);
   if(overlayOn("trades")) drawTradePositions(pctx,trades,s,e,L,T,ph,xStep,y,labelLayout);
   pctx.restore();
+  drawEconomicEvents(pctx,s,e,L,T,pw,ph,xStep);
   pctx.strokeStyle="#9aa4b2"; pctx.strokeRect(L,T,pw,ph);
   if(hover&&hover.canvas==="price"){ const idx=clamp(Math.floor((hover.x-L)/xStep),0,vis.length-1); const b=vis[idx]; if(b){ const x=L+idx*xStep+xStep/2; pctx.strokeStyle="#111827";pctx.beginPath();pctx.moveTo(x,T);pctx.lineTo(x,T+ph);pctx.stroke(); const tags=b.tags?Object.entries(b.tags).map(([k,v])=>`${k}:${v}`).join(" "):""; const base=`${s+idx+1}/${fps.length}  ${fmtTs(b.ts_last_ns)}  O ${b.open.toFixed(2)} H ${b.high.toFixed(2)} L ${b.low.toFixed(2)} C ${b.close.toFixed(2)}  D ${fmt(b.delta,0)}  ${tags}`; if(chartMode==="footprint"){ const totals=footprintTotals(b); const priceAt=hi-(hover.y-T)/Math.max(1,ph)*(hi-lo); const lv=nearestFootprintLevel(b,priceAt); $("status").textContent=base+`  bar sell/buy ${fmt(totals.sell,0)}/${fmt(totals.buy,0)}  level ${lv?lv.price.toFixed(2):priceAt.toFixed(2)} sell/buy ${lv?fmt(lv.sell_vol,0):"-"}/${lv?fmt(lv.buy_vol,0):"-"}`; } else { $("status").textContent=base; } } }
   $("range").textContent=`bars ${s+1}-${e} / ${fps.length}`;
@@ -1322,11 +1429,16 @@ function attach(canvas,name){
     if(ev.shiftKey||x<64){ const top=name==="price"?14:12,bottom=name==="price"?34:30; const frac=clamp((ev.clientY-r.top-top)/Math.max(1,r.height-top-bottom),0,1); zoomY(name,ev.deltaY<0?1.18:1/1.18,frac); } else { const ratio=clamp((x-64)/Math.max(1,r.width-80),0,1); setBarsPerView(barsPerView*(ev.deltaY<0?0.82:1.22),ratio); }},{passive:false});
   canvas.addEventListener("mousedown",ev=>{ if(annotationMode&&name==="price"&&chartMode!=="heatmap"&&ev.button===0){ startAnnotationDraft(ev); return; } if(vpMode&&name==="price"&&chartMode!=="heatmap"&&ev.button===0){ startVpDraft(ev); return; } lockYZoom(name); const st=yZoom[name]; drag={x:ev.clientX,y:ev.clientY,start,name,lo:st?.lo,hi:st?.hi,heat:(chartMode==="heatmap"&&heatView)?{t0:heatView.t0,t1:heatView.t1,pmin:heatView.pmin,pmax:heatView.pmax}:null}; canvas.classList.add("dragging");});
   canvas.addEventListener("mousemove",ev=>{const r=canvas.getBoundingClientRect(); hover={canvas:name,x:ev.clientX-r.left,y:ev.clientY-r.top};
+    if(name==="price"&&!pinnedEconEvent){
+      const hit=hitEconomicEventMarker(hover.x,hover.y);
+      if(hit)showEconomicEventPopover(hit.group,hit.x,hit.y,false); else hideEconomicEventPopover();
+    }
     if(annotationMode&&name==="price"&&annotationDraft&&annotationDraft.dragging){ updateAnnotationDraft(ev); return; }
     if(vpMode&&name==="price"&&vpDraft&&vpDraft.dragging){ updateVpDraft(ev); return; }
     if(drag&&chartMode==="heatmap"&&drag.name==="price"&&drag.heat){ const L=64,top=10,bottom=30,pw=Math.max(1,r.width-L-16),ph=Math.max(1,r.height-top-bottom); heatPan(ev.clientX-drag.x,ev.clientY-drag.y,pw,ph,drag.heat); draw(); scheduleHeatFetch(); return; }
     if(drag){const pw=Math.max(1,r.width-80); const d=Math.round((drag.x-ev.clientX)/pw*barsPerView); start=clamp(drag.start+d,0,maxStart()); if(drag.name==="price")autoYZoom("equity"); if(drag.name===name&&isFinite(drag.lo)&&isFinite(drag.hi)&&drag.hi>drag.lo){ const top=name==="price"?14:12,bottom=name==="price"?34:30; const ph=Math.max(1,r.height-top-bottom); const dy=ev.clientY-drag.y; const shift=dy/ph*(drag.hi-drag.lo); const st=yZoom[name]; st.manual=true; st.lo=drag.lo+shift; st.hi=drag.hi+shift; }} draw();});
-  canvas.addEventListener("mouseleave",()=>{hover=null;draw();});
+  canvas.addEventListener("click",ev=>{ if(name!=="price")return; const r=canvas.getBoundingClientRect(), x=ev.clientX-r.left, y=ev.clientY-r.top; const hit=hitEconomicEventMarker(x,y); if(hit){ pinnedEconEvent=hit.group; showEconomicEventPopover(hit.group,hit.x,hit.y,true); ev.preventDefault(); } else if(pinnedEconEvent){ pinnedEconEvent=null; hideEconomicEventPopover(true); draw(); } });
+  canvas.addEventListener("mouseleave",()=>{hover=null; if(!pinnedEconEvent)hideEconomicEventPopover(); draw();});
 }
 window.addEventListener("mouseup",()=>{ if(annotationDraft)annotationDraft.dragging=false; if(vpDraft)finalizeVpDraft(); drag=null; price.classList.remove("dragging"); equity.classList.remove("dragging"); updateAnnotationUi(); });
 splitter.addEventListener("mousedown",ev=>{

@@ -7,3 +7,4 @@ description = "Generic technical indicator adapters for Accelerando examples."
 
 [dependencies]
 accelerando-core = { workspace = true }
+serde_json = { workspace = true }

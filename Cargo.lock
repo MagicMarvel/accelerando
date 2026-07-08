@@ -52,6 +52,7 @@ name = "accelerando-example-indicators"
 version = "0.1.0"
 dependencies = [
  "accelerando-core",
+ "serde_json",
 ]
 
 [[package]]
