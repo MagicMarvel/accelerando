@@ -81,14 +81,17 @@
   .splitter:hover, .splitter.dragging { background:#dbeafe; }
   canvas { display:block; width:100%; height:100%; background:#fbfcfe; cursor:grab; }
   canvas.dragging { cursor:grabbing; }
-  .center-price { position:absolute; top:8px; right:10px; z-index:3; width:30px; height:30px; padding:0; border-radius:50%; font-size:17px; line-height:1; background:rgba(255,255,255,0.88); color:#0f172a; box-shadow:0 1px 4px rgba(15,23,42,0.18); }
-  .center-price:hover { background:#fff; }
+  .chart-area { display:grid; grid-template-columns:46px 1fr; min-height:0; }
+  .chart-tools { display:flex; flex-direction:column; align-items:center; gap:8px; padding:8px 5px; background:#fff; border-right:1px solid #e2e8f0; }
+  .chart-tools button { width:34px; height:34px; padding:0; font-size:16px; line-height:1; border-radius:8px; display:flex; align-items:center; justify-content:center; }
+  .chart-tools button.active { background:#0f172a; border-color:#0f172a; color:#fff; }
+  .chart-tools button.tool-label { font-size:12px; font-weight:800; }
   .anno-tools { display:none; align-items:center; gap:6px; padding:2px 6px; border:1px solid #cbd5e1; border-radius:8px; background:#f8fafc; }
   .anno-tools.visible { display:inline-flex; }
   .anno-tools select { height:26px; border:1px solid #cbd5e1; border-radius:6px; font-size:12px; background:#fff; }
   .anno-tools button { height:26px; padding:0 8px; border-radius:6px; font-size:12px; }
   .anno-hint { font-size:11px; color:#475569; white-space:nowrap; }
-  .annotation-help { display:none; position:absolute; left:72px; top:12px; z-index:4; max-width:min(760px,calc(100% - 150px)); padding:7px 9px; border:1px solid #cbd5e1; border-radius:8px; background:rgba(255,255,255,0.94); color:#334155; box-shadow:0 2px 8px rgba(15,23,42,0.12); font-size:12px; line-height:1.35; pointer-events:none; }
+  .annotation-help { display:none; position:absolute; left:16px; top:12px; z-index:4; max-width:min(760px,calc(100% - 150px)); padding:7px 9px; border:1px solid #cbd5e1; border-radius:8px; background:rgba(255,255,255,0.94); color:#334155; box-shadow:0 2px 8px rgba(15,23,42,0.12); font-size:12px; line-height:1.35; pointer-events:none; }
   .annotation-help.visible { display:block; }
   .annotation-help b { color:#0f172a; }
   .ff-event-popover { display:none; position:absolute; z-index:6; width:min(380px,calc(100% - 24px)); max-height:min(430px,calc(100% - 24px)); overflow:auto; padding:14px 16px 14px 18px; border-left:4px solid #a855f7; border-radius:8px; background:#fff; color:#111827; box-shadow:0 12px 32px rgba(15,23,42,0.24); font-size:12px; line-height:1.35; }
@@ -155,8 +158,6 @@
       <label style="font-size:12px;color:#374151;display:inline-flex;gap:6px;align-items:center;">heat <select id="heatMetric" style="height:26px;border:1px solid #cbd5e1;border-radius:6px;font-size:12px;"><option value="total">total</option><option value="bid">bid</option><option value="ask">ask</option></select></label>
       <button id="toggleMetrics" class="tool-toggle active" type="button" title="Hide metrics" aria-pressed="true">Metrics</button>
       <button id="toggleEquity" class="tool-toggle active" type="button" title="Hide equity" aria-pressed="true">Equity</button>
-      <button id="toggleVp" class="tool-toggle" type="button" title="Draw a volume/delta profile: drag a box, click an existing one to remove it (V)" aria-pressed="false">Volume Profile</button>
-      <button id="toggleAnnotate" class="tool-toggle" type="button" title="Toggle annotation mode (A)" aria-pressed="false" style="display:none;">Annotate</button>
       <span id="annoTools" class="anno-tools">
         <select id="annoLabel" title="Annotation label"></select>
         <button id="annoSave" type="button" title="Save current box (Enter)" disabled>Save</button>
@@ -165,18 +166,27 @@
       </span>
       <span class="rng" id="range"></span>
     </div>
-    <div class="charts">
-      <button id="centerPrice" class="center-price" type="button" title="Center current price" aria-label="Center current price">+</button>
-      <div id="annotationHelp" class="annotation-help"></div>
-      <div id="ffEventPopover" class="ff-event-popover"></div>
-      <canvas id="price"></canvas>
-      <div id="chartSplitter" class="splitter" title="Drag to resize charts"></div>
-      <canvas id="equity"></canvas>
+    <div class="chart-area">
+      <div class="chart-tools">
+        <button id="toggleCross" type="button" title="Crosshair (C)" aria-pressed="true">&#10011;</button>
+        <button id="centerPrice" type="button" title="Center current price" aria-label="Center current price">&#8853;</button>
+        <button id="toggleVp" class="tool-label" type="button" title="Volume profile: drag a box, click an existing one to remove it (V)" aria-pressed="false">VP</button>
+        <button id="toggleAnnotate" type="button" title="Toggle annotation mode (A)" aria-pressed="false" style="display:none;">&#9998;</button>
+      </div>
+      <div class="charts">
+        <div id="annotationHelp" class="annotation-help"></div>
+        <div id="ffEventPopover" class="ff-event-popover"></div>
+        <canvas id="price"></canvas>
+        <div id="chartSplitter" class="splitter" title="Drag to resize charts"></div>
+        <canvas id="equity"></canvas>
+      </div>
     </div>
   </section>
 </div>
 <script>
 const COLORS = { up:"#6d6dff", down:"#ff6d6d", buy:"#6d6dff", sell:"#ff6d6d", tradeText:"#ffffff", grid:"#e2e8f0", axis:"#475569" };
+// TradingView-style layout: thin left padding, price axis on the right.
+const AXIS_W=64, PADL=8;
 let SCHEMA=null, CONFIG=null, DATA=null, fps=[], eq=[], trades=[];
 let barsPerView=300, start=0, hover=null, drag=null, splitDrag=null, chartMode="candles", heatMetric="total", poll=null;
 // Overlay visibility, keyed by category ("bands", "trades", or a marker group). Persisted across
@@ -205,6 +215,7 @@ function writeStoredBool(key,value){ try{ localStorage.setItem(key,value?"1":"0"
 let metaCollapsed=readStoredBool("accelerando.runMetaCollapsed",false);
 let equityCollapsed=readStoredBool("accelerando.equityCollapsed",false);
 let cardsCollapsed=readStoredBool("accelerando.cardsCollapsed",false);
+let crosshairOn=readStoredBool("accelerando.crosshair",true);
 const fmt=(n,d=2)=>(n===null||n===undefined||!isFinite(n))?"-":Number(n).toLocaleString(undefined,{maximumFractionDigits:d,minimumFractionDigits:d});
 const fmtTs=ns=>new Date(Number(ns)/1e6).toLocaleString();
 const fmtAxisTs=ns=>new Date(Number(ns)/1e6).toLocaleTimeString([], {hour:"2-digit", minute:"2-digit"});
@@ -741,6 +752,28 @@ function drawLabel(ctx,text,x,y,color,layout,opts={}){
   ctx.fillText(text,chosen.x+padX,chosen.y+chosen.h/2);
   ctx.restore();
 }
+// Right-axis price tag (crosshair price / current price), TradingView-style.
+function axisPriceTag(ctx,W,R,yy,text,bg){
+  const h=18,w=R-4;
+  const top=clamp(yy-h/2,2,ctx.canvas.clientHeight-h-2);
+  ctx.save();
+  ctx.fillStyle=bg;
+  roundedRect(ctx,W-R+2,top,w,h,3); ctx.fill();
+  ctx.fillStyle="#fff"; ctx.font="11px Segoe UI, Arial"; ctx.textAlign="left"; ctx.textBaseline="middle";
+  ctx.fillText(text,W-R+6,top+h/2+0.5);
+  ctx.restore();
+}
+// Bottom-axis time tag under the crosshair's vertical line.
+function axisTimeTag(ctx,x,yTop,text,L,pw){
+  ctx.save(); ctx.font="11px Segoe UI, Arial";
+  const w=ctx.measureText(text).width+12,h=18;
+  const xx=clamp(x-w/2,L,Math.max(L,L+pw-w));
+  ctx.fillStyle="#334155";
+  roundedRect(ctx,xx,yTop+2,w,h,3); ctx.fill();
+  ctx.fillStyle="#fff"; ctx.textAlign="center"; ctx.textBaseline="middle";
+  ctx.fillText(text,xx+w/2,yTop+2+h/2+0.5);
+  ctx.restore();
+}
 function drawCandles(ctx,vis,L,T,ph,xStep,cw,y){
   for(let i=0;i<vis.length;i++){ const b=vis[i]; const x=L+i*xStep+xStep/2; const c=b.close>=b.open?COLORS.up:COLORS.down; ctx.strokeStyle=c;ctx.fillStyle=c; ctx.beginPath();ctx.moveTo(x,y(b.high));ctx.lineTo(x,y(b.low));ctx.stroke(); const oy=y(b.open),cy=y(b.close); ctx.fillRect(x-cw/2,Math.min(oy,cy),cw,Math.max(1,Math.abs(oy-cy))); }
 }
@@ -1013,12 +1046,12 @@ function drawPrice(){
   const W=price.clientWidth,H=price.clientHeight; pctx.clearRect(0,0,W,H); pctx.fillStyle="#fbfcfe"; pctx.fillRect(0,0,W,H);
   if(!fps.length){ pctx.fillStyle="#94a3b8"; pctx.font="14px Segoe UI"; pctx.fillText("Run a backtest to view results", 20, H/2); return; }
   if(chartMode==="heatmap"){ drawHeatmap(pctx,price,"price"); const [s,e]=viewRange(); $("range").textContent=`bars ${s+1}-${e} / ${fps.length}`; return; }
-  const [s,e]=viewRange(); const vis=fps.slice(s,e); const L=64,R=16,T=14,B=34; const pw=Math.max(1,W-L-R),ph=Math.max(1,H-T-B);
+  const [s,e]=viewRange(); const vis=fps.slice(s,e); const L=PADL,R=AXIS_W,T=14,B=34; const pw=Math.max(1,W-L-R),ph=Math.max(1,H-T-B);
   let lo=Infinity,hi=-Infinity; for(const b of vis){lo=Math.min(lo,b.low);hi=Math.max(hi,b.high);}
   const pad=Math.max(0.25,(hi-lo)*0.06); lo-=pad;hi+=pad; [lo,hi]=applyYZoom("price",lo,hi); yZoom.price.lo=lo; yZoom.price.hi=hi; const y=p=>T+(hi-p)/(hi-lo)*ph; const xStep=pw/Math.max(1,barsPerView); priceScale={s,e,L,T,pw,ph,lo,hi,xStep}; const cw=Math.max(1,Math.min(16,xStep*0.7)); const tick=tickSizeFor(vis);
   if(overlayOn("bands")){ let i=0; while(i<vis.length){ const band=(vis[i].plots||[]).find(p=>p.kind==="BackgroundBand"); const col=band?band.color:null; let j=i+1; const same=k=>{const bb=(vis[k].plots||[]).find(p=>p.kind==="BackgroundBand"); return (bb?bb.color:null)===col;}; while(j<vis.length&&same(j))j++; if(col){pctx.fillStyle=col; pctx.fillRect(L+i*xStep,T,(j-i)*xStep,ph);} i=j; } }
   pctx.strokeStyle=COLORS.grid; pctx.fillStyle=COLORS.axis; pctx.font="11px Segoe UI, Arial"; pctx.lineWidth=1;
-  for(let i=0;i<=6;i++){ const yy=T+ph*i/6,pr=hi-(hi-lo)*i/6; pctx.beginPath();pctx.moveTo(L,yy);pctx.lineTo(W-R,yy);pctx.stroke(); pctx.fillText(pr.toFixed(2),6,yy+4); }
+  for(let i=0;i<=6;i++){ const yy=T+ph*i/6,pr=hi-(hi-lo)*i/6; pctx.beginPath();pctx.moveTo(L,yy);pctx.lineTo(W-R,yy);pctx.stroke(); pctx.fillText(pr.toFixed(2),W-R+6,yy+4); }
   drawTimeAxis(pctx,vis,L,T,pw,ph,W,R,"ts_last_ns",xStep);
   const labelLayout={boxes:[],L,T,pw,ph};
   pctx.save(); clipPlot(pctx,L,T,pw,ph);
@@ -1033,7 +1066,30 @@ function drawPrice(){
   pctx.restore();
   drawEconomicEvents(pctx,s,e,L,T,pw,ph,xStep);
   pctx.strokeStyle="#9aa4b2"; pctx.strokeRect(L,T,pw,ph);
-  if(hover&&hover.canvas==="price"){ const idx=clamp(Math.floor((hover.x-L)/xStep),0,vis.length-1); const b=vis[idx]; if(b){ const x=L+idx*xStep+xStep/2; pctx.strokeStyle="#111827";pctx.beginPath();pctx.moveTo(x,T);pctx.lineTo(x,T+ph);pctx.stroke(); const tags=b.tags?Object.entries(b.tags).map(([k,v])=>`${k}:${v}`).join(" "):""; const base=`${s+idx+1}/${fps.length}  ${fmtTs(b.ts_last_ns)}  O ${b.open.toFixed(2)} H ${b.high.toFixed(2)} L ${b.low.toFixed(2)} C ${b.close.toFixed(2)}  D ${fmt(b.delta,0)}  ${tags}`; if(chartMode==="footprint"){ const totals=footprintTotals(b); const priceAt=hi-(hover.y-T)/Math.max(1,ph)*(hi-lo); const lv=nearestFootprintLevel(b,priceAt); $("status").textContent=base+`  bar sell/buy ${fmt(totals.sell,0)}/${fmt(totals.buy,0)}  level ${lv?lv.price.toFixed(2):priceAt.toFixed(2)} sell/buy ${lv?fmt(lv.sell_vol,0):"-"}/${lv?fmt(lv.buy_vol,0):"-"}`; } else { $("status").textContent=base; } } }
+  // Current price: dashed line + right-axis tag at the latest bar's close (TradingView-style).
+  const lastB=fps[fps.length-1];
+  if(lastB&&isFinite(lastB.close)){
+    const cp=lastB.close, cpc=lastB.close>=lastB.open?COLORS.up:COLORS.down;
+    if(cp>=lo&&cp<=hi){
+      const yy=y(cp);
+      pctx.save(); pctx.setLineDash([5,4]); pctx.strokeStyle=colorAlpha(cpc,0.85); pctx.lineWidth=1;
+      pctx.beginPath();pctx.moveTo(L,yy);pctx.lineTo(L+pw,yy);pctx.stroke();
+      pctx.setLineDash([]); pctx.restore();
+      axisPriceTag(pctx,W,R,yy,cp.toFixed(2),cpc);
+    }
+  }
+  if(hover&&hover.canvas==="price"){ const idx=clamp(Math.floor((hover.x-L)/xStep),0,vis.length-1); const b=vis[idx]; if(b){
+    if(crosshairOn&&hover.x>=L&&hover.x<=L+pw&&hover.y>=T&&hover.y<=T+ph){
+      const x=L+idx*xStep+xStep/2;
+      pctx.save(); pctx.setLineDash([4,4]); pctx.strokeStyle="rgba(71,85,105,0.75)"; pctx.lineWidth=1;
+      pctx.beginPath();pctx.moveTo(x,T);pctx.lineTo(x,T+ph);pctx.stroke();
+      pctx.beginPath();pctx.moveTo(L,hover.y);pctx.lineTo(L+pw,hover.y);pctx.stroke();
+      pctx.setLineDash([]); pctx.restore();
+      const pAt=hi-(hover.y-T)/Math.max(1,ph)*(hi-lo);
+      axisPriceTag(pctx,W,R,hover.y,pAt.toFixed(2),"#334155");
+      axisTimeTag(pctx,x,T+ph,fmtAxisTs(b.ts_last_ns),L,pw);
+    }
+    const tags=b.tags?Object.entries(b.tags).map(([k,v])=>`${k}:${v}`).join(" "):""; const base=`${s+idx+1}/${fps.length}  ${fmtTs(b.ts_last_ns)}  O ${b.open.toFixed(2)} H ${b.high.toFixed(2)} L ${b.low.toFixed(2)} C ${b.close.toFixed(2)}  D ${fmt(b.delta,0)}  ${tags}`; if(chartMode==="footprint"){ const totals=footprintTotals(b); const priceAt=hi-(hover.y-T)/Math.max(1,ph)*(hi-lo); const lv=nearestFootprintLevel(b,priceAt); $("status").textContent=base+`  bar sell/buy ${fmt(totals.sell,0)}/${fmt(totals.buy,0)}  level ${lv?lv.price.toFixed(2):priceAt.toFixed(2)} sell/buy ${lv?fmt(lv.sell_vol,0):"-"}/${lv?fmt(lv.buy_vol,0):"-"}`; } else { $("status").textContent=base; } } }
   $("range").textContent=`bars ${s+1}-${e} / ${fps.length}`;
 }
 function annotationLabels(){ return (annotationConfig.labels||[]).filter(Boolean); }
@@ -1341,7 +1397,7 @@ function ensureHeat(){ if(!heatView)initHeatView(); if(heatView)fetchHeat(); }
 function scheduleHeatFetch(){ if(heatTimer)clearTimeout(heatTimer); heatTimer=setTimeout(fetchHeat,90); }
 async function fetchHeat(){
   if(!heatView)return;
-  const W=price.clientWidth,H=price.clientHeight,L=64,R=16,T=10,B=30,pw=Math.max(50,W-L-R),ph=Math.max(50,H-T-B);
+  const W=price.clientWidth,H=price.clientHeight,L=PADL,R=AXIS_W,T=10,B=30,pw=Math.max(50,W-L-R),ph=Math.max(50,H-T-B);
   const cols=Math.max(60,Math.min(800,Math.round(pw*0.55)));
   const spanMs=Math.max(1,(heatView.t1-heatView.t0)/1e6);
   const bucketMs=Math.max(250,Math.min(5000,Math.round(spanMs/Math.max(1,cols))));
@@ -1390,10 +1446,10 @@ function drawHeatmap(ctx,canvas,hoverCanvas){
   const W=canvas.clientWidth,H=canvas.clientHeight; ctx.clearRect(0,0,W,H); ctx.fillStyle="#070b14"; ctx.fillRect(0,0,W,H);
   if(!fps.length){ ctx.fillStyle="#94a3b8"; ctx.font="13px Segoe UI"; ctx.fillText("liquidity heatmap",20,H/2); return; }
   if(!heatView){ initHeatView(); ensureHeat(); }
-  const L=64,R=16,T=10,B=30,pw=Math.max(1,W-L-R),ph=Math.max(1,H-T-B),v=heatView;
+  const L=PADL,R=AXIS_W,T=10,B=30,pw=Math.max(1,W-L-R),ph=Math.max(1,H-T-B),v=heatView;
   const y=p=>T+(v.pmax-p)/Math.max(1e-9,v.pmax-v.pmin)*ph, xT=t=>L+(t-v.t0)/Math.max(1,v.t1-v.t0)*pw;
   ctx.strokeStyle="rgba(148,163,184,0.14)"; ctx.fillStyle="#94a3b8"; ctx.font="11px Segoe UI,Arial"; ctx.lineWidth=1; ctx.textAlign="left";
-  for(let i=0;i<=4;i++){ const yy=T+ph*i/4,pr=v.pmax-(v.pmax-v.pmin)*i/4; ctx.beginPath();ctx.moveTo(L,yy);ctx.lineTo(W-R,yy);ctx.stroke(); ctx.fillText(pr.toFixed(2),6,yy+4); }
+  for(let i=0;i<=4;i++){ const yy=T+ph*i/4,pr=v.pmax-(v.pmax-v.pmin)*i/4; ctx.beginPath();ctx.moveTo(L,yy);ctx.lineTo(W-R,yy);ctx.stroke(); ctx.fillText(pr.toFixed(2),W-R+6,yy+4); }
   if(heatImg&&heatData){ ctx.imageSmoothingEnabled=true; ctx.imageSmoothingQuality="high"; const dx0=xT(heatData.t0_ns),dx1=xT(heatData.t1_ns),dy0=y(heatData.pmax),dy1=y(heatData.pmin); ctx.save(); ctx.beginPath(); ctx.rect(L,T,pw,ph); ctx.clip(); ctx.drawImage(heatImg,dx0,dy0,Math.max(1,dx1-dx0),Math.max(1,dy1-dy0)); ctx.restore(); }
   else { ctx.fillStyle="#cbd5e1"; ctx.font="12px Segoe UI,Arial"; ctx.fillText(heatPending?"loading heatmap...":"no heatmap data (run with --serve)",L+8,T+22); }
   drawHeatTimeAxis(ctx,L,T,pw,ph,W,R,v.t0,v.t1);
@@ -1401,32 +1457,57 @@ function drawHeatmap(ctx,canvas,hoverCanvas){
   ctx.strokeStyle="#1e293b"; ctx.strokeRect(L,T,pw,ph);
   ctx.fillStyle="#cbd5e1"; ctx.font="11px Segoe UI,Arial"; ctx.fillText(`book ${heatMetric}${heatPending?" - loading...":""}  -  drag = pan - wheel = zoom time - shift/left-edge wheel = zoom price`,L+4,T+13);
   $("range").textContent=`${fmtTs(v.t0)}  ->  ${fmtTs(v.t1)}`;
-  if(hover&&hover.canvas===hoverCanvas&&hover.x>=L&&hover.x<=L+pw&&hover.y>=T&&hover.y<=T+ph){ const x=hover.x; ctx.strokeStyle="rgba(255,255,255,0.28)"; ctx.beginPath();ctx.moveTo(x,T);ctx.lineTo(x,T+ph);ctx.stroke(); const tAt=v.t0+(x-L)/pw*(v.t1-v.t0),pAt=v.pmax-(hover.y-T)/Math.max(1,ph)*(v.pmax-v.pmin); $("status").textContent=`${fmtTs(tAt)}   px ${pAt.toFixed(2)}`; }
+  if(hover&&hover.canvas===hoverCanvas&&hover.x>=L&&hover.x<=L+pw&&hover.y>=T&&hover.y<=T+ph){
+    const x=hover.x, tAt=v.t0+(x-L)/pw*(v.t1-v.t0), pAt=v.pmax-(hover.y-T)/Math.max(1,ph)*(v.pmax-v.pmin);
+    if(crosshairOn){
+      ctx.save(); ctx.setLineDash([4,4]); ctx.strokeStyle="rgba(255,255,255,0.35)"; ctx.lineWidth=1;
+      ctx.beginPath();ctx.moveTo(x,T);ctx.lineTo(x,T+ph);ctx.stroke();
+      ctx.beginPath();ctx.moveTo(L,hover.y);ctx.lineTo(L+pw,hover.y);ctx.stroke();
+      ctx.setLineDash([]); ctx.restore();
+      axisPriceTag(ctx,W,R,hover.y,pAt.toFixed(2),"#334155");
+      axisTimeTag(ctx,x,T+ph,fmtHeatAxis(tAt,v.t1-v.t0),L,pw);
+    }
+    $("status").textContent=`${fmtTs(tAt)}   px ${pAt.toFixed(2)}`;
+  }
 }
 function drawEquity(){
   const W=equity.clientWidth,H=equity.clientHeight; ectx.clearRect(0,0,W,H); ectx.fillStyle="#fff"; ectx.fillRect(0,0,W,H);
   if(!eq.length)return; const [s,e]=viewRange();
   const vis=eq.slice(Math.min(s,eq.length-1),Math.min(e,eq.length));
   if(!vis.length)return;
-  const L=64,R=16,T=12,B=30; const pw=Math.max(1,W-L-R),ph=Math.max(1,H-T-B);
+  const L=PADL,R=AXIS_W,T=12,B=30; const pw=Math.max(1,W-L-R),ph=Math.max(1,H-T-B);
   let lo=Infinity,hi=-Infinity; for(const p of vis){lo=Math.min(lo,p.equity);hi=Math.max(hi,p.equity);} if(!(isFinite(lo)&&isFinite(hi))||lo===hi){lo-=1;hi+=1;} const pad=(hi-lo)*0.08; lo-=pad;hi+=pad;
   [lo,hi]=applyYZoom("equity",lo,hi); yZoom.equity.lo=lo; yZoom.equity.hi=hi;
   const y=v=>T+(hi-v)/(hi-lo)*ph; const xStep=pw/Math.max(1,barsPerView); const startEq=DATA&&DATA.metrics?DATA.metrics.starting_equity:(vis[0]?vis[0].equity:0);
   ectx.strokeStyle=COLORS.grid; ectx.fillStyle=COLORS.axis; ectx.font="11px Segoe UI, Arial";
-  for(let i=0;i<=3;i++){ const yy=T+ph*i/3,vv=hi-(hi-lo)*i/3; ectx.beginPath();ectx.moveTo(L,yy);ectx.lineTo(W-R,yy);ectx.stroke(); ectx.fillText("$"+vv.toFixed(0),6,yy+4); }
+  for(let i=0;i<=3;i++){ const yy=T+ph*i/3,vv=hi-(hi-lo)*i/3; ectx.beginPath();ectx.moveTo(L,yy);ectx.lineTo(W-R,yy);ectx.stroke(); ectx.fillText("$"+vv.toFixed(0),W-R+6,yy+4); }
   drawTimeAxis(ectx,vis,L,T,pw,ph,W,R,"ts_ns",xStep);
   ectx.save(); clipPlot(ectx,L,T,pw,ph);
   if(startEq>=lo&&startEq<=hi){ ectx.strokeStyle="#cbd5e1";ectx.setLineDash([4,4]); ectx.beginPath();ectx.moveTo(L,y(startEq));ectx.lineTo(W-R,y(startEq));ectx.stroke();ectx.setLineDash([]); }
   ectx.strokeStyle="#2563eb"; ectx.lineWidth=1.6; ectx.beginPath(); for(let i=0;i<vis.length;i++){const x=L+(i+0.5)*xStep,yy=y(vis[i].equity); i?ectx.lineTo(x,yy):ectx.moveTo(x,yy);} ectx.stroke(); ectx.lineWidth=1;
   ectx.restore();
   ectx.fillStyle="#64748b"; ectx.fillText("equity",L+4,T+12); ectx.strokeStyle="#9aa4b2"; ectx.strokeRect(L,T,pw,ph);
+  // Crosshair: vertical line synced with the price chart; full cross + $ tag when hovering here.
+  if(crosshairOn&&hover&&(hover.canvas==="price"||hover.canvas==="equity")&&hover.x>=L&&hover.x<=L+pw){
+    const idx=clamp(Math.floor((hover.x-L)/xStep),0,vis.length-1);
+    const x=L+idx*xStep+xStep/2;
+    ectx.save(); ectx.setLineDash([4,4]); ectx.strokeStyle="rgba(71,85,105,0.6)"; ectx.lineWidth=1;
+    ectx.beginPath();ectx.moveTo(x,T);ectx.lineTo(x,T+ph);ectx.stroke();
+    if(hover.canvas==="equity"&&hover.y>=T&&hover.y<=T+ph){
+      ectx.beginPath();ectx.moveTo(L,hover.y);ectx.lineTo(L+pw,hover.y);ectx.stroke();
+      ectx.setLineDash([]);
+      const vv=hi-(hover.y-T)/Math.max(1,ph)*(hi-lo);
+      axisPriceTag(ectx,W,R,hover.y,"$"+vv.toFixed(0),"#334155");
+    }
+    ectx.restore();
+  }
 }
 function draw(){ drawPrice(); if(!equityCollapsed)drawEquity(); }
 
 function attach(canvas,name){
   canvas.addEventListener("wheel",ev=>{ev.preventDefault(); const r=canvas.getBoundingClientRect(); const x=ev.clientX-r.left;
-    if(chartMode==="heatmap"&&name==="price"&&heatView){ const L=64,top=10,bottom=30,pw=Math.max(1,r.width-L-16),ph=Math.max(1,r.height-top-bottom),factor=ev.deltaY<0?0.82:1.22; if(ev.shiftKey||x<L){ heatZoomPrice(factor,clamp((ev.clientY-r.top-top)/ph,0,1)); } else { heatZoomTime(factor,clamp((x-L)/pw,0,1)); } draw(); scheduleHeatFetch(); return; }
-    if(ev.shiftKey||x<64){ const top=name==="price"?14:12,bottom=name==="price"?34:30; const frac=clamp((ev.clientY-r.top-top)/Math.max(1,r.height-top-bottom),0,1); zoomY(name,ev.deltaY<0?1.18:1/1.18,frac); } else { const ratio=clamp((x-64)/Math.max(1,r.width-80),0,1); setBarsPerView(barsPerView*(ev.deltaY<0?0.82:1.22),ratio); }},{passive:false});
+    if(chartMode==="heatmap"&&name==="price"&&heatView){ const L=PADL,top=10,bottom=30,pw=Math.max(1,r.width-L-AXIS_W),ph=Math.max(1,r.height-top-bottom),factor=ev.deltaY<0?0.82:1.22; if(ev.shiftKey||x>r.width-AXIS_W){ heatZoomPrice(factor,clamp((ev.clientY-r.top-top)/ph,0,1)); } else { heatZoomTime(factor,clamp((x-L)/pw,0,1)); } draw(); scheduleHeatFetch(); return; }
+    if(ev.shiftKey||x>r.width-AXIS_W){ const top=name==="price"?14:12,bottom=name==="price"?34:30; const frac=clamp((ev.clientY-r.top-top)/Math.max(1,r.height-top-bottom),0,1); zoomY(name,ev.deltaY<0?1.18:1/1.18,frac); } else { const ratio=clamp((x-PADL)/Math.max(1,r.width-PADL-AXIS_W),0,1); setBarsPerView(barsPerView*(ev.deltaY<0?0.82:1.22),ratio); }},{passive:false});
   canvas.addEventListener("mousedown",ev=>{ if(annotationMode&&name==="price"&&chartMode!=="heatmap"&&ev.button===0){ startAnnotationDraft(ev); return; } if(vpMode&&name==="price"&&chartMode!=="heatmap"&&ev.button===0){ startVpDraft(ev); return; } lockYZoom(name); const st=yZoom[name]; drag={x:ev.clientX,y:ev.clientY,start,name,lo:st?.lo,hi:st?.hi,heat:(chartMode==="heatmap"&&heatView)?{t0:heatView.t0,t1:heatView.t1,pmin:heatView.pmin,pmax:heatView.pmax}:null}; canvas.classList.add("dragging");});
   canvas.addEventListener("mousemove",ev=>{const r=canvas.getBoundingClientRect(); hover={canvas:name,x:ev.clientX-r.left,y:ev.clientY-r.top};
     if(name==="price"&&!pinnedEconEvent){
@@ -1435,8 +1516,8 @@ function attach(canvas,name){
     }
     if(annotationMode&&name==="price"&&annotationDraft&&annotationDraft.dragging){ updateAnnotationDraft(ev); return; }
     if(vpMode&&name==="price"&&vpDraft&&vpDraft.dragging){ updateVpDraft(ev); return; }
-    if(drag&&chartMode==="heatmap"&&drag.name==="price"&&drag.heat){ const L=64,top=10,bottom=30,pw=Math.max(1,r.width-L-16),ph=Math.max(1,r.height-top-bottom); heatPan(ev.clientX-drag.x,ev.clientY-drag.y,pw,ph,drag.heat); draw(); scheduleHeatFetch(); return; }
-    if(drag){const pw=Math.max(1,r.width-80); const d=Math.round((drag.x-ev.clientX)/pw*barsPerView); start=clamp(drag.start+d,0,maxStart()); if(drag.name==="price")autoYZoom("equity"); if(drag.name===name&&isFinite(drag.lo)&&isFinite(drag.hi)&&drag.hi>drag.lo){ const top=name==="price"?14:12,bottom=name==="price"?34:30; const ph=Math.max(1,r.height-top-bottom); const dy=ev.clientY-drag.y; const shift=dy/ph*(drag.hi-drag.lo); const st=yZoom[name]; st.manual=true; st.lo=drag.lo+shift; st.hi=drag.hi+shift; }} draw();});
+    if(drag&&chartMode==="heatmap"&&drag.name==="price"&&drag.heat){ const L=PADL,top=10,bottom=30,pw=Math.max(1,r.width-L-AXIS_W),ph=Math.max(1,r.height-top-bottom); heatPan(ev.clientX-drag.x,ev.clientY-drag.y,pw,ph,drag.heat); draw(); scheduleHeatFetch(); return; }
+    if(drag){const pw=Math.max(1,r.width-PADL-AXIS_W); const d=Math.round((drag.x-ev.clientX)/pw*barsPerView); start=clamp(drag.start+d,0,maxStart()); if(drag.name==="price")autoYZoom("equity"); if(drag.name===name&&isFinite(drag.lo)&&isFinite(drag.hi)&&drag.hi>drag.lo){ const top=name==="price"?14:12,bottom=name==="price"?34:30; const ph=Math.max(1,r.height-top-bottom); const dy=ev.clientY-drag.y; const shift=dy/ph*(drag.hi-drag.lo); const st=yZoom[name]; st.manual=true; st.lo=drag.lo+shift; st.hi=drag.hi+shift; }} draw();});
   canvas.addEventListener("click",ev=>{ if(name!=="price")return; const r=canvas.getBoundingClientRect(), x=ev.clientX-r.left, y=ev.clientY-r.top; const hit=hitEconomicEventMarker(x,y); if(hit){ pinnedEconEvent=hit.group; showEconomicEventPopover(hit.group,hit.x,hit.y,true); ev.preventDefault(); } else if(pinnedEconEvent){ pinnedEconEvent=null; hideEconomicEventPopover(true); draw(); } });
   canvas.addEventListener("mouseleave",()=>{hover=null; if(!pinnedEconEvent)hideEconomicEventPopover(); draw();});
 }
@@ -1469,6 +1550,15 @@ setCardsCollapsed(cardsCollapsed,false);
 $("toggleEquity").onclick=()=>setEquityCollapsed(!equityCollapsed);
 setEquityCollapsed(equityCollapsed,false);
 $("toggleVp").onclick=()=>setVpMode(!vpMode);
+function setCrosshair(on,persist=true){
+  crosshairOn=!!on;
+  const b=$("toggleCross");
+  if(b){ b.classList.toggle("active",crosshairOn); b.setAttribute("aria-pressed",String(crosshairOn)); }
+  if(persist)writeStoredBool("accelerando.crosshair",crosshairOn);
+  draw();
+}
+$("toggleCross").onclick=()=>setCrosshair(!crosshairOn);
+setCrosshair(crosshairOn,false);
 $("runBtn").onclick=runBacktest;
 $("saveBtn").onclick=async()=>{ const name=$("saveName").value.trim(); if(!name){$("runErr").textContent="Enter a save name";return;} const r=await (await fetch("/api/save",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({name})})).json(); if(!r.ok){$("runErr").textContent=r.error||"save failed";} else { $("saveName").value=""; refreshRuns(); } };
 window.addEventListener("resize",resize);
@@ -1478,6 +1568,7 @@ window.addEventListener("keydown",ev=>{
   if(editing)return;
   if(annotationConfig.enabled&&ev.key.toLowerCase()==="a"){ setAnnotationMode(!annotationMode); ev.preventDefault(); return; }
   if(ev.key.toLowerCase()==="v"){ setVpMode(!vpMode); ev.preventDefault(); return; }
+  if(ev.key.toLowerCase()==="c"){ setCrosshair(!crosshairOn); ev.preventDefault(); return; }
   if(ev.key==="Escape"){
     if(vpDraft){ vpDraft=null; draw(); ev.preventDefault(); return; }
     if(vpMode){ setVpMode(false); ev.preventDefault(); return; }
