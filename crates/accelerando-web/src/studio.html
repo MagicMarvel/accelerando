@@ -51,9 +51,15 @@
   .card { min-width:104px; padding:6px 10px; border:1px solid #e5e7eb; border-radius:8px; background:#fbfcfe; }
   .card .k { font-size:10px; color:#6b7280; text-transform:uppercase; letter-spacing:.4px; }
   .card .v { font-size:16px; font-weight:700; margin-top:2px; }
-  .run-meta { display:none; background:#fff; border-bottom:1px solid #e2e8f0; }
+  .run-meta-backdrop { display:none; position:fixed; inset:0; z-index:49; background:rgba(15,23,42,0.30); }
+  .run-meta-backdrop.open { display:block; }
+  .run-meta { display:none; position:fixed; z-index:50; left:50%; top:60px; transform:translateX(-50%); width:min(1100px,calc(100vw - 48px)); max-height:calc(100vh - 110px); overflow:auto; background:#fff; border:1px solid #cbd5e1; border-radius:12px; box-shadow:0 18px 48px rgba(15,23,42,0.30); }
   .run-meta.visible { display:block; }
   .run-meta.collapsed { display:none; }
+  .run-meta-head { position:sticky; top:0; z-index:1; display:flex; align-items:center; gap:10px; padding:10px 14px; background:#fff; border-bottom:1px solid #eef2f7; }
+  .run-meta-head b { font-size:13px; text-transform:uppercase; letter-spacing:.4px; color:#334155; }
+  .run-meta-head span { color:#64748b; font-size:12px; flex:1; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  .run-meta-head button { height:26px; width:26px; padding:0; border-radius:6px; font-size:13px; line-height:1; }
   .meta-toggle { height:24px; min-width:62px; padding:0 8px; border-radius:6px; font-size:12px; }
   .run-meta-body { display:flex; padding:8px 14px; gap:8px; flex-wrap:wrap; align-items:stretch; }
   .run-meta .meta-head { min-width:180px; padding:6px 8px; border:1px solid #e5e7eb; border-radius:8px; background:#fbfcfe; }
@@ -91,12 +97,18 @@
   .anno-tools select { height:26px; border:1px solid #cbd5e1; border-radius:6px; font-size:12px; background:#fff; }
   .anno-tools button { height:26px; padding:0 8px; border-radius:6px; font-size:12px; }
   .anno-hint { font-size:11px; color:#475569; white-space:nowrap; }
-  .chart-legend { position:absolute; left:10px; top:8px; z-index:4; display:flex; flex-direction:column; gap:2px; pointer-events:none; }
-  .chart-legend .lg-row { display:inline-flex; align-items:center; gap:6px; padding:2px 8px; border-radius:6px; background:rgba(255,255,255,0.85); border:1px solid rgba(203,213,225,0.65); color:#334155; font-size:12px; cursor:pointer; user-select:none; pointer-events:auto; width:max-content; }
-  .chart-legend .lg-row:hover { background:#fff; border-color:#94a3b8; }
-  .chart-legend .lg-row.off { opacity:0.45; }
-  .chart-legend .lg-row.off .lg-name { text-decoration:line-through; }
-  .chart-legend .lg-eye { font-size:12px; line-height:1; }
+  .chart-legend { position:absolute; left:10px; top:8px; z-index:4; pointer-events:none; font-size:12px; }
+  .legend-card { pointer-events:auto; min-width:132px; background:rgba(255,255,255,0.92); border:1px solid rgba(203,213,225,0.75); border-radius:8px; box-shadow:0 1px 6px rgba(15,23,42,0.10); overflow:hidden; user-select:none; }
+  .legend-head { display:flex; align-items:center; gap:6px; padding:4px 9px; cursor:pointer; color:#475569; font-weight:700; }
+  .legend-head:hover { background:#f1f5f9; }
+  .legend-caret { font-size:9px; color:#94a3b8; }
+  .legend-row { display:flex; align-items:center; gap:8px; padding:3px 9px; color:#334155; cursor:pointer; }
+  .legend-row:hover { background:#f1f5f9; }
+  .legend-row .lg-name { flex:1; white-space:nowrap; }
+  .legend-row .lg-eye { opacity:0.55; font-size:12px; line-height:1; }
+  .legend-row:hover .lg-eye { opacity:1; }
+  .legend-row.off { opacity:0.45; }
+  .legend-row.off .lg-name { text-decoration:line-through; }
   .annotation-help { display:none; position:absolute; left:16px; bottom:48px; z-index:4; max-width:min(760px,calc(100% - 150px)); padding:7px 9px; border:1px solid #cbd5e1; border-radius:8px; background:rgba(255,255,255,0.94); color:#334155; box-shadow:0 2px 8px rgba(15,23,42,0.12); font-size:12px; line-height:1.35; pointer-events:none; }
   .annotation-help.visible { display:block; }
   .annotation-help b { color:#0f172a; }
@@ -149,6 +161,7 @@
 
   <section class="content">
     <div class="cards" id="cards"></div>
+    <div class="run-meta-backdrop" id="runMetaBackdrop"></div>
     <div class="run-meta" id="runMeta"></div>
     <div class="toolbar">
       <span class="seg" aria-label="trade navigation">
@@ -224,6 +237,7 @@ let metaCollapsed=readStoredBool("accelerando.runMetaCollapsed",true);
 let equityCollapsed=readStoredBool("accelerando.equityCollapsed",false);
 let cardsCollapsed=readStoredBool("accelerando.cardsCollapsed",false);
 let crosshairOn=readStoredBool("accelerando.crosshair",true);
+let legendCollapsed=readStoredBool("accelerando.legendCollapsed",false);
 const fmt=(n,d=2)=>(n===null||n===undefined||!isFinite(n))?"-":Number(n).toLocaleString(undefined,{maximumFractionDigits:d,minimumFractionDigits:d});
 const fmtTs=ns=>new Date(Number(ns)/1e6).toLocaleString();
 const fmtAxisTs=ns=>new Date(Number(ns)/1e6).toLocaleTimeString([], {hour:"2-digit", minute:"2-digit"});
@@ -268,6 +282,7 @@ function renderRunMeta(){
   const summary=typeof RUN_SUMMARY==="object"?RUN_SUMMARY:null;
   if(!summary){
     host.classList.remove("visible"); host.innerHTML="";
+    const bd0=$("runMetaBackdrop"); if(bd0)bd0.classList.remove("open");
     if(title)title.textContent=""; if(btn)btn.style.display="none";
     return;
   }
@@ -276,26 +291,29 @@ function renderRunMeta(){
   const label=summary.label||summary.id||"run", strategy=summary.strategy||"";
   if(title)title.textContent=`${label}${strategy?` - ${strategy}`:""}`;
   if(btn){ btn.style.display=""; btn.onclick=()=>setMetaCollapsed(!metaCollapsed); }
-  host.innerHTML=`<div class="run-meta-body"><div class="meta-head"><b>${esc(label)}</b><span>${esc(strategy)}</span></div>`+
+  host.innerHTML=`<div class="run-meta-head"><b>Parameters</b><span>${esc(label)}${strategy?` - ${esc(strategy)}`:""}</span><button id="runMetaClose" type="button" title="Close">&#10005;</button></div>`+
+    `<div class="run-meta-body"><div class="meta-head"><b>${esc(label)}</b><span>${esc(strategy)}</span></div>`+
     groups.map(g=>`<div class="meta-group"><div class="meta-title">${esc(g.name)}</div><div class="meta-items">${g.items.map(p=>`<span class="meta-param" title="${esc(p.name)} = ${esc(fmtParam(p.value))}"><b>${esc(p.name)}</b><span>${fmtParam(p.value)}</span></span>`).join("")}</div></div>`).join("")+
     `</div>`;
+  $("runMetaClose").onclick=()=>setMetaCollapsed(true);
+  const bd=$("runMetaBackdrop"); if(bd)bd.onclick=()=>setMetaCollapsed(true);
   setMetaCollapsed(metaCollapsed,false);
 }
 
 function setMetaCollapsed(collapsed,persist=true){
   metaCollapsed=!!collapsed;
-  const host=$("runMeta");
+  const host=$("runMeta"), bd=$("runMetaBackdrop");
   if(host){
     host.classList.toggle("collapsed",metaCollapsed);
+    if(bd)bd.classList.toggle("open",!metaCollapsed&&host.classList.contains("visible"));
     const btn=$("toggleRunMeta");
     if(btn){
       btn.textContent=metaCollapsed?"Show params":"Hide params";
-      btn.title=metaCollapsed?"Show parameter panel":"Hide parameter panel";
+      btn.title=metaCollapsed?"Show parameter dialog":"Hide parameter dialog";
       btn.setAttribute("aria-expanded",String(!metaCollapsed));
     }
   }
   if(persist)writeStoredBool("accelerando.runMetaCollapsed",metaCollapsed);
-  requestAnimationFrame(resize);
 }
 
 function setCardsCollapsed(collapsed,persist=true){
@@ -543,21 +561,33 @@ function defaultOverlayState(cat){
   if(strategy==="big_trade_regime") return cat!=="imbalance";
   return true;
 }
-// TradingView-style legend in the chart's top-left corner: one row per overlay with an
-// eye toggle; clicking a row shows/hides that overlay.
+// TradingView-style legend card in the chart's top-left corner: a collapsible list with
+// one row per overlay; clicking a row (or its eye) shows/hides that overlay.
 function buildOverlayToggles(){
   const host=$("chartLegend"); if(!host)return;
   host.innerHTML="";
-  for(const cat of overlayCategories()){
-    if(!(cat in overlayState))overlayState[cat]=defaultOverlayState(cat);
-    const on=overlayOn(cat);
-    const row=document.createElement("div");
-    row.className="lg-row"+(on?"":" off");
-    row.title=(on?"Hide ":"Show ")+overlayLabel(cat);
-    row.innerHTML=`<span class="lg-eye">${on?"&#128065;":"&#8856;"}</span><span class="lg-name">${esc(overlayLabel(cat))}</span>`;
-    row.onclick=()=>{ overlayState[cat]=!on; buildOverlayToggles(); draw(); };
-    host.append(row);
+  const cats=overlayCategories();
+  if(!cats.length)return;
+  for(const cat of cats){ if(!(cat in overlayState))overlayState[cat]=defaultOverlayState(cat); }
+  const card=document.createElement("div"); card.className="legend-card";
+  const hiddenCount=cats.filter(cat=>!overlayOn(cat)).length;
+  const head=document.createElement("div"); head.className="legend-head";
+  head.innerHTML=`<span class="legend-caret">${legendCollapsed?"&#9654;":"&#9660;"}</span><span>overlays${legendCollapsed?` (${cats.length}${hiddenCount?`, ${hiddenCount} off`:""})`:""}</span>`;
+  head.title=legendCollapsed?"Expand overlay list":"Collapse overlay list";
+  head.onclick=()=>{ legendCollapsed=!legendCollapsed; writeStoredBool("accelerando.legendCollapsed",legendCollapsed); buildOverlayToggles(); };
+  card.append(head);
+  if(!legendCollapsed){
+    for(const cat of cats){
+      const on=overlayOn(cat);
+      const row=document.createElement("div");
+      row.className="legend-row"+(on?"":" off");
+      row.title=(on?"Hide ":"Show ")+overlayLabel(cat);
+      row.innerHTML=`<span class="lg-name">${esc(overlayLabel(cat))}</span><span class="lg-eye">${on?"&#128065;":"&#8856;"}</span>`;
+      row.onclick=()=>{ overlayState[cat]=!on; buildOverlayToggles(); draw(); };
+      card.append(row);
+    }
   }
+  host.append(card);
 }
 function idxForTs(ns){ const x=Number(ns); let lo=0,hi=fps.length-1,best=0; while(lo<=hi){const m=(lo+hi)>>1; if(Number(fps[m].ts_last_ns)<=x){best=m;lo=m+1;}else hi=m-1;} return best; }
 function idxForEntryTs(ns){
@@ -1634,6 +1664,8 @@ window.addEventListener("keydown",ev=>{
   if(ev.key.toLowerCase()==="v"){ setVpMode(!vpMode); ev.preventDefault(); return; }
   if(ev.key.toLowerCase()==="c"){ setCrosshair(!crosshairOn); ev.preventDefault(); return; }
   if(ev.key==="Escape"){
+    const rm=$("runMeta");
+    if(rm&&rm.classList.contains("visible")&&!metaCollapsed){ setMetaCollapsed(true); ev.preventDefault(); return; }
     if(vpDraft){ vpDraft=null; draw(); ev.preventDefault(); return; }
     if(vpMode){ setVpMode(false); ev.preventDefault(); return; }
     if(annotationMode){ cancelAnnotationDraft(); ev.preventDefault(); }
