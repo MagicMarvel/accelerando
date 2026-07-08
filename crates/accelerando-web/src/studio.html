@@ -13,7 +13,10 @@
   header .brand-home { color:#fff; text-decoration:none; flex:0 0 auto; }
   header .brand-home:hover { text-decoration:underline; }
   header .tag { font-size:12px; color:#94a3b8; }
-  header .status { margin-left:auto; font-size:12px; color:#cbd5e1; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; max-width:55vw;}
+  header .run-title { font-size:12px; font-weight:700; color:#e2e8f0; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; max-width:28vw; }
+  header .meta-toggle { background:#1e293b; border-color:#334155; color:#cbd5e1; }
+  header .meta-toggle:hover { background:#334155; }
+  header .status { margin-left:auto; font-size:12px; color:#cbd5e1; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; max-width:45vw;}
   .main { display:grid; grid-template-columns:360px 1fr; min-height:0; }
   body.viewer .main { grid-template-columns:1fr; }
   body.viewer .side { display:none; }
@@ -50,13 +53,9 @@
   .card .v { font-size:16px; font-weight:700; margin-top:2px; }
   .run-meta { display:none; background:#fff; border-bottom:1px solid #e2e8f0; }
   .run-meta.visible { display:block; }
-  .run-meta-bar { display:flex; align-items:center; gap:8px; min-height:34px; padding:5px 14px; border-bottom:1px solid #eef2f7; }
-  .run-meta.collapsed .run-meta-bar { border-bottom:0; }
-  .run-meta-title { font-size:12px; font-weight:800; color:#334155; text-transform:uppercase; letter-spacing:.4px; }
-  .run-meta-sub { min-width:0; color:#64748b; font-size:12px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  .run-meta.collapsed { display:none; }
   .meta-toggle { height:24px; min-width:62px; padding:0 8px; border-radius:6px; font-size:12px; }
   .run-meta-body { display:flex; padding:8px 14px; gap:8px; flex-wrap:wrap; align-items:stretch; }
-  .run-meta.collapsed .run-meta-body { display:none; }
   .run-meta .meta-head { min-width:180px; padding:6px 8px; border:1px solid #e5e7eb; border-radius:8px; background:#fbfcfe; }
   .run-meta .meta-head b { display:block; font-size:13px; }
   .run-meta .meta-head span { display:block; margin-top:2px; font-size:11px; color:#64748b; }
@@ -66,7 +65,8 @@
   .run-meta .meta-param { display:inline-flex; gap:4px; max-width:100%; padding:2px 5px; border:1px solid #e5e7eb; border-radius:6px; background:#fff; font-size:11px; }
   .run-meta .meta-param b { color:#475569; font-weight:600; overflow:hidden; text-overflow:ellipsis; }
   .run-meta .meta-param span { font-family:Consolas,"SFMono-Regular",monospace; overflow:hidden; text-overflow:ellipsis; }
-  .toolbar { display:flex; align-items:center; gap:8px; padding:6px 14px; background:#fff; border-bottom:1px solid #e2e8f0; }
+  .toolbar { display:flex; align-items:center; gap:8px; padding:6px 14px; background:#fff; border-bottom:1px solid #e2e8f0; overflow-x:auto; white-space:nowrap; scrollbar-width:thin; }
+  .toolbar > * { flex:0 0 auto; }
   .toolbar .rng { margin-left:auto; font-size:12px; color:#475569; }
   .toolbar button.tool-toggle { height:28px; padding:0 10px; border-radius:8px; }
   .toolbar button.tool-toggle.active { background:#0f172a; border-color:#0f172a; color:#fff; }
@@ -108,6 +108,8 @@
 <header>
   <a class="title brand-home" href="/" title="Back to home">ACCELERANDO</a>
   <span class="tag">studio - the world has been accelerated</span>
+  <span class="run-title" id="runTitle"></span>
+  <button id="toggleRunMeta" class="meta-toggle" type="button" style="display:none;"></button>
   <span class="status" id="status"></span>
 </header>
 <div class="main">
@@ -154,7 +156,7 @@
         <button id="modeFootprint" title="Footprint chart">Footprint</button>
         <button id="modeHeatmap" title="L2 heatmap chart">Heatmap</button>
       </span>
-      <span id="overlayToggles" style="display:inline-flex;gap:10px;align-items:center;flex-wrap:wrap;"></span>
+      <span id="overlayToggles" style="display:inline-flex;gap:10px;align-items:center;flex-wrap:nowrap;"></span>
       <label style="font-size:12px;color:#374151;display:inline-flex;gap:6px;align-items:center;">heat <select id="heatMetric" style="height:26px;border:1px solid #cbd5e1;border-radius:6px;font-size:12px;"><option value="total">total</option><option value="bid">bid</option><option value="ask">ask</option></select></label>
       <button id="toggleMetrics" class="tool-toggle active" type="button" title="Hide metrics" aria-pressed="true">Metrics</button>
       <button id="toggleEquity" class="tool-toggle active" type="button" title="Hide equity" aria-pressed="true">Equity</button>
@@ -212,7 +214,7 @@ const charts=document.querySelector(".charts"), splitter=$("chartSplitter");
 const clamp=(v,a,b)=>Math.max(a,Math.min(b,v));
 function readStoredBool(key,fallback=false){ try{ const v=localStorage.getItem(key); return v===null?fallback:v==="1"; } catch(_){ return fallback; } }
 function writeStoredBool(key,value){ try{ localStorage.setItem(key,value?"1":"0"); } catch(_){} }
-let metaCollapsed=readStoredBool("accelerando.runMetaCollapsed",false);
+let metaCollapsed=readStoredBool("accelerando.runMetaCollapsed",true);
 let equityCollapsed=readStoredBool("accelerando.equityCollapsed",false);
 let cardsCollapsed=readStoredBool("accelerando.cardsCollapsed",false);
 let crosshairOn=readStoredBool("accelerando.crosshair",true);
@@ -254,17 +256,23 @@ function groupedParams(params){
   return groups;
 }
 function renderRunMeta(){
-  const host=$("runMeta"); if(!host)return;
+  // The run label and params toggle live in the top header (no separate bar row);
+  // the collapsible body below only appears when params are expanded.
+  const host=$("runMeta"), title=$("runTitle"), btn=$("toggleRunMeta"); if(!host)return;
   const summary=typeof RUN_SUMMARY==="object"?RUN_SUMMARY:null;
-  if(!summary){ host.classList.remove("visible"); host.innerHTML=""; return; }
+  if(!summary){
+    host.classList.remove("visible"); host.innerHTML="";
+    if(title)title.textContent=""; if(btn)btn.style.display="none";
+    return;
+  }
   const groups=groupedParams(summary.params);
   host.classList.add("visible");
   const label=summary.label||summary.id||"run", strategy=summary.strategy||"";
-  host.innerHTML=`<div class="run-meta-bar"><button id="toggleRunMeta" class="meta-toggle" type="button" aria-expanded="${String(!metaCollapsed)}"></button><div class="run-meta-title">Parameters</div><div class="run-meta-sub">${esc(label)}${strategy?` - ${esc(strategy)}`:""}</div></div>`+
-    `<div class="run-meta-body"><div class="meta-head"><b>${esc(label)}</b><span>${esc(strategy)}</span></div>`+
+  if(title)title.textContent=`${label}${strategy?` - ${strategy}`:""}`;
+  if(btn){ btn.style.display=""; btn.onclick=()=>setMetaCollapsed(!metaCollapsed); }
+  host.innerHTML=`<div class="run-meta-body"><div class="meta-head"><b>${esc(label)}</b><span>${esc(strategy)}</span></div>`+
     groups.map(g=>`<div class="meta-group"><div class="meta-title">${esc(g.name)}</div><div class="meta-items">${g.items.map(p=>`<span class="meta-param" title="${esc(p.name)} = ${esc(fmtParam(p.value))}"><b>${esc(p.name)}</b><span>${fmtParam(p.value)}</span></span>`).join("")}</div></div>`).join("")+
     `</div>`;
-  $("toggleRunMeta").onclick=()=>setMetaCollapsed(!metaCollapsed);
   setMetaCollapsed(metaCollapsed,false);
 }
 
@@ -535,7 +543,7 @@ function buildOverlayToggles(){
   for(const cat of overlayCategories()){
     if(!(cat in overlayState))overlayState[cat]=defaultOverlayState(cat);
     const lab=document.createElement("label");
-    lab.style.cssText="font-size:12px;color:#374151;display:inline-flex;gap:6px;align-items:center;";
+    lab.style.cssText="font-size:12px;color:#374151;display:inline-flex;gap:6px;align-items:center;white-space:nowrap;";
     const cb=document.createElement("input"); cb.type="checkbox"; cb.checked=overlayState[cat]!==false;
     cb.onchange=()=>{ overlayState[cat]=cb.checked; draw(); };
     lab.append(cb, document.createTextNode(overlayLabel(cat)));
@@ -1508,8 +1516,48 @@ function attach(canvas,name){
   canvas.addEventListener("wheel",ev=>{ev.preventDefault(); const r=canvas.getBoundingClientRect(); const x=ev.clientX-r.left;
     if(chartMode==="heatmap"&&name==="price"&&heatView){ const L=PADL,top=10,bottom=30,pw=Math.max(1,r.width-L-AXIS_W),ph=Math.max(1,r.height-top-bottom),factor=ev.deltaY<0?0.82:1.22; if(ev.shiftKey||x>r.width-AXIS_W){ heatZoomPrice(factor,clamp((ev.clientY-r.top-top)/ph,0,1)); } else { heatZoomTime(factor,clamp((x-L)/pw,0,1)); } draw(); scheduleHeatFetch(); return; }
     if(ev.shiftKey||x>r.width-AXIS_W){ const top=name==="price"?14:12,bottom=name==="price"?34:30; const frac=clamp((ev.clientY-r.top-top)/Math.max(1,r.height-top-bottom),0,1); zoomY(name,ev.deltaY<0?1.18:1/1.18,frac); } else { const ratio=clamp((x-PADL)/Math.max(1,r.width-PADL-AXIS_W),0,1); setBarsPerView(barsPerView*(ev.deltaY<0?0.82:1.22),ratio); }},{passive:false});
-  canvas.addEventListener("mousedown",ev=>{ if(annotationMode&&name==="price"&&chartMode!=="heatmap"&&ev.button===0){ startAnnotationDraft(ev); return; } if(vpMode&&name==="price"&&chartMode!=="heatmap"&&ev.button===0){ startVpDraft(ev); return; } lockYZoom(name); const st=yZoom[name]; drag={x:ev.clientX,y:ev.clientY,start,name,lo:st?.lo,hi:st?.hi,heat:(chartMode==="heatmap"&&heatView)?{t0:heatView.t0,t1:heatView.t1,pmin:heatView.pmin,pmax:heatView.pmax}:null}; canvas.classList.add("dragging");});
+  canvas.addEventListener("mousedown",ev=>{
+    // TradingView-style axis scaling: drag the right price axis vertically or the bottom
+    // time axis horizontally to zoom instead of panning.
+    const r=canvas.getBoundingClientRect(), mx=ev.clientX-r.left, my=ev.clientY-r.top;
+    const bottomH=(name==="price"&&chartMode!=="heatmap")?34:30;
+    const axis=mx>r.width-AXIS_W?"y":(my>r.height-bottomH?"x":null);
+    if(axis&&ev.button===0){
+      if(axis==="y")lockYZoom(name);
+      const st=yZoom[name];
+      drag={axis,name,x:ev.clientX,y:ev.clientY,start,bpv:barsPerView,lo:st?.lo,hi:st?.hi,heat:(chartMode==="heatmap"&&name==="price"&&heatView)?{t0:heatView.t0,t1:heatView.t1,pmin:heatView.pmin,pmax:heatView.pmax}:null};
+      canvas.classList.add("dragging"); ev.preventDefault(); return;
+    }
+    if(annotationMode&&name==="price"&&chartMode!=="heatmap"&&ev.button===0){ startAnnotationDraft(ev); return; } if(vpMode&&name==="price"&&chartMode!=="heatmap"&&ev.button===0){ startVpDraft(ev); return; } lockYZoom(name); const st=yZoom[name]; drag={x:ev.clientX,y:ev.clientY,start,name,lo:st?.lo,hi:st?.hi,heat:(chartMode==="heatmap"&&heatView)?{t0:heatView.t0,t1:heatView.t1,pmin:heatView.pmin,pmax:heatView.pmax}:null}; canvas.classList.add("dragging");});
   canvas.addEventListener("mousemove",ev=>{const r=canvas.getBoundingClientRect(); hover={canvas:name,x:ev.clientX-r.left,y:ev.clientY-r.top};
+    if(!drag){
+      const bottomH=(name==="price"&&chartMode!=="heatmap")?34:30;
+      canvas.style.cursor=hover.x>r.width-AXIS_W?"ns-resize":(hover.y>r.height-bottomH?"ew-resize":"");
+    }
+    if(drag&&drag.axis){
+      if(drag.axis==="y"){
+        const factor=Math.exp((ev.clientY-drag.y)/250);
+        if(chartMode==="heatmap"&&drag.name==="price"&&drag.heat&&heatView){
+          const c=(drag.heat.pmax+drag.heat.pmin)/2, span=Math.max(0.5,(drag.heat.pmax-drag.heat.pmin)*factor);
+          heatView.pmin=c-span/2; heatView.pmax=c+span/2; draw(); scheduleHeatFetch(); return;
+        }
+        if(isFinite(drag.lo)&&isFinite(drag.hi)&&drag.hi>drag.lo){
+          const st=yZoom[drag.name], c=(drag.hi+drag.lo)/2, span=Math.max(1e-12,(drag.hi-drag.lo)*factor);
+          st.manual=true; st.lo=c-span/2; st.hi=c+span/2;
+        }
+        draw(); return;
+      }
+      const factor=Math.exp(-(ev.clientX-drag.x)/250);
+      if(chartMode==="heatmap"&&drag.name==="price"&&drag.heat&&heatView){
+        const c=(drag.heat.t0+drag.heat.t1)/2, span=Math.max(2e9,(drag.heat.t1-drag.heat.t0)*factor);
+        heatView.t0=c-span/2; heatView.t1=c+span/2; draw(); scheduleHeatFetch(); return;
+      }
+      const end=drag.start+drag.bpv;
+      barsPerView=Math.round(clamp(drag.bpv*factor,1,Math.max(1,fps.length)));
+      start=clamp(end-barsPerView,0,maxStart());
+      autoYZoom("equity");
+      draw(); return;
+    }
     if(name==="price"&&!pinnedEconEvent){
       const hit=hitEconomicEventMarker(hover.x,hover.y);
       if(hit)showEconomicEventPopover(hit.group,hit.x,hit.y,false); else hideEconomicEventPopover();
@@ -1518,6 +1566,14 @@ function attach(canvas,name){
     if(vpMode&&name==="price"&&vpDraft&&vpDraft.dragging){ updateVpDraft(ev); return; }
     if(drag&&chartMode==="heatmap"&&drag.name==="price"&&drag.heat){ const L=PADL,top=10,bottom=30,pw=Math.max(1,r.width-L-AXIS_W),ph=Math.max(1,r.height-top-bottom); heatPan(ev.clientX-drag.x,ev.clientY-drag.y,pw,ph,drag.heat); draw(); scheduleHeatFetch(); return; }
     if(drag){const pw=Math.max(1,r.width-PADL-AXIS_W); const d=Math.round((drag.x-ev.clientX)/pw*barsPerView); start=clamp(drag.start+d,0,maxStart()); if(drag.name==="price")autoYZoom("equity"); if(drag.name===name&&isFinite(drag.lo)&&isFinite(drag.hi)&&drag.hi>drag.lo){ const top=name==="price"?14:12,bottom=name==="price"?34:30; const ph=Math.max(1,r.height-top-bottom); const dy=ev.clientY-drag.y; const shift=dy/ph*(drag.hi-drag.lo); const st=yZoom[name]; st.manual=true; st.lo=drag.lo+shift; st.hi=drag.hi+shift; }} draw();});
+  canvas.addEventListener("dblclick",ev=>{
+    const r=canvas.getBoundingClientRect(), mx=ev.clientX-r.left;
+    if(mx>r.width-AXIS_W){
+      if(chartMode==="heatmap"&&name==="price"){ initHeatView(); draw(); scheduleHeatFetch(); }
+      else { autoYZoom(name); draw(); }
+      ev.preventDefault();
+    }
+  });
   canvas.addEventListener("click",ev=>{ if(name!=="price")return; const r=canvas.getBoundingClientRect(), x=ev.clientX-r.left, y=ev.clientY-r.top; const hit=hitEconomicEventMarker(x,y); if(hit){ pinnedEconEvent=hit.group; showEconomicEventPopover(hit.group,hit.x,hit.y,true); ev.preventDefault(); } else if(pinnedEconEvent){ pinnedEconEvent=null; hideEconomicEventPopover(true); draw(); } });
   canvas.addEventListener("mouseleave",()=>{hover=null; if(!pinnedEconEvent)hideEconomicEventPopover(); draw();});
 }
@@ -1536,6 +1592,10 @@ window.addEventListener("mousemove",ev=>{
 });
 window.addEventListener("mouseup",()=>{splitDrag=null; splitter.classList.remove("dragging");});
 attach(price,"price"); attach(equity,"equity");
+// Rebuild canvas backing stores whenever the chart area's CSS size changes (toolbar wrapping,
+// annotation tools appearing, panel toggles, ...). Without this the browser scales the stale
+// bitmap and mouse coordinates no longer line up with what is drawn (crosshair offset bug).
+if(window.ResizeObserver){ new ResizeObserver(()=>resize()).observe(charts); }
 $("centerPrice").onclick=centerCurrentPrice;
 $("tradeFirst").onclick=()=>jumpToTrade("first");
 $("tradePrev").onclick=()=>jumpToTrade("prev");
