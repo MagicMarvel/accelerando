@@ -705,7 +705,15 @@ function viewRange(){ const end=Math.min(fps.length,start+barsPerView); return [
 // Furthest the view is allowed to scroll: at least the very last bar stays inside the window, so
 // the latest bar can be dragged/centered away from the hard right edge, leaving blank space after it.
 function maxStart(){ return Math.max(0,fps.length-1); }
+// Used by the manual-replay overlay (replay.rs injects JS that calls these).
+function jumpToLatestCentered(){
+  if(!fps.length)return;
+  autoYZoom("equity");
+  start=clamp(fps.length-Math.ceil(barsPerView/2),0,maxStart());
+  draw();
+}
 function visibleFootprints(){ const [s,e]=viewRange(); return fps.slice(s,e); }
+function currentVisiblePrice(){ const vis=visibleFootprints(); const b=vis[vis.length-1]||fps[fps.length-1]; return b&&isFinite(b.close)?b.close:null; }
 // Fit the currently visible range to the full chart: reset the manual y-zoom back to
 // auto-fit so the visible bars span the whole pane (TradingView's auto-scale).
 function fitVisibleRange(){

@@ -2,6 +2,7 @@ use std::collections::HashSet;
 use std::fs;
 use std::io::{Read, Write};
 use std::net::TcpStream;
+use std::path::PathBuf;
 use std::time::Duration;
 
 use accelerando_core::{Configurable, Footprint, Indicator, ParamSpec, Params, Plot};
@@ -10,9 +11,11 @@ use serde_json::Value;
 pub const EVENT_COUNT: &str = "economic_calendar_event_count";
 pub const EVENT_TITLE: &str = "economic_calendar_event";
 
-const DEFAULT_SOURCE: &str = "http://nfs.faireconomy.media/ff_calendar_thisweek.json";
+const DEFAULT_SOURCE: &str = "tradingview";
 const DEFAULT_GROUP: &str = "ff_high_events";
 const DEFAULT_COLOR: &str = "#a855f7";
+const DEFAULT_CACHE_DIR: &str = "calendar-cache";
+const NS_PER_DAY: i64 = 86_400_000_000_000;
 
 #[derive(Clone, Debug)]
 struct CalendarEvent {
@@ -41,12 +44,23 @@ impl CalendarEvent {
     }
 }
 
-/// ForexFactory-style economic calendar marker indicator.
+enum SourceKind {
+    /// Events fully loaded at construction (local file or a plain-http JSON feed).
+    Static,
+    /// TradingView economic calendar: fetched lazily one month at a time as bars arrive,
+    /// so any historical range is covered; each month's raw response is cached on disk.
+    TradingView,
+}
+
+/// Economic calendar marker indicator.
 ///
-/// By default this loads `ff_calendar_thisweek.json` from the public ForexFactory static feed,
-/// filters `High` impact events, and emits one chart marker on the footprint whose time span
-/// contains each event. For deterministic historical backtests, set `source` to a local JSON file
-/// with the same schema instead of using the live weekly feed.
+/// The default `tradingview` source covers the entire backtest range: as footprints stream
+/// through, each new month triggers one request to TradingView's public economic-calendar API
+/// (cached under `cache_dir`, so a rerun makes no network calls). Set `source` to a local JSON
+/// file or an `http://` URL with the ForexFactory weekly schema for fully offline runs.
+///
+/// Events that land between bars (overnight, pre-market, weekends) attach to the first bar
+/// after them instead of being dropped.
 pub struct EconomicCalendar {
     events: Vec<CalendarEvent>,
     next_idx: usize,
@@ -56,6 +70,12 @@ pub struct EconomicCalendar {
     max_events_per_bar: usize,
     group: String,
     color: String,
+    source_kind: SourceKind,
+    request_countries: String,
+    cache_dir: PathBuf,
+    /// Exclusive end of the range already fetched from TradingView (0 = nothing yet).
+    fetched_to_ns: i64,
+    prev_bar_end_ns: Option<i64>,
 }
 
 impl Configurable for EconomicCalendar {
@@ -68,6 +88,7 @@ impl Configurable for EconomicCalendar {
                 &["High", "Medium", "Low", "Holiday", "All"],
             )
             .fixed_str("countries", "")
+            .fixed_str("cache_dir", DEFAULT_CACHE_DIR)
             .int("plot_markers", 1, 0, 1, 1)
             .int("max_events_per_bar", 8, 1, 50, 1)
             .fixed_str("group", DEFAULT_GROUP)
@@ -82,8 +103,27 @@ impl Configurable for EconomicCalendar {
             .map(|s| s.trim().to_ascii_uppercase())
             .filter(|s| !s.is_empty())
             .collect::<HashSet<_>>();
-        let mut events = load_events(&p.str("source", DEFAULT_SOURCE), &impact).unwrap_or_default();
+        let source = p.str("source", DEFAULT_SOURCE);
+        let source_kind = if source.eq_ignore_ascii_case("tradingview") {
+            SourceKind::TradingView
+        } else {
+            SourceKind::Static
+        };
+        let mut events = match source_kind {
+            SourceKind::TradingView => Vec::new(),
+            SourceKind::Static => load_events(&source, &impact).unwrap_or_else(|err| {
+                eprintln!("economic_calendar: {err}");
+                Vec::new()
+            }),
+        };
         events.sort_by_key(|event| event.ts_ns);
+        let request_countries = if countries.is_empty() {
+            "US".to_string()
+        } else {
+            let mut list: Vec<String> = countries.iter().cloned().collect();
+            list.sort();
+            list.join(",")
+        };
         Self {
             events,
             next_idx: 0,
@@ -93,6 +133,11 @@ impl Configurable for EconomicCalendar {
             max_events_per_bar: p.usize("max_events_per_bar", 8).max(1),
             group: p.str("group", DEFAULT_GROUP),
             color: p.str("color", DEFAULT_COLOR),
+            source_kind,
+            request_countries,
+            cache_dir: PathBuf::from(p.str("cache_dir", DEFAULT_CACHE_DIR)),
+            fetched_to_ns: 0,
+            prev_bar_end_ns: None,
         }
     }
 }
@@ -103,15 +148,21 @@ impl Indicator for EconomicCalendar {
     }
 
     fn on_footprint(&mut self, fp: &mut Footprint, _history: &[Footprint]) {
+        self.ensure_events_through(fp.ts_last_ns);
+        // Attach every event since the previous bar's close, so events in session gaps land on
+        // the next bar. The first bar keeps the strict in-span rule to avoid dumping the whole
+        // pre-data backlog onto it.
+        let after_ns = self.prev_bar_end_ns.unwrap_or(fp.ts_first_ns - 1);
         let mut hits = Vec::new();
         while self.next_idx < self.events.len() && self.events[self.next_idx].ts_ns <= fp.ts_last_ns
         {
             let event = &self.events[self.next_idx];
-            if event.ts_ns >= fp.ts_first_ns && self.matches_filters(event) {
+            if event.ts_ns > after_ns && self.matches_filters(event) {
                 hits.push(event.clone());
             }
             self.next_idx += 1;
         }
+        self.prev_bar_end_ns = Some(fp.ts_last_ns);
 
         fp.values.insert(EVENT_COUNT.to_string(), hits.len() as f64);
         if hits.is_empty() {
@@ -145,13 +196,121 @@ impl EconomicCalendar {
         (self.impact.eq_ignore_ascii_case("All") || event.impact.eq_ignore_ascii_case(&self.impact))
             && (self.countries.is_empty() || self.countries.contains(&event.country))
     }
+
+    /// Extend the fetched range month by month until it covers `ts_ns`.
+    fn ensure_events_through(&mut self, ts_ns: i64) {
+        if !matches!(self.source_kind, SourceKind::TradingView) {
+            return;
+        }
+        while self.fetched_to_ns <= ts_ns {
+            let anchor = if self.fetched_to_ns == 0 {
+                ts_ns
+            } else {
+                self.fetched_to_ns
+            };
+            let (from_ns, to_ns, label) = month_window(anchor);
+            match self.load_month(from_ns, to_ns, &label) {
+                Ok(mut chunk) => {
+                    // Chunks arrive in chronological month order, so a per-chunk sort keeps
+                    // the whole event list sorted.
+                    chunk.sort_by_key(|event| event.ts_ns);
+                    self.events.extend(chunk);
+                }
+                Err(err) => eprintln!("economic_calendar: month {label}: {err}"),
+            }
+            self.fetched_to_ns = to_ns;
+        }
+    }
+
+    fn load_month(&self, from_ns: i64, to_ns: i64, label: &str) -> Result<Vec<CalendarEvent>, String> {
+        let safe_countries = self.request_countries.replace(',', "-");
+        let cache = self.cache_dir.join(format!("tv_{safe_countries}_{label}.json"));
+        let body = match fs::read_to_string(&cache) {
+            Ok(body) => body,
+            Err(_) => {
+                let body = fetch_tradingview(from_ns, to_ns, &self.request_countries)?;
+                let _ = fs::create_dir_all(&self.cache_dir);
+                let _ = fs::write(&cache, &body);
+                body
+            }
+        };
+        let value: Value =
+            serde_json::from_str(&body).map_err(|e| format!("parse tradingview json: {e}"))?;
+        parse_tradingview_events(&value, &self.impact)
+    }
+}
+
+fn fetch_tradingview(from_ns: i64, to_ns: i64, countries: &str) -> Result<String, String> {
+    let fmt = |ns: i64| {
+        let (year, month, day) = civil_from_days(ns.div_euclid(NS_PER_DAY));
+        format!("{year:04}-{month:02}-{day:02}T00:00:00.000Z")
+    };
+    let url = format!(
+        "https://economic-calendar.tradingview.com/events?from={}&to={}&countries={}",
+        fmt(from_ns),
+        fmt(to_ns),
+        countries
+    );
+    let resp = ureq::get(&url)
+        .set("Origin", "https://www.tradingview.com")
+        .set("Referer", "https://www.tradingview.com/")
+        .set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64)")
+        .set("Accept", "application/json")
+        .timeout(Duration::from_secs(15))
+        .call()
+        .map_err(|e| format!("GET {url}: {e}"))?;
+    let mut body = String::new();
+    resp.into_reader()
+        .take(32 * 1024 * 1024)
+        .read_to_string(&mut body)
+        .map_err(|e| format!("read calendar body: {e}"))?;
+    Ok(body)
+}
+
+fn parse_tradingview_events(value: &Value, impact: &str) -> Result<Vec<CalendarEvent>, String> {
+    let events = value
+        .get("result")
+        .and_then(Value::as_array)
+        .or_else(|| value.as_array())
+        .ok_or_else(|| "tradingview calendar json has no result array".to_string())?;
+    let mut out = Vec::new();
+    for item in events {
+        // TradingView importance: 1 = high, 0 = medium, negative = low.
+        let importance = item.get("importance").and_then(Value::as_i64).unwrap_or(i64::MIN);
+        let event_impact = if importance >= 1 {
+            "High"
+        } else if importance == 0 {
+            "Medium"
+        } else {
+            "Low"
+        };
+        if !impact.eq_ignore_ascii_case("All") && !event_impact.eq_ignore_ascii_case(impact) {
+            continue;
+        }
+        let Some(ts_ns) = parse_iso_offset_ns(&str_field(item, "date")) else {
+            continue;
+        };
+        out.push(CalendarEvent {
+            ts_ns,
+            impact: event_impact.to_string(),
+            country: str_field(item, "country").to_ascii_uppercase(),
+            title: str_field(item, "title"),
+            forecast: num_field(item, "forecast"),
+            previous: num_field(item, "previous"),
+            actual: num_field(item, "actual"),
+        });
+    }
+    Ok(out)
 }
 
 fn load_events(source: &str, impact: &str) -> Result<Vec<CalendarEvent>, String> {
     let body = if source.starts_with("http://") {
         fetch_http(source)?
     } else if source.starts_with("https://") {
-        return Err("https calendar sources are not supported without a TLS client".to_string());
+        return Err(
+            "https static sources are not supported; use source=tradingview, an http:// URL, or a local file"
+                .to_string(),
+        );
     } else {
         fs::read_to_string(source).map_err(|e| format!("read calendar file {source}: {e}"))?
     };
@@ -193,6 +352,14 @@ fn str_field(value: &Value, key: &str) -> String {
         .unwrap_or("")
         .trim()
         .to_string()
+}
+
+fn num_field(value: &Value, key: &str) -> String {
+    match value.get(key) {
+        Some(Value::Number(n)) => n.to_string(),
+        Some(Value::String(s)) => s.trim().to_string(),
+        _ => String::new(),
+    }
 }
 
 fn fetch_http(url: &str) -> Result<String, String> {
@@ -276,6 +443,7 @@ fn decode_chunked(mut body: &[u8]) -> Result<Vec<u8>, String> {
     Ok(out)
 }
 
+/// Parse an ISO-8601 timestamp with optional fractional seconds and a Z or +hh:mm offset.
 fn parse_iso_offset_ns(value: &str) -> Option<i64> {
     let bytes = value.as_bytes();
     if bytes.len() < 20 {
@@ -287,10 +455,17 @@ fn parse_iso_offset_ns(value: &str) -> Option<i64> {
     let hour = parse_i64(&value[11..13])?;
     let minute = parse_i64(&value[14..16])?;
     let second = parse_i64(&value[17..19])?;
-    let (offset_sign, off_start) = match bytes.get(19).copied()? {
+    let mut i = 19usize;
+    if bytes.get(i) == Some(&b'.') {
+        i += 1;
+        while i < bytes.len() && bytes[i].is_ascii_digit() {
+            i += 1;
+        }
+    }
+    let (offset_sign, off_start) = match bytes.get(i).copied()? {
         b'Z' => (1, 0),
-        b'+' if bytes.len() >= 25 => (1, 20),
-        b'-' if bytes.len() >= 25 => (-1, 20),
+        b'+' if bytes.len() >= i + 6 => (1, i + 1),
+        b'-' if bytes.len() >= i + 6 => (-1, i + 1),
         _ => return None,
     };
     let offset_seconds = if off_start == 0 {
@@ -323,4 +498,27 @@ fn days_from_civil(year: i32, month: i32, day: i32) -> i64 {
     let doy = (153 * month + 2) / 5 + day - 1;
     let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
     i64::from(era * 146097 + doe - 719468)
+}
+
+/// Inverse of `days_from_civil`: days since the Unix epoch to (year, month, day).
+fn civil_from_days(z: i64) -> (i32, i32, i32) {
+    let z = z + 719_468;
+    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    ((y + i64::from(m <= 2)) as i32, m as i32, d as i32)
+}
+
+/// The calendar month containing `ts_ns`: (start_ns inclusive, end_ns exclusive, "YYYY-MM").
+fn month_window(ts_ns: i64) -> (i64, i64, String) {
+    let (year, month, _) = civil_from_days(ts_ns.div_euclid(NS_PER_DAY));
+    let from_ns = days_from_civil(year, month, 1) * NS_PER_DAY;
+    let (next_year, next_month) = if month == 12 { (year + 1, 1) } else { (year, month + 1) };
+    let to_ns = days_from_civil(next_year, next_month, 1) * NS_PER_DAY;
+    (from_ns, to_ns, format!("{year:04}-{month:02}"))
 }

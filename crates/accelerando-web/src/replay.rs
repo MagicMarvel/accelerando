@@ -970,7 +970,7 @@ function installReplayUi(){
     <span id="replayMode" class="mode">Hold Space</span>
     <button id="replayCancel">Cancel order</button><button id="replayFlat" class="danger">Flat</button>
     <span id="replayState" class="state"></span><span id="replayHint" class="hint"></span><span id="replayErr" class="err"></span>`;
-  content.insertBefore(panel, document.querySelector(".charts"));
+  content.insertBefore(panel, document.querySelector(".chart-area")||document.querySelector(".charts"));
   const oldRender=renderResult;
   renderResult=function(data){oldRender(data);REPLAY=data.replay||{};syncReplayUi();};
   const oldDraw=drawPrice;
