@@ -91,7 +91,13 @@
   .anno-tools select { height:26px; border:1px solid #cbd5e1; border-radius:6px; font-size:12px; background:#fff; }
   .anno-tools button { height:26px; padding:0 8px; border-radius:6px; font-size:12px; }
   .anno-hint { font-size:11px; color:#475569; white-space:nowrap; }
-  .annotation-help { display:none; position:absolute; left:16px; top:12px; z-index:4; max-width:min(760px,calc(100% - 150px)); padding:7px 9px; border:1px solid #cbd5e1; border-radius:8px; background:rgba(255,255,255,0.94); color:#334155; box-shadow:0 2px 8px rgba(15,23,42,0.12); font-size:12px; line-height:1.35; pointer-events:none; }
+  .chart-legend { position:absolute; left:10px; top:8px; z-index:4; display:flex; flex-direction:column; gap:2px; pointer-events:none; }
+  .chart-legend .lg-row { display:inline-flex; align-items:center; gap:6px; padding:2px 8px; border-radius:6px; background:rgba(255,255,255,0.85); border:1px solid rgba(203,213,225,0.65); color:#334155; font-size:12px; cursor:pointer; user-select:none; pointer-events:auto; width:max-content; }
+  .chart-legend .lg-row:hover { background:#fff; border-color:#94a3b8; }
+  .chart-legend .lg-row.off { opacity:0.45; }
+  .chart-legend .lg-row.off .lg-name { text-decoration:line-through; }
+  .chart-legend .lg-eye { font-size:12px; line-height:1; }
+  .annotation-help { display:none; position:absolute; left:16px; bottom:48px; z-index:4; max-width:min(760px,calc(100% - 150px)); padding:7px 9px; border:1px solid #cbd5e1; border-radius:8px; background:rgba(255,255,255,0.94); color:#334155; box-shadow:0 2px 8px rgba(15,23,42,0.12); font-size:12px; line-height:1.35; pointer-events:none; }
   .annotation-help.visible { display:block; }
   .annotation-help b { color:#0f172a; }
   .ff-event-popover { display:none; position:absolute; z-index:6; width:min(380px,calc(100% - 24px)); max-height:min(430px,calc(100% - 24px)); overflow:auto; padding:14px 16px 14px 18px; border-left:4px solid #a855f7; border-radius:8px; background:#fff; color:#111827; box-shadow:0 12px 32px rgba(15,23,42,0.24); font-size:12px; line-height:1.35; }
@@ -156,7 +162,6 @@
         <button id="modeFootprint" title="Footprint chart">Footprint</button>
         <button id="modeHeatmap" title="L2 heatmap chart">Heatmap</button>
       </span>
-      <span id="overlayToggles" style="display:inline-flex;gap:10px;align-items:center;flex-wrap:nowrap;"></span>
       <label style="font-size:12px;color:#374151;display:inline-flex;gap:6px;align-items:center;">heat <select id="heatMetric" style="height:26px;border:1px solid #cbd5e1;border-radius:6px;font-size:12px;"><option value="total">total</option><option value="bid">bid</option><option value="ask">ask</option></select></label>
       <button id="toggleMetrics" class="tool-toggle active" type="button" title="Hide metrics" aria-pressed="true">Metrics</button>
       <button id="toggleEquity" class="tool-toggle active" type="button" title="Hide equity" aria-pressed="true">Equity</button>
@@ -171,11 +176,12 @@
     <div class="chart-area">
       <div class="chart-tools">
         <button id="toggleCross" type="button" title="Crosshair (C)" aria-pressed="true">&#10011;</button>
-        <button id="centerPrice" type="button" title="Center current price" aria-label="Center current price">&#8853;</button>
+        <button id="centerPrice" type="button" title="Fit visible range to screen" aria-label="Fit visible range to screen">&#9974;</button>
         <button id="toggleVp" class="tool-label" type="button" title="Volume profile: drag a box, click an existing one to remove it (V)" aria-pressed="false">VP</button>
         <button id="toggleAnnotate" type="button" title="Toggle annotation mode (A)" aria-pressed="false" style="display:none;">&#9998;</button>
       </div>
       <div class="charts">
+        <div id="chartLegend" class="chart-legend"></div>
         <div id="annotationHelp" class="annotation-help"></div>
         <div id="ffEventPopover" class="ff-event-popover"></div>
         <canvas id="price"></canvas>
@@ -354,7 +360,7 @@ function drawTimeAxis(ctx,vis,L,T,pw,ph,W,R,tsKey="ts_last_ns",xStep=pw/Math.max
     ctx.beginPath();ctx.moveTo(x,T+ph);ctx.lineTo(x,T+ph+4);ctx.stroke();
     ctx.fillText(fmtAxisTs(ts),x,T+ph+7);
   }
-  ctx.textAlign="right"; ctx.fillText("Time",W-R,T+ph+20); ctx.restore();
+  ctx.restore();
 }
 async function fetchJson(url){ const r=await fetch(url); if(!r.ok) throw new Error(`${url}: ${r.status}`); return await r.json(); }
 
@@ -537,17 +543,20 @@ function defaultOverlayState(cat){
   if(strategy==="big_trade_regime") return cat!=="imbalance";
   return true;
 }
+// TradingView-style legend in the chart's top-left corner: one row per overlay with an
+// eye toggle; clicking a row shows/hides that overlay.
 function buildOverlayToggles(){
-  const host=$("overlayToggles"); if(!host)return;
+  const host=$("chartLegend"); if(!host)return;
   host.innerHTML="";
   for(const cat of overlayCategories()){
     if(!(cat in overlayState))overlayState[cat]=defaultOverlayState(cat);
-    const lab=document.createElement("label");
-    lab.style.cssText="font-size:12px;color:#374151;display:inline-flex;gap:6px;align-items:center;white-space:nowrap;";
-    const cb=document.createElement("input"); cb.type="checkbox"; cb.checked=overlayState[cat]!==false;
-    cb.onchange=()=>{ overlayState[cat]=cb.checked; draw(); };
-    lab.append(cb, document.createTextNode(overlayLabel(cat)));
-    host.append(lab);
+    const on=overlayOn(cat);
+    const row=document.createElement("div");
+    row.className="lg-row"+(on?"":" off");
+    row.title=(on?"Hide ":"Show ")+overlayLabel(cat);
+    row.innerHTML=`<span class="lg-eye">${on?"&#128065;":"&#8856;"}</span><span class="lg-name">${esc(overlayLabel(cat))}</span>`;
+    row.onclick=()=>{ overlayState[cat]=!on; buildOverlayToggles(); draw(); };
+    host.append(row);
   }
 }
 function idxForTs(ns){ const x=Number(ns); let lo=0,hi=fps.length-1,best=0; while(lo<=hi){const m=(lo+hi)>>1; if(Number(fps[m].ts_last_ns)<=x){best=m;lo=m+1;}else hi=m-1;} return best; }
@@ -666,27 +675,21 @@ function viewRange(){ const end=Math.min(fps.length,start+barsPerView); return [
 // Furthest the view is allowed to scroll: at least the very last bar stays inside the window, so
 // the latest bar can be dragged/centered away from the hard right edge, leaving blank space after it.
 function maxStart(){ return Math.max(0,fps.length-1); }
-function jumpToLatestCentered(){
-  if(!fps.length)return;
-  autoYZoom("equity");
-  start=clamp(fps.length-Math.ceil(barsPerView/2),0,maxStart());
-  draw();
-}
 function visibleFootprints(){ const [s,e]=viewRange(); return fps.slice(s,e); }
-function currentVisiblePrice(){ const vis=visibleFootprints(); const b=vis[vis.length-1]||fps[fps.length-1]; return b&&isFinite(b.close)?b.close:null; }
-function centerCurrentPrice(){
-  const px=currentVisiblePrice(); if(px==null)return;
+// Fit the currently visible range to the full chart: reset the manual y-zoom back to
+// auto-fit so the visible bars span the whole pane (TradingView's auto-scale).
+function fitVisibleRange(){
   if(chartMode==="heatmap"){
-    if(!heatView)initHeatView(); if(!heatView)return;
-    const span=Math.max(0.5,heatView.pmax-heatView.pmin);
-    heatView.pmin=px-span/2; heatView.pmax=px+span/2;
+    if(!heatView){ initHeatView(); draw(); scheduleHeatFetch(); return; }
+    let lo=Infinity,hi=-Infinity;
+    for(const b of fps){
+      const t=Number(b.ts_last_ns);
+      if(t>=heatView.t0&&t<=heatView.t1){ lo=Math.min(lo,b.low); hi=Math.max(hi,b.high); }
+    }
+    if(isFinite(lo)&&hi>lo){ const pad=Math.max(0.5,(hi-lo)*0.06); heatView.pmin=lo-pad; heatView.pmax=hi+pad; }
     draw(); scheduleHeatFetch(); return;
   }
-  const st=yZoom.price; let span=(st&&isFinite(st.lo)&&isFinite(st.hi)&&st.hi>st.lo)?st.hi-st.lo:null;
-  if(!(span>0)){
-    const vis=visibleFootprints(); let lo=Infinity,hi=-Infinity; for(const b of vis){lo=Math.min(lo,b.low);hi=Math.max(hi,b.high);} span=(isFinite(lo)&&isFinite(hi)&&hi>lo)?(hi-lo)*1.12:8;
-  }
-  st.manual=true; st.lo=px-span/2; st.hi=px+span/2; draw();
+  autoYZoom("price"); autoYZoom("equity"); draw();
 }
 function sortedTrades(){ return trades.filter(t=>Number.isFinite(t._ei)).sort((a,b)=>a._ei-b._ei); }
 function currentTradeIdx(list){
@@ -1547,7 +1550,8 @@ function attach(canvas,name){
         }
         draw(); return;
       }
-      const factor=Math.exp(-(ev.clientX-drag.x)/250);
+      // Drag left = zoom in (bars widen), drag right = zoom out, matching TradingView.
+      const factor=Math.exp((ev.clientX-drag.x)/250);
       if(chartMode==="heatmap"&&drag.name==="price"&&drag.heat&&heatView){
         const c=(drag.heat.t0+drag.heat.t1)/2, span=Math.max(2e9,(drag.heat.t1-drag.heat.t0)*factor);
         heatView.t0=c-span/2; heatView.t1=c+span/2; draw(); scheduleHeatFetch(); return;
@@ -1596,7 +1600,7 @@ attach(price,"price"); attach(equity,"equity");
 // annotation tools appearing, panel toggles, ...). Without this the browser scales the stale
 // bitmap and mouse coordinates no longer line up with what is drawn (crosshair offset bug).
 if(window.ResizeObserver){ new ResizeObserver(()=>resize()).observe(charts); }
-$("centerPrice").onclick=centerCurrentPrice;
+$("centerPrice").onclick=fitVisibleRange;
 $("tradeFirst").onclick=()=>jumpToTrade("first");
 $("tradePrev").onclick=()=>jumpToTrade("prev");
 $("tradeNext").onclick=()=>jumpToTrade("next");
