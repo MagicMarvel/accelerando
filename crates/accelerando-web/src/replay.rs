@@ -3,7 +3,7 @@
 //! forward one (or a few) bars at a time, place market/limit/breakout orders with a stop/target
 //! bracket, and each session is persisted to a JSON file so it can be reviewed afterwards.
 //!
-//! Wired in via [`crate::serve_experiment_lazy_heatmap_with_replay`].
+//! Wired in via [`crate::Studio::replay`].
 
 use accelerando_core::result::EquityPoint;
 use accelerando_core::{
@@ -109,7 +109,7 @@ fn restore_undo(session: &mut ReplaySession, u: ReplayUndo) {
 }
 
 /// Manual bar-replay engine. Construct one per server run and pass it to
-/// [`crate::serve_experiment_lazy_heatmap_with_replay`].
+/// [`crate::Studio::replay`].
 #[derive(Clone)]
 pub struct ReplayManager {
     prepared: Arc<PreparedBacktestData>,

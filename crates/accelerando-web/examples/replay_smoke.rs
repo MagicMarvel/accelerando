@@ -41,13 +41,9 @@ fn main() {
         .nth(1)
         .and_then(|v| v.parse().ok())
         .unwrap_or(18973);
-    accelerando_web::serve_experiment_lazy_heatmap_with_replay(
-        Vec::new(),
-        port,
-        |_id| None,
-        |_query| None,
-        AnnotationConfig::new(["good", "bad"], ann_path.to_string_lossy()),
-        replay,
-    )
-    .expect("serve");
+    accelerando_web::Studio::new()
+        .annotations(AnnotationConfig::new(["good", "bad"], ann_path.to_string_lossy()))
+        .replay(replay)
+        .serve(port)
+        .expect("serve");
 }

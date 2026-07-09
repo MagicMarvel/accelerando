@@ -79,110 +79,110 @@ pub fn serve(result: &BacktestResult, port: u16) -> std::io::Result<()> {
     Ok(())
 }
 
-/// Start a multi-run experiment viewer backed by complete in-memory results.
-pub fn serve_experiment(experiment: ExperimentResult, port: u16) -> std::io::Result<()> {
-    let summaries: Vec<ExperimentRunSummary> =
-        experiment.runs.iter().map(|run| run.summary.clone()).collect();
-    serve_experiment_lazy(summaries, port, move |id| {
-        experiment
-            .runs
-            .iter()
-            .find(|run| run.summary.id == id)
-            .map(|run| run.result.clone())
-    })
-}
-
-/// Start a multi-run experiment viewer. The closure is called when a run chart is opened.
-pub fn serve_experiment_lazy<F>(
+/// The browser workbench, configured through one builder instead of a ladder of `serve_*`
+/// variants: start from [`Studio::new`] (or [`Studio::experiment`] for an in-memory
+/// [`ExperimentResult`]), chain whatever capabilities the host app has, then call
+/// [`Studio::serve`].
+///
+/// ```no_run
+/// # let summaries = Vec::new();
+/// # let annotations = accelerando_web::AnnotationConfig::disabled();
+/// accelerando_web::Studio::new()
+///     .runs(summaries, |_id| None)
+///     .heatmap(|_query| None)
+///     .annotations(annotations)
+///     .serve(8888)
+///     .unwrap();
+/// ```
+pub struct Studio {
     summaries: Vec<ExperimentRunSummary>,
-    port: u16,
-    load_result: F,
-) -> std::io::Result<()>
-where
-    F: Fn(&str) -> Option<BacktestResult>,
-{
-    serve_experiment_lazy_heatmap(summaries, port, load_result, |_| None)
-}
-
-/// Like [`serve_experiment_lazy`], but also routes `GET /api/heatmap?<query>` to `heatmap`, which
-/// receives the raw query string and returns a ready-to-send JSON body (or `None` for 404). This
-/// lets the host app stream a windowed, zoomable order-book heatmap without the web crate needing to
-/// know its data model.
-pub fn serve_experiment_lazy_heatmap<F, H>(
-    summaries: Vec<ExperimentRunSummary>,
-    port: u16,
-    load_result: F,
-    heatmap: H,
-) -> std::io::Result<()>
-where
-    F: Fn(&str) -> Option<BacktestResult>,
-    H: Fn(&str) -> Option<String>,
-{
-    serve_experiment_lazy_heatmap_with_annotations(
-        summaries,
-        port,
-        load_result,
-        heatmap,
-        AnnotationConfig::disabled(),
-    )
-}
-
-/// Like [`serve_experiment_lazy_heatmap`], with optional generic chart annotations enabled.
-pub fn serve_experiment_lazy_heatmap_with_annotations<F, H>(
-    summaries: Vec<ExperimentRunSummary>,
-    port: u16,
-    load_result: F,
-    heatmap: H,
-    annotation_config: AnnotationConfig,
-) -> std::io::Result<()>
-where
-    F: Fn(&str) -> Option<BacktestResult>,
-    H: Fn(&str) -> Option<String>,
-{
-    serve_experiment_dashboard(summaries, port, load_result, heatmap, annotation_config, None)
-}
-
-/// Like [`serve_experiment_lazy_heatmap_with_annotations`], additionally serving an interactive
-/// manual bar-replay session at `/replay`: paper-trade market/limit/breakout orders bar by bar,
-/// with each session persisted by [`ReplayManager`].
-pub fn serve_experiment_lazy_heatmap_with_replay<F, H>(
-    summaries: Vec<ExperimentRunSummary>,
-    port: u16,
-    load_result: F,
-    heatmap: H,
-    annotation_config: AnnotationConfig,
-    replay: ReplayManager,
-) -> std::io::Result<()>
-where
-    F: Fn(&str) -> Option<BacktestResult>,
-    H: Fn(&str) -> Option<String>,
-{
-    serve_experiment_dashboard(
-        summaries,
-        port,
-        load_result,
-        heatmap,
-        annotation_config,
-        Some(replay),
-    )
-}
-
-fn serve_experiment_dashboard<F, H>(
-    summaries: Vec<ExperimentRunSummary>,
-    port: u16,
-    load_result: F,
-    heatmap: H,
-    annotation_config: AnnotationConfig,
+    load_result: Box<dyn Fn(&str) -> Option<BacktestResult>>,
+    heatmap: Box<dyn Fn(&str) -> Option<String>>,
+    annotations: AnnotationConfig,
     replay: Option<ReplayManager>,
-) -> std::io::Result<()>
-where
-    F: Fn(&str) -> Option<BacktestResult>,
-    H: Fn(&str) -> Option<String>,
-{
+}
+
+impl Default for Studio {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Studio {
+    /// An empty workbench: no runs, no heatmap, no annotations, no replay.
+    pub fn new() -> Self {
+        Self {
+            summaries: Vec::new(),
+            load_result: Box::new(|_| None),
+            heatmap: Box::new(|_| None),
+            annotations: AnnotationConfig::disabled(),
+            replay: None,
+        }
+    }
+
+    /// Convenience for a complete in-memory experiment (results served eagerly).
+    pub fn experiment(experiment: ExperimentResult) -> Self {
+        let summaries: Vec<ExperimentRunSummary> =
+            experiment.runs.iter().map(|run| run.summary.clone()).collect();
+        Self::new().runs(summaries, move |id| {
+            experiment
+                .runs
+                .iter()
+                .find(|run| run.summary.id == id)
+                .map(|run| run.result.clone())
+        })
+    }
+
+    /// Run summaries for the index page plus a loader called when a run chart is opened.
+    pub fn runs(
+        mut self,
+        summaries: Vec<ExperimentRunSummary>,
+        load_result: impl Fn(&str) -> Option<BacktestResult> + 'static,
+    ) -> Self {
+        self.summaries = summaries;
+        self.load_result = Box::new(load_result);
+        self
+    }
+
+    /// Route `GET /api/heatmap?<query>` to the host: it receives the raw query string and
+    /// returns a ready-to-send JSON body (or `None` for 404), so the web crate never needs
+    /// to know the order-book data model.
+    pub fn heatmap(mut self, heatmap: impl Fn(&str) -> Option<String> + 'static) -> Self {
+        self.heatmap = Box::new(heatmap);
+        self
+    }
+
+    /// Enable generic chart annotations, persisted to the configured JSONL file.
+    pub fn annotations(mut self, config: AnnotationConfig) -> Self {
+        self.annotations = config;
+        self
+    }
+
+    /// Enable interactive manual bar replay at `/replay`, with sessions persisted by the
+    /// [`ReplayManager`].
+    pub fn replay(mut self, replay: ReplayManager) -> Self {
+        self.replay = Some(replay);
+        self
+    }
+
+    /// Bind the port and serve until the process is killed.
+    pub fn serve(self, port: u16) -> std::io::Result<()> {
+        serve_studio(self, port)
+    }
+}
+
+fn serve_studio(studio: Studio, port: u16) -> std::io::Result<()> {
     #[derive(Serialize)]
     struct SummaryPayload<'a> {
         runs: &'a [ExperimentRunSummary],
     }
+    let Studio {
+        summaries,
+        load_result,
+        heatmap,
+        annotations: annotation_config,
+        replay,
+    } = studio;
 
     let summary_json =
         serde_json::to_string(&SummaryPayload { runs: &summaries }).expect("serialize summaries");

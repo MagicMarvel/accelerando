@@ -54,16 +54,23 @@ accelerando-web  = { path = "../accelerando/crates/accelerando-web" }
 
 ## accelerando-web：浏览器工作台
 
-### 服务入口（从简单到全功能）
+### 服务入口
 
-| 函数 | 说明 |
-| --- | --- |
-| `serve(result, port)` | 只读查看单个 `BacktestResult` |
-| `serve_experiment(experiment, port)` | 多 run 实验对比（内存内结果） |
-| `serve_experiment_lazy(...)` | 同上，打开图表时才惰性加载结果 |
-| `serve_experiment_lazy_heatmap(...)` | 追加 `GET /api/heatmap` 路由，宿主自行提供窗口化订单簿热力图 |
-| `serve_experiment_lazy_heatmap_with_annotations(...)` | 追加图表标注（JSONL 持久化） |
-| `serve_experiment_lazy_heatmap_with_replay(...)` | 全功能：再加手动 bar 回放（传入 `ReplayManager`） |
+两个入口，按需选一个：
+
+- `serve(result, port)` —— 只读查看单个 `BacktestResult`，最简单。
+- `Studio` builder —— 工作台的唯一入口，有什么能力就链上什么：
+
+```rust
+accelerando_web::Studio::new()
+    .runs(summaries, |id| load_result(id))   // 实验对比 + 惰性加载结果
+    .heatmap(|query| heatmap_json(query))    // 可选：窗口化订单簿热力图
+    .annotations(annotation_config)          // 可选：图表标注（JSONL 持久化）
+    .replay(replay_manager)                  // 可选：手动 bar 回放
+    .serve(port)?;
+```
+
+内存内的完整实验可用快捷构造 `Studio::experiment(experiment).serve(port)`。
 
 首页是**两个标签页**：Manual replay（手动回测）与 Quant backtests（量化回测参数树）。
 replay 未启用时手动页签自动隐藏。
