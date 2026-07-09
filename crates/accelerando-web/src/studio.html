@@ -841,6 +841,9 @@ function axisTimeTag(ctx,x,yTop,text,L,pw){
   ctx.fillText(text,xx+w/2,yTop+2+h/2+0.5);
   ctx.restore();
 }
+// TradingView-style body width: a fixed fraction of the bar slot at every zoom level, so
+// zooming in grows the candles with the spacing instead of leaving skinny sticks in gaps.
+function candleWidth(xStep){ return Math.max(1,xStep*0.8); }
 function drawCandles(ctx,vis,L,T,ph,xStep,cw,y){
   for(let i=0;i<vis.length;i++){ const b=vis[i]; const x=L+i*xStep+xStep/2; const c=b.close>=b.open?COLORS.up:COLORS.down; ctx.strokeStyle=c;ctx.fillStyle=c; ctx.beginPath();ctx.moveTo(x,y(b.high));ctx.lineTo(x,y(b.low));ctx.stroke(); const oy=y(b.open),cy=y(b.close); ctx.fillRect(x-cw/2,Math.min(oy,cy),cw,Math.max(1,Math.abs(oy-cy))); }
 }
@@ -1048,7 +1051,7 @@ function drawFootprints(ctx,vis,L,T,ph,xStep,y,tick){
       maxProfile=Math.max(maxProfile,total);
     }
   }
-  if(maxVol<=0){ drawCandles(ctx,vis,L,T,ph,xStep,Math.max(1,Math.min(16,xStep*0.7)),y); return; }
+  if(maxVol<=0){ drawCandles(ctx,vis,L,T,ph,xStep,candleWidth(xStep),y); return; }
   const barW=Math.max(2,xStep*0.92), half=barW/2, showProfile=true, showFull=xStep>=70, showText=xStep>=36, showExtraText=xStep>=92, showSummary=xStep>=24;
   ctx.font="9px Segoe UI, Arial"; ctx.textBaseline="middle";
   for(let i=0;i<vis.length;i++){
@@ -1115,7 +1118,7 @@ function drawPrice(){
   if(chartMode==="heatmap"){ drawHeatmap(pctx,price,"price"); const [s,e]=viewRange(); $("range").textContent=`bars ${s+1}-${e} / ${fps.length}`; return; }
   const [s,e]=viewRange(); const vis=fps.slice(s,e); const L=PADL,R=AXIS_W,T=14,B=34; const pw=Math.max(1,W-L-R),ph=Math.max(1,H-T-B);
   let lo=Infinity,hi=-Infinity; for(const b of vis){lo=Math.min(lo,b.low);hi=Math.max(hi,b.high);}
-  const pad=Math.max(0.25,(hi-lo)*0.06); lo-=pad;hi+=pad; [lo,hi]=applyYZoom("price",lo,hi); yZoom.price.lo=lo; yZoom.price.hi=hi; const y=p=>T+(hi-p)/(hi-lo)*ph; const xStep=pw/Math.max(1,barsPerView); priceScale={s,e,L,T,pw,ph,lo,hi,xStep}; const cw=Math.max(1,Math.min(16,xStep*0.7)); const tick=tickSizeFor(vis);
+  const pad=Math.max(0.25,(hi-lo)*0.06); lo-=pad;hi+=pad; [lo,hi]=applyYZoom("price",lo,hi); yZoom.price.lo=lo; yZoom.price.hi=hi; const y=p=>T+(hi-p)/(hi-lo)*ph; const xStep=pw/Math.max(1,barsPerView); priceScale={s,e,L,T,pw,ph,lo,hi,xStep}; const cw=candleWidth(xStep); const tick=tickSizeFor(vis);
   if(overlayOn("bands")){ let i=0; while(i<vis.length){ const band=(vis[i].plots||[]).find(p=>p.kind==="BackgroundBand"); const col=band?band.color:null; let j=i+1; const same=k=>{const bb=(vis[k].plots||[]).find(p=>p.kind==="BackgroundBand"); return (bb?bb.color:null)===col;}; while(j<vis.length&&same(j))j++; if(col){pctx.fillStyle=col; pctx.fillRect(L+i*xStep,T,(j-i)*xStep,ph);} i=j; } }
   pctx.strokeStyle=COLORS.grid; pctx.fillStyle=COLORS.axis; pctx.font="11px Segoe UI, Arial"; pctx.lineWidth=1;
   for(let i=0;i<=6;i++){ const yy=T+ph*i/6,pr=hi-(hi-lo)*i/6; pctx.beginPath();pctx.moveTo(L,yy);pctx.lineTo(W-R,yy);pctx.stroke(); pctx.fillText(pr.toFixed(2),W-R+6,yy+4); }
