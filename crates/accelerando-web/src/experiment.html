@@ -7,9 +7,31 @@
 <style>
 :root{font-family:Inter,"Segoe UI",Arial,sans-serif;background:#f6f7f9;color:#111827}
 body{margin:0}
-header{padding:10px 16px;background:#0f172a;color:white;display:flex;gap:12px;align-items:baseline}
+header{padding:8px 16px;background:#0f172a;color:white;display:flex;gap:14px;align-items:center}
 .title{font-size:16px;font-weight:800;letter-spacing:.3px}.brand-home{color:#fff;text-decoration:none;flex:0 0 auto}.brand-home:hover{text-decoration:underline}.tag{font-size:12px;color:#94a3b8}
+.tabs{display:inline-flex;border:1px solid #334155;border-radius:8px;overflow:hidden;background:#1e293b;margin-left:8px}
+.tabs button{border:0;height:28px;padding:0 14px;background:transparent;color:#cbd5e1;font-size:13px;font-weight:700;cursor:pointer}
+.tabs button+button{border-left:1px solid #334155}
+.tabs button:hover{background:#334155}
+.tabs button.active{background:#2563eb;color:#fff}
 main{padding:14px}
+.mr-actions{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:12px}
+.mr-actions .primary{background:#2563eb;border-color:#2563eb;color:#fff}
+.mr-actions .primary:hover{background:#1e4fd6}
+.mr-hint{font-size:12px;color:#64748b}
+.sessions{border:1px solid #e5e7eb;border-radius:8px;background:#fff;overflow:hidden}
+.sess-row{display:flex;gap:10px;align-items:center;padding:9px 12px;border-bottom:1px solid #f1f5f9}
+.sess-row:last-child{border-bottom:0}
+.sess-row:hover{background:#f8fafc}
+.sess-main{flex:1;min-width:0}
+.sess-main b{font-size:13px}
+.sess-meta{display:block;margin-top:2px;font-size:12px;color:#64748b;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.badge{display:inline-block;margin-left:6px;padding:1px 7px;border-radius:9px;font-size:11px;font-weight:700}
+.badge.open{background:#dbeafe;color:#1d4ed8}
+.badge.bad{background:#fee2e2;color:#b91c1c}
+.leaf-open.disabled{opacity:.45;cursor:not-allowed}
+.sess-del{flex:0 0 auto;height:26px;width:26px;padding:0;border:1px solid #e5e7eb;border-radius:6px;background:#fff;color:#94a3b8;font-size:13px;cursor:pointer}
+.sess-del:hover{background:#fee2e2;color:#b91c1c;border-color:#fecaca}
 .cards{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:12px}
 .card{min-width:120px;padding:8px 10px;border:1px solid #e5e7eb;border-radius:8px;background:#fff}
 .k{font-size:10px;color:#6b7280;text-transform:uppercase;letter-spacing:.4px}.v{font-size:18px;font-weight:800;margin-top:2px}
@@ -56,17 +78,34 @@ main{padding:14px}
 </style>
 </head>
 <body>
-<header><a class="title brand-home" href="/" title="Back to home">ACCELERANDO</a><span class="tag">experiment · parameter tree</span></header>
+<header>
+  <a class="title brand-home" href="/" title="Home">ACCELERANDO</a>
+  <nav class="tabs">
+    <button id="tabManual" type="button">Manual replay</button>
+    <button id="tabQuant" type="button">Quant backtests</button>
+  </nav>
+  <span class="tag" id="headerTag"></span>
+</header>
 <main>
-  <div class="cards" id="cards"></div>
-  <div class="toolbar">
-    <input type="text" id="search" placeholder="filter runs by label...">
-    <input type="number" id="minTrades" min="0" placeholder="min trades">
-    <button id="expandAll">Expand all</button>
-    <button id="collapseAll">Collapse all</button>
-  </div>
-  <details class="shared" id="shared"><summary>Shared parameters (same for every run)</summary><div class="shared-groups" id="sharedGroups"></div></details>
-  <div id="tree"></div>
+  <section id="manualView" style="display:none">
+    <div class="mr-actions">
+      <button class="primary" id="newReplay" title="Start a bar replay with warmup context">New bar replay</button>
+      <button id="newReplayRandom" title="Start a bar replay at a random spot (unbiased practice)">Replay @ random</button>
+      <span class="mr-hint">Sessions autosave on every action — resume or delete them below. Greyed rows were recorded with different data.</span>
+    </div>
+    <div id="sessions" class="sessions"></div>
+  </section>
+  <section id="quantView" style="display:none">
+    <div class="cards" id="cards"></div>
+    <div class="toolbar">
+      <input type="text" id="search" placeholder="filter runs by label...">
+      <input type="number" id="minTrades" min="0" placeholder="min trades">
+      <button id="expandAll">Expand all</button>
+      <button id="collapseAll">Collapse all</button>
+    </div>
+    <details class="shared" id="shared"><summary>Shared parameters (same for every run)</summary><div class="shared-groups" id="sharedGroups"></div></details>
+    <div id="tree"></div>
+  </section>
 </main>
 <script>
 const fmt=(n,d=2)=>(n===null||n===undefined||!isFinite(n))?"-":Number(n).toLocaleString(undefined,{maximumFractionDigits:d,minimumFractionDigits:d});
@@ -263,7 +302,82 @@ function renderShared(){
     }</div></div>`).join("");
 }
 
+// Right-click is reserved for a future custom menu: suppress the browser menu everywhere.
+document.addEventListener("contextmenu",ev=>ev.preventDefault());
+
+// ---- manual replay tab ----
+let REPLAY_ENABLED=false;
+function setTab(tab,persist=true){
+  const manual=tab==="manual"&&REPLAY_ENABLED;
+  document.getElementById("manualView").style.display=manual?"":"none";
+  document.getElementById("quantView").style.display=manual?"none":"";
+  document.getElementById("tabManual").classList.toggle("active",manual);
+  document.getElementById("tabQuant").classList.toggle("active",!manual);
+  document.getElementById("headerTag").textContent=manual?"manual bar replay · practice & review":"experiment · parameter tree";
+  if(persist)try{localStorage.setItem("accelerando.homeTab",manual?"manual":"quant");}catch(_){}
+}
+async function createReplay(body){
+  const r=await fetch("/api/replay/new",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body||{})});
+  const data=await r.json().catch(()=>({}));
+  if(!r.ok||data.ok===false){ alert(data.error||"failed to create replay"); return; }
+  location.href=data.url;
+}
+async function loadSessions(){
+  const el=document.getElementById("sessions");
+  let data;
+  try{
+    const r=await fetch("/api/replay/sessions");
+    if(!r.ok)throw new Error(String(r.status));
+    data=await r.json();
+  }catch(_){
+    REPLAY_ENABLED=false;
+    document.getElementById("tabManual").style.display="none";
+    setTab("quant",false);
+    return;
+  }
+  REPLAY_ENABLED=true;
+  const list=data.sessions||[];
+  if(!list.length){
+    el.innerHTML='<div class="empty">No saved replay sessions yet — start one above.</div>';
+    return;
+  }
+  el.innerHTML=list.map(s=>{
+    const pct=s.total_bars?(((s.cursor+1)/s.total_bars)*100).toFixed(1):"0";
+    const when=new Date(s.updated_at_ms).toLocaleString();
+    const state=s.position_open?'<span class="badge open">position open</span>':(s.pending_order?'<span class="badge open">order pending</span>':"");
+    const badge=s.compatible?state:`<span class="badge bad" title="recorded with: ${html(s.source)}">data mismatch</span>`;
+    const open=s.compatible
+      ?`<a class="leaf-open" href="/replay?id=${encodeURIComponent(s.id)}">Open</a>`
+      :`<span class="leaf-open disabled" title="Recorded with: ${html(s.source)} — start the server with that feed to resume">Open</span>`;
+    return `<div class="sess-row"${s.compatible?"":' style="opacity:.6"'}>
+      <div class="sess-main"><b>${html(s.id)}</b>${badge}
+        <span class="sess-meta">updated ${html(when)} · bar ${s.cursor+1} / ${s.total_bars} (${pct}%) · ${s.trades} trades · realized <span class="${s.realized_pnl>=0?"pos":"neg"}">$${fmt(s.realized_pnl)}</span></span>
+      </div>
+      ${open}
+      <button class="sess-del" data-id="${html(s.id)}" title="Delete this replay record (cannot be undone)">&#10005;</button>
+    </div>`;
+  }).join("");
+  for(const b of el.querySelectorAll(".sess-del")){
+    b.onclick=async()=>{
+      const id=b.dataset.id;
+      if(!confirm(`Delete replay record ${id}?\nThe session file and its trade history will be removed permanently.`))return;
+      const r=await fetch("/api/replay/delete?id="+encodeURIComponent(id),{method:"POST"});
+      const d=await r.json().catch(()=>({}));
+      if(!r.ok||d.ok===false){ alert(d.error||"delete failed"); return; }
+      loadSessions();
+    };
+  }
+}
+document.getElementById("tabManual").addEventListener("click",()=>setTab("manual"));
+document.getElementById("tabQuant").addEventListener("click",()=>setTab("quant"));
+document.getElementById("newReplay").addEventListener("click",()=>createReplay({}));
+document.getElementById("newReplayRandom").addEventListener("click",()=>createReplay({random_start:true}));
+
 async function init(){
+  await loadSessions();
+  let stored="manual";
+  try{ stored=localStorage.getItem("accelerando.homeTab")||"manual"; }catch(_){}
+  setTab(REPLAY_ENABLED?stored:"quant",false);
   const exp=await (await fetch("/api/experiment")).json();
   ALL_RUNS=exp.runs||[];
   for(const r of ALL_RUNS){

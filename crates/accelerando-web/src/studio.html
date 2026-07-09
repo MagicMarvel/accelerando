@@ -8,15 +8,20 @@
   :root { color-scheme: light; font-family: Inter, "Segoe UI", Arial, sans-serif; background:#f6f7f9; color:#111827; }
   * { box-sizing: border-box; }
   body { margin:0; height:100vh; display:grid; grid-template-rows:auto 1fr; overflow:hidden; }
-  header { padding:10px 16px; background:#0f172a; color:#fff; display:flex; align-items:baseline; gap:12px; }
-  header .title { font-size:16px; font-weight:800; letter-spacing:.3px; }
-  header .brand-home { color:#fff; text-decoration:none; flex:0 0 auto; }
-  header .brand-home:hover { text-decoration:underline; }
-  header .tag { font-size:12px; color:#94a3b8; }
-  header .run-title { font-size:12px; font-weight:700; color:#e2e8f0; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; max-width:28vw; }
+  /* Compact dark header that also hosts the chart controls (trade nav, chart mode,
+     panel toggles) so no separate toolbar row eats vertical space. */
+  header { padding:6px 12px; background:#0f172a; color:#fff; display:flex; align-items:center; gap:8px; flex-wrap:wrap; }
+  header .home-btn { flex:0 0 auto; display:inline-flex; align-items:center; gap:6px; height:26px; padding:0 10px; color:#e2e8f0; text-decoration:none; font-size:13px; font-weight:700; border:1px solid #334155; border-radius:8px; background:#1e293b; }
+  header .home-btn:hover { background:#334155; }
   header .meta-toggle { background:#1e293b; border-color:#334155; color:#cbd5e1; }
   header .meta-toggle:hover { background:#334155; }
-  header .status { margin-left:auto; font-size:12px; color:#cbd5e1; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; max-width:45vw;}
+  header .rng { margin-left:auto; font-size:12px; color:#94a3b8; white-space:nowrap; }
+  header .status { font-size:12px; color:#cbd5e1; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; max-width:40vw;}
+  header .heat-pick { font-size:12px; color:#94a3b8; display:inline-flex; gap:5px; align-items:center; }
+  header .heat-pick select { height:26px; background:#1e293b; color:#cbd5e1; border:1px solid #334155; border-radius:6px; font-size:12px; }
+  button.tool-toggle { height:26px; padding:0 10px; border-radius:8px; background:#1e293b; border:1px solid #334155; color:#cbd5e1; font-size:12px; }
+  button.tool-toggle:hover { background:#334155; }
+  button.tool-toggle.active { background:#2563eb; border-color:#2563eb; color:#fff; }
   .main { display:grid; grid-template-columns:360px 1fr; min-height:0; }
   body.viewer .main { grid-template-columns:1fr; }
   body.viewer .side { display:none; }
@@ -44,11 +49,17 @@
   .run .mt { color:#64748b; }
   .pos { color:#2563eb; } .neg { color:#d97706; }
   .err { color:#b45309; font-size:12px; }
-  .content { display:grid; grid-template-rows:auto auto auto 1fr; min-height:0; }
-  .cards { display:flex; gap:8px; flex-wrap:wrap; padding:10px 14px; background:#fff; border-bottom:1px solid #e2e8f0; }
+  /* Flex column instead of a fixed-row grid: the chart area always takes the remaining
+     height no matter how many bars (cards, toolbar, replay panel) precede it, and
+     position:fixed overlays don't shift the layout. */
+  .content { display:flex; flex-direction:column; min-height:0; }
+  .content > * { flex:0 0 auto; }
+  .content > .chart-area { flex:1 1 0; min-height:0; }
+  /* Tool surfaces get a slate tint so the (light) chart plane reads as "the chart". */
+  .cards { display:flex; gap:8px; flex-wrap:wrap; padding:8px 14px; background:#e7edf5; border-bottom:1px solid #d3dce8; }
   .cards.collapsed { padding:0; border-bottom:0; }
   .cards.collapsed > * { display:none; }
-  .card { min-width:104px; padding:6px 10px; border:1px solid #e5e7eb; border-radius:8px; background:#fbfcfe; }
+  .card { min-width:104px; padding:6px 10px; border:1px solid #d3dce8; border-radius:8px; background:#fff; }
   .card .k { font-size:10px; color:#6b7280; text-transform:uppercase; letter-spacing:.4px; }
   .card .v { font-size:16px; font-weight:700; margin-top:2px; }
   .run-meta-backdrop { display:none; position:fixed; inset:0; z-index:49; background:rgba(15,23,42,0.30); }
@@ -71,15 +82,11 @@
   .run-meta .meta-param { display:inline-flex; gap:4px; max-width:100%; padding:2px 5px; border:1px solid #e5e7eb; border-radius:6px; background:#fff; font-size:11px; }
   .run-meta .meta-param b { color:#475569; font-weight:600; overflow:hidden; text-overflow:ellipsis; }
   .run-meta .meta-param span { font-family:Consolas,"SFMono-Regular",monospace; overflow:hidden; text-overflow:ellipsis; }
-  .toolbar { display:flex; align-items:center; gap:8px; padding:6px 14px; background:#fff; border-bottom:1px solid #e2e8f0; overflow-x:auto; white-space:nowrap; scrollbar-width:thin; }
-  .toolbar > * { flex:0 0 auto; }
-  .toolbar .rng { margin-left:auto; font-size:12px; color:#475569; }
-  .toolbar button.tool-toggle { height:28px; padding:0 10px; border-radius:8px; }
-  .toolbar button.tool-toggle.active { background:#0f172a; border-color:#0f172a; color:#fff; }
-  .seg { display:inline-flex; border:1px solid #cbd5e1; border-radius:8px; overflow:hidden; background:#fff; }
-  .seg button { border:0; border-radius:0; height:28px; padding:0 10px; }
-  .seg button + button { border-left:1px solid #cbd5e1; }
-  .seg button.active { background:#0f172a; color:#fff; }
+  .seg { display:inline-flex; border:1px solid #334155; border-radius:8px; overflow:hidden; background:#1e293b; }
+  .seg button { border:0; border-radius:0; height:26px; padding:0 10px; background:transparent; color:#cbd5e1; font-size:12px; }
+  .seg button + button { border-left:1px solid #334155; }
+  .seg button:hover { background:#334155; }
+  .seg button.active { background:#2563eb; color:#fff; }
   .charts { --equity-height:180px; position:relative; display:grid; grid-template-rows:minmax(160px,1fr) 7px minmax(80px,var(--equity-height)); min-height:0; }
   .charts.equity-collapsed { grid-template-rows:minmax(160px,1fr) 0 0; }
   .charts.equity-collapsed .splitter, .charts.equity-collapsed #equity { display:none; }
@@ -87,16 +94,22 @@
   .splitter:hover, .splitter.dragging { background:#dbeafe; }
   canvas { display:block; width:100%; height:100%; background:#fbfcfe; cursor:grab; }
   canvas.dragging { cursor:grabbing; }
-  .chart-area { display:grid; grid-template-columns:46px 1fr; min-height:0; }
-  .chart-tools { display:flex; flex-direction:column; align-items:center; gap:8px; padding:8px 5px; background:#fff; border-right:1px solid #e2e8f0; }
+  .chart-area { position:relative; display:grid; grid-template-columns:46px 1fr; min-height:0; }
+  .vwap-menu { display:none; position:absolute; z-index:9; min-width:220px; background:#fff; border:1px solid #cbd5e1; border-radius:8px; box-shadow:0 8px 24px rgba(15,23,42,.18); padding:4px; }
+  .vwap-menu.visible { display:flex; flex-direction:column; gap:2px; }
+  .vwap-menu button { border:0; background:#fff; text-align:left; padding:7px 10px; border-radius:6px; font-size:12.5px; cursor:pointer; }
+  .vwap-menu button:hover { background:#eff6ff; }
+  .vwap-menu .on { font-weight:700; color:#1d4ed8; }
+  .chart-tools { display:flex; flex-direction:column; align-items:center; gap:8px; padding:8px 5px; background:#e7edf5; border-right:1px solid #d3dce8; }
   .chart-tools button { width:34px; height:34px; padding:0; font-size:16px; line-height:1; border-radius:8px; display:flex; align-items:center; justify-content:center; }
   .chart-tools button.active { background:#0f172a; border-color:#0f172a; color:#fff; }
   .chart-tools button.tool-label { font-size:12px; font-weight:800; }
-  .anno-tools { display:none; align-items:center; gap:6px; padding:2px 6px; border:1px solid #cbd5e1; border-radius:8px; background:#f8fafc; }
+  .anno-tools { display:none; align-items:center; gap:6px; padding:2px 6px; border:1px solid #334155; border-radius:8px; background:#1e293b; }
   .anno-tools.visible { display:inline-flex; }
-  .anno-tools select { height:26px; border:1px solid #cbd5e1; border-radius:6px; font-size:12px; background:#fff; }
-  .anno-tools button { height:26px; padding:0 8px; border-radius:6px; font-size:12px; }
-  .anno-hint { font-size:11px; color:#475569; white-space:nowrap; }
+  .anno-tools select { height:24px; border:1px solid #334155; border-radius:6px; font-size:12px; background:#0f172a; color:#e2e8f0; }
+  .anno-tools button { height:24px; padding:0 8px; border-radius:6px; font-size:12px; background:#1e293b; border-color:#334155; color:#cbd5e1; }
+  .anno-tools button:hover { background:#334155; }
+  .anno-hint { font-size:11px; color:#94a3b8; white-space:nowrap; }
   .chart-legend { position:absolute; left:10px; top:8px; z-index:4; pointer-events:none; font-size:12px; }
   .legend-card { pointer-events:auto; min-width:132px; background:rgba(255,255,255,0.92); border:1px solid rgba(203,213,225,0.75); border-radius:8px; box-shadow:0 1px 6px rgba(15,23,42,0.10); overflow:hidden; user-select:none; }
   .legend-head { display:flex; align-items:center; gap:6px; padding:4px 9px; cursor:pointer; color:#475569; font-weight:700; }
@@ -124,10 +137,29 @@
 </head>
 <body class="viewer">
 <header>
-  <a class="title brand-home" href="/" title="Back to home">ACCELERANDO</a>
-  <span class="tag">studio - the world has been accelerated</span>
-  <span class="run-title" id="runTitle"></span>
+  <a class="home-btn" href="/" title="Back to home">&#8962; Home</a>
+  <span class="seg" aria-label="trade navigation">
+    <button id="tradeFirst" title="Jump to first trade">First</button>
+    <button id="tradePrev" title="Jump to previous trade">Prev</button>
+    <button id="tradeNext" title="Jump to next trade">Next</button>
+    <button id="tradeLast" title="Jump to last trade">Last</button>
+  </span>
+  <span class="seg" aria-label="chart mode">
+    <button id="modeCandles" class="active" title="Candlestick chart">Candles</button>
+    <button id="modeFootprint" title="Footprint chart">Footprint</button>
+    <button id="modeHeatmap" title="L2 heatmap chart">Heatmap</button>
+  </span>
+  <label class="heat-pick">heat <select id="heatMetric"><option value="total">total</option><option value="bid">bid</option><option value="ask">ask</option></select></label>
+  <button id="toggleMetrics" class="tool-toggle active" type="button" title="Hide metrics" aria-pressed="true">Metrics</button>
+  <button id="toggleEquity" class="tool-toggle active" type="button" title="Hide equity" aria-pressed="true">Equity</button>
   <button id="toggleRunMeta" class="meta-toggle" type="button" style="display:none;"></button>
+  <span id="annoTools" class="anno-tools">
+    <select id="annoLabel" title="Annotation label"></select>
+    <button id="annoSave" type="button" title="Save current box (Enter)" disabled>Save</button>
+    <button id="annoCancel" type="button" title="Cancel current box (Esc)" disabled>Cancel</button>
+    <span id="annoHint" class="anno-hint"></span>
+  </span>
+  <span class="rng" id="range"></span>
   <span class="status" id="status"></span>
 </header>
 <div class="main">
@@ -163,34 +195,14 @@
     <div class="cards" id="cards"></div>
     <div class="run-meta-backdrop" id="runMetaBackdrop"></div>
     <div class="run-meta" id="runMeta"></div>
-    <div class="toolbar">
-      <span class="seg" aria-label="trade navigation">
-        <button id="tradeFirst" title="Jump to first trade">First</button>
-        <button id="tradePrev" title="Jump to previous trade">Previous</button>
-        <button id="tradeNext" title="Jump to next trade">Next</button>
-        <button id="tradeLast" title="Jump to last trade">Last</button>
-      </span>
-      <span class="seg" aria-label="chart mode">
-        <button id="modeCandles" class="active" title="Candlestick chart">Candles</button>
-        <button id="modeFootprint" title="Footprint chart">Footprint</button>
-        <button id="modeHeatmap" title="L2 heatmap chart">Heatmap</button>
-      </span>
-      <label style="font-size:12px;color:#374151;display:inline-flex;gap:6px;align-items:center;">heat <select id="heatMetric" style="height:26px;border:1px solid #cbd5e1;border-radius:6px;font-size:12px;"><option value="total">total</option><option value="bid">bid</option><option value="ask">ask</option></select></label>
-      <button id="toggleMetrics" class="tool-toggle active" type="button" title="Hide metrics" aria-pressed="true">Metrics</button>
-      <button id="toggleEquity" class="tool-toggle active" type="button" title="Hide equity" aria-pressed="true">Equity</button>
-      <span id="annoTools" class="anno-tools">
-        <select id="annoLabel" title="Annotation label"></select>
-        <button id="annoSave" type="button" title="Save current box (Enter)" disabled>Save</button>
-        <button id="annoCancel" type="button" title="Cancel current box (Esc)" disabled>Cancel</button>
-        <span id="annoHint" class="anno-hint"></span>
-      </span>
-      <span class="rng" id="range"></span>
-    </div>
     <div class="chart-area">
       <div class="chart-tools">
         <button id="toggleCross" type="button" title="Crosshair (C)" aria-pressed="true">&#10011;</button>
         <button id="centerPrice" type="button" title="Fit visible range to screen" aria-label="Fit visible range to screen">&#9974;</button>
-        <button id="toggleVp" class="tool-label" type="button" title="Volume profile: drag a box, click an existing one to remove it (V)" aria-pressed="false">VP</button>
+        <button id="toggleVp" class="tool-label" type="button" title="Volume profile (V): drag a bar range; select a profile later to resize, move or Delete it" aria-pressed="false">VP</button>
+        <button id="toolHline" type="button" title="Horizontal line (H): click the chart to place one; select it later and press Delete to remove" aria-pressed="false">&#8213;</button>
+        <button id="toolRect" type="button" title="Rectangle (R): drag on the chart to draw one; select it later and press Delete to remove" aria-pressed="false">&#9645;</button>
+        <button id="toolVwap" class="tool-label" type="button" title="VWAP: daily / weekly / anchored to a bar you pick" aria-pressed="false">VW</button>
         <button id="toggleAnnotate" type="button" title="Toggle annotation mode (A)" aria-pressed="false" style="display:none;">&#9998;</button>
       </div>
       <div class="charts">
@@ -241,6 +253,12 @@ let legendCollapsed=readStoredBool("accelerando.legendCollapsed",false);
 const fmt=(n,d=2)=>(n===null||n===undefined||!isFinite(n))?"-":Number(n).toLocaleString(undefined,{maximumFractionDigits:d,minimumFractionDigits:d});
 const fmtTs=ns=>new Date(Number(ns)/1e6).toLocaleString();
 const fmtAxisTs=ns=>new Date(Number(ns)/1e6).toLocaleTimeString([], {hour:"2-digit", minute:"2-digit"});
+// TradingView-style crosshair time tag: weekday + date + time.
+const WEEKDAYS_CN=["周日","周一","周二","周三","周四","周五","周六"];
+function fmtCrosshairTs(ns){
+  const d=new Date(Number(ns)/1e6), pad=n=>String(n).padStart(2,"0");
+  return `${WEEKDAYS_CN[d.getDay()]} ${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())}  ${pad(d.getHours())}:${pad(d.getMinutes())}`;
+}
 const sc=n=>n>=0?"pos":"neg";
 const esc=s=>String(s??"").replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;","'":"&#39;"}[c]));
 function fmtParam(v){
@@ -1056,7 +1074,7 @@ function drawFootprints(ctx,vis,L,T,ph,xStep,y,tick){
         ctx.fillStyle=`rgba(100,116,139,${0.08+0.48*profileN})`;
         ctx.fillRect(vpX,yy,Math.max(1,profileW*profileN),hh);
         if(showExtraText&&hh>=8){
-          ctx.fillStyle=COLORS.tradeText; ctx.textAlign="center";
+          ctx.fillStyle="#111827"; ctx.textAlign="center";
           ctx.fillText(Math.round(sell),sellX+flowW/2,yy+hh/2);
           ctx.fillText(Math.round(buy),buyX+flowW/2,yy+hh/2);
         }
@@ -1071,7 +1089,7 @@ function drawFootprints(ctx,vis,L,T,ph,xStep,y,tick){
         ctx.fillStyle=colorAlpha(COLORS.buy,buyA); ctx.fillRect(x,yy,half,hh);
       }
       if(!showProfile&&showText&&hh>=8){
-        ctx.fillStyle=COLORS.tradeText;
+        ctx.fillStyle="#111827";
         ctx.textAlign="right"; ctx.fillText(Math.round(sell),x-3,yy+hh/2);
         ctx.textAlign="left"; ctx.fillText(Math.round(buy),x+3,yy+hh/2);
       }
@@ -1108,6 +1126,7 @@ function drawPrice(){
   else drawCandles(pctx,vis,L,T,ph,xStep,cw,y);
   drawPriceBoxes(pctx,vis,L,T,pw,ph,xStep,y,labelLayout);
   drawAnnotations(pctx,L,T,pw,ph,xStep,y,s,e);
+  drawDrawings(pctx,L,T,pw,ph,xStep,y,s,e);
   drawVolumeProfiles(pctx,vis,L,T,pw,ph,xStep,y,tick,labelLayout);
   drawVpProfiles(pctx,L,T,pw,ph,xStep,y,tick,s,e,labelLayout);
   drawPlotMarkers(pctx,vis,L,T,ph,xStep,y,labelLayout);
@@ -1136,7 +1155,7 @@ function drawPrice(){
       pctx.setLineDash([]); pctx.restore();
       const pAt=hi-(hover.y-T)/Math.max(1,ph)*(hi-lo);
       axisPriceTag(pctx,W,R,hover.y,pAt.toFixed(2),"#334155");
-      axisTimeTag(pctx,x,T+ph,fmtAxisTs(b.ts_last_ns),L,pw);
+      axisTimeTag(pctx,x,T+ph,fmtCrosshairTs(b.ts_last_ns),L,pw);
     }
     const tags=b.tags?Object.entries(b.tags).map(([k,v])=>`${k}:${v}`).join(" "):""; const base=`${s+idx+1}/${fps.length}  ${fmtTs(b.ts_last_ns)}  O ${b.open.toFixed(2)} H ${b.high.toFixed(2)} L ${b.low.toFixed(2)} C ${b.close.toFixed(2)}  D ${fmt(b.delta,0)}  ${tags}`; if(chartMode==="footprint"){ const totals=footprintTotals(b); const priceAt=hi-(hover.y-T)/Math.max(1,ph)*(hi-lo); const lv=nearestFootprintLevel(b,priceAt); $("status").textContent=base+`  bar sell/buy ${fmt(totals.sell,0)}/${fmt(totals.buy,0)}  level ${lv?lv.price.toFixed(2):priceAt.toFixed(2)} sell/buy ${lv?fmt(lv.sell_vol,0):"-"}/${lv?fmt(lv.buy_vol,0):"-"}`; } else { $("status").textContent=base; } } }
   $("range").textContent=`bars ${s+1}-${e} / ${fps.length}`;
@@ -1192,7 +1211,16 @@ function updateAnnotationHelp(){
   if(!help)return;
   if(!(annotationConfig.enabled&&annotationMode)){ help.classList.remove("visible"); help.innerHTML=""; return; }
   help.classList.add("visible");
-  help.innerHTML=`<b>Annotation mode</b>: drag on the price chart to draw a box. ${esc(annotationHintText())}. Saved boxes go to ${esc(annotationConfig.save_path||"annotation JSONL")}.`;
+  help.innerHTML=`<b>Annotation mode</b>: drag on the price chart to draw a box; leave annotation mode, click a saved box and press Delete to remove it. ${esc(annotationHintText())}. Saved boxes go to ${esc(annotationConfig.save_path||"annotation JSONL")}.`;
+}
+// In annotation mode, right-clicking inside a saved box deletes it (with confirmation).
+function annotationAt(ev){
+  const p=pointToAnnotationCoord(ev);
+  if(!p)return null;
+  return [...annotations].reverse().find(a=>
+    a.bar_start!=null&&a.bar_end!=null&&a.price_low!=null&&a.price_high!=null&&
+    p.idx+1>=Math.min(a.bar_start,a.bar_end)&&p.idx+1<=Math.max(a.bar_start,a.bar_end)&&
+    p.price>=Math.min(a.price_low,a.price_high)&&p.price<=Math.max(a.price_low,a.price_high))||null;
 }
 async function loadAnnotations(){
   if(!annotationConfig.enabled){ annotations=[]; return; }
@@ -1201,6 +1229,8 @@ async function loadAnnotations(){
     if(!r.ok)return;
     const data=await r.json();
     annotations=Array.isArray(data.annotations)?data.annotations:[];
+    // The array was replaced, so a selected annotation would be a stale reference.
+    if(selectedShape&&selectedShape.kind==="annotation")selectedShape=null;
     draw();
   }catch(_){}
 }
@@ -1265,6 +1295,344 @@ async function saveAnnotationDraft(){
 }
 function cancelAnnotationDraft(){ annotationDraft=null; updateAnnotationUi(); draw(); }
 
+// ---------- user drawings: horizontal lines and rectangles ----------
+// One-shot tools: arming a tool draws exactly one shape, then the chart drops back to the
+// normal pan/zoom mode. Shapes are selected with a plain click and removed with Delete.
+// Stored per run in localStorage (bar indices are stable within a run/replay session).
+let drawings=[], drawTool=null, drawDraft=null, selectedShape=null, lastDown=null;
+function drawingsKey(){ return "accelerando.drawings."+(annotationRunId()||"default"); }
+function loadDrawings(){ try{ drawings=JSON.parse(localStorage.getItem(drawingsKey()))||[]; }catch(_){ drawings=[]; } }
+// Underscore-prefixed fields are per-session caches (VWAP series etc.), never persisted.
+function saveDrawings(){ try{ localStorage.setItem(drawingsKey(),JSON.stringify(drawings,(k,v)=>k.startsWith("_")?undefined:v)); }catch(_){} }
+function drawingId(){ return `dr_${Date.now().toString(36)}_${Math.random().toString(16).slice(2,6)}`; }
+function setDrawTool(tool){
+  drawTool=(tool&&drawTool!==tool)?tool:null;
+  drawDraft=null;
+  for(const [id,t] of [["toolHline","hline"],["toolRect","rect"],["toolVwap","vwap"]]){
+    const b=$(id);
+    if(b){ b.classList.toggle("active",drawTool===t); b.setAttribute("aria-pressed",String(drawTool===t)); }
+  }
+  price.style.cursor=drawTool?"crosshair":"";
+  draw();
+}
+function startDrawTool(ev){
+  const p=pointToAnnotationCoord(ev);
+  if(!p){ setDrawTool(null); return; }
+  if(drawTool==="hline"){
+    drawings.push({id:drawingId(),type:"hline",price:Number(p.price.toFixed(2))});
+    saveDrawings();
+    setDrawTool(null); // one-shot: straight back to pan mode
+  } else if(drawTool==="vwap"){
+    drawings.push({id:drawingId(),type:"vwap",anchor:"bar",i0:p.idx});
+    saveDrawings();
+    setDrawTool(null);
+  } else if(drawTool==="rect"){
+    drawDraft={type:"rect",i0:p.idx,i1:p.idx,p0:p.price,p1:p.price,dragging:true};
+    draw();
+  }
+  ev.preventDefault();
+}
+// ---- VWAP overlays ----
+// Cumulative price*volume / volume from an anchor. "day"/"week" reset at each session/week
+// boundary; "bar" starts at a user-picked bar. Values are cached and extended incrementally
+// as replay bars arrive; a rewind (shorter fps) triggers a full recompute.
+function vwapPoint(b){
+  let pv=0,vol=0;
+  const lad=b.ladder||[];
+  if(lad.length){ for(const lv of lad){ const v=(lv.buy_vol||0)+(lv.sell_vol||0); pv+=lv.price*v; vol+=v; } }
+  else { const v=b.volume||0; pv+=((b.high+b.low+b.close)/3)*v; vol+=v; }
+  return {pv,vol};
+}
+function vwapAnchorKey(d,b){
+  const t=new Date(Number(b.ts_last_ns)/1e6);
+  if(d.anchor==="day")return t.toDateString();
+  const off=(t.getDay()+6)%7; // Monday-based week
+  return new Date(t.getFullYear(),t.getMonth(),t.getDate()-off).toDateString();
+}
+function vwapValues(d){
+  const n=fps.length;
+  if(d._vals&&d._n===n)return d._vals;
+  if(!d._vals||d._n>n){ d._vals=new Array(n).fill(null); d._n=0; d._st={pv:0,vol:0,key:null}; d._rs=new Set(); }
+  if(d._vals.length<n)d._vals.length=n;
+  const st=d._st;
+  for(let i=d._n;i<n;i++){
+    const b=fps[i];
+    if(d.anchor==="bar"){
+      if(i<(d.i0||0)){ d._vals[i]=null; continue; }
+      if(i===(d.i0||0))d._rs.add(i);
+    } else {
+      const k=vwapAnchorKey(d,b);
+      if(k!==st.key){ st.key=k; st.pv=0; st.vol=0; d._rs.add(i); }
+    }
+    const q=vwapPoint(b);
+    st.pv+=q.pv; st.vol+=q.vol;
+    d._vals[i]=st.vol>0?st.pv/st.vol:null;
+  }
+  d._n=n;
+  return d._vals;
+}
+function vwapColor(d){ return d.anchor==="day"?"#f59e0b":d.anchor==="week"?"#7c3aed":"#0ea5e9"; }
+function vwapLabel(d){ return d.anchor==="day"?"VWAP D":d.anchor==="week"?"VWAP W":"AVWAP"; }
+function toggleVwapMenu(force){
+  let m=$("vwapMenu");
+  if(!m){ m=document.createElement("div"); m.id="vwapMenu"; m.className="vwap-menu"; document.querySelector(".chart-area").appendChild(m); }
+  const on=force!==undefined?force:!m.classList.contains("visible");
+  if(!on){ m.classList.remove("visible"); return; }
+  const has=a=>drawings.some(d=>d.type==="vwap"&&d.anchor===a);
+  m.innerHTML=`<button data-a="day" class="${has("day")?"on":""}">${has("day")?"&#10003; ":""}Daily VWAP (resets each session)</button>
+    <button data-a="week" class="${has("week")?"on":""}">${has("week")?"&#10003; ":""}Weekly VWAP (resets each Monday)</button>
+    <button data-a="bar">Anchored VWAP — click a bar</button>`;
+  for(const b of m.querySelectorAll("button")){
+    b.onclick=()=>{
+      const a=b.dataset.a;
+      toggleVwapMenu(false);
+      if(a==="bar"){ setDrawTool("vwap"); return; }
+      const ex=drawings.find(d=>d.type==="vwap"&&d.anchor===a);
+      if(ex)drawings=drawings.filter(d=>d!==ex);
+      else drawings.push({id:drawingId(),type:"vwap",anchor:a});
+      saveDrawings(); draw();
+    };
+  }
+  const btn=$("toolVwap"), br=btn.getBoundingClientRect(), ar=document.querySelector(".chart-area").getBoundingClientRect();
+  m.style.left=`${Math.round(br.right-ar.left+6)}px`;
+  m.style.top=`${Math.round(br.top-ar.top)}px`;
+  m.classList.add("visible");
+}
+function updateDrawDraft(ev){
+  if(!drawDraft||!drawDraft.dragging)return false;
+  const p=pointToAnnotationCoord(ev);
+  if(!p)return false;
+  drawDraft.i1=p.idx; drawDraft.p1=p.price;
+  draw();
+  return true;
+}
+function finalizeDrawDraft(){
+  const d=drawDraft; drawDraft=null;
+  if(d&&(d.i0!==d.i1||Math.abs(d.p0-d.p1)>1e-9)){
+    drawings.push({id:drawingId(),type:"rect",
+      i0:Math.min(d.i0,d.i1),i1:Math.max(d.i0,d.i1),
+      p0:Number(Math.min(d.p0,d.p1).toFixed(2)),p1:Number(Math.max(d.p0,d.p1).toFixed(2))});
+    saveDrawings();
+  }
+  setDrawTool(null);
+}
+// Topmost drawing (then annotation) under the cursor, for click-select and hover cursor.
+function shapeAt(ev){
+  if(!priceScale)return null;
+  const r=price.getBoundingClientRect(), mx=ev.clientX-r.left, my=ev.clientY-r.top;
+  const {s,L,T,pw,ph,lo,hi,xStep}=priceScale, y=p=>T+(hi-p)/(hi-lo)*ph;
+  if(mx<L||mx>L+pw||my<T||my>T+ph)return null;
+  for(let i=drawings.length-1;i>=0;i--){
+    const d=drawings[i];
+    if(d.type==="hline"){
+      if(Math.abs(y(d.price)-my)<=5)return {kind:"drawing",obj:d};
+    } else if(d.type==="vwap"){
+      const vals=d._vals;
+      if(!vals)continue;
+      const idx=clamp(Math.floor((mx-L)/xStep)+s,0,vals.length-1);
+      const v=vals[idx];
+      if(v!=null&&isFinite(v)&&Math.abs(y(v)-my)<=5)return {kind:"drawing",obj:d};
+    } else {
+      const x0=L+(Math.min(d.i0,d.i1)-s)*xStep, x1=L+(Math.max(d.i0,d.i1)+1-s)*xStep;
+      const y0=y(Math.max(d.p0,d.p1)), y1=y(Math.min(d.p0,d.p1));
+      if(mx>=x0-4&&mx<=x1+4&&my>=y0-4&&my<=y1+4)return {kind:"drawing",obj:d};
+    }
+  }
+  for(let i=vpProfiles.length-1;i>=0;i--){
+    const v=vpProfiles[i];
+    const x0=clamp(L+(v.i0-s)*xStep,L,L+pw), x1=clamp(L+(v.i1+1-s)*xStep,L,L+pw);
+    if(mx>=x0&&mx<=x1)return {kind:"vp",obj:v};
+  }
+  const ann=annotationAt(ev);
+  return ann?{kind:"annotation",obj:ann}:null;
+}
+function deleteSelectedShape(){
+  const sel=selectedShape;
+  if(!sel)return;
+  if(sel.kind==="drawing"){
+    drawings=drawings.filter(d=>d!==sel.obj);
+    saveDrawings();
+    selectedShape=null;
+    draw();
+    return;
+  }
+  if(sel.kind==="vp"){
+    vpProfiles=vpProfiles.filter(v=>v!==sel.obj);
+    selectedShape=null;
+    draw();
+    return;
+  }
+  fetch(`/api/annotations?id=${encodeURIComponent(annotationRunId())}&ann=${encodeURIComponent(sel.obj.id||"")}`,{method:"DELETE"})
+    .then(r=>r.json().catch(()=>({})).then(d=>({ok:r.ok&&d.ok!==false,error:d.error})))
+    .then(res=>{
+      if(res.ok){ annotations=annotations.filter(a=>a!==sel.obj); selectedShape=null; draw(); $("status").textContent="annotation deleted"; }
+      else $("status").textContent=res.error||"annotation delete failed";
+    })
+    .catch(err=>{ $("status").textContent="annotation delete failed: "+(err&&err.message?err.message:err); });
+}
+// ---- direct manipulation of drawings in pan mode (TradingView-style) ----
+// hlines drag vertically; rect corners resize; a selected rect's body drags the whole box.
+let shapeDrag=null;
+function shapeHandleAt(ev){
+  if(!priceScale||chartMode==="heatmap")return null;
+  const r=price.getBoundingClientRect(), mx=ev.clientX-r.left, my=ev.clientY-r.top;
+  const {s,L,T,pw,ph,lo,hi,xStep}=priceScale, y=p=>T+(hi-p)/(hi-lo)*ph;
+  if(mx<L||mx>L+pw||my<T||my>T+ph)return null;
+  for(let i=drawings.length-1;i>=0;i--){
+    const d=drawings[i];
+    if(d.type!=="rect")continue;
+    const x0=L+(d.i0-s)*xStep, x1=L+(d.i1+1-s)*xStep, yTop=y(d.p1), yBot=y(d.p0);
+    for(const cx of [{x:x0,ix:"i0"},{x:x1,ix:"i1"}]){
+      for(const cy of [{y:yTop,py:"p1"},{y:yBot,py:"p0"}]){
+        if(Math.abs(mx-cx.x)<=6&&Math.abs(my-cy.y)<=6)return {type:"corner",obj:d,ix:cx.ix,py:cy.py};
+      }
+    }
+  }
+  for(let i=drawings.length-1;i>=0;i--){
+    const d=drawings[i];
+    if(d.type==="hline"&&Math.abs(y(d.price)-my)<=5)return {type:"hline",obj:d};
+  }
+  // Volume-profile boxes: their left/right edges resize the bar range.
+  for(let i=vpProfiles.length-1;i>=0;i--){
+    const v=vpProfiles[i];
+    const x0=L+(v.i0-s)*xStep, x1=L+(v.i1+1-s)*xStep;
+    if(Math.abs(mx-x0)<=6)return {type:"vp-edge",obj:v,edge:"i0"};
+    if(Math.abs(mx-x1)<=6)return {type:"vp-edge",obj:v,edge:"i1"};
+  }
+  // Body-move only when the shape is already selected, so plain drags still pan the chart.
+  const sel=selectedShape&&selectedShape.kind==="drawing"?selectedShape.obj:null;
+  if(sel&&sel.type==="rect"){
+    const x0=L+(sel.i0-s)*xStep, x1=L+(sel.i1+1-s)*xStep, yTop=y(sel.p1), yBot=y(sel.p0);
+    if(mx>=x0&&mx<=x1&&my>=yTop&&my<=yBot){
+      const p=pointToAnnotationCoord(ev);
+      if(p)return {type:"move",obj:sel,grabIdx:p.idx,grabPrice:p.price,orig:{i0:sel.i0,i1:sel.i1,p0:sel.p0,p1:sel.p1}};
+    }
+  }
+  const selVp=selectedShape&&selectedShape.kind==="vp"?selectedShape.obj:null;
+  if(selVp){
+    const x0=L+(selVp.i0-s)*xStep, x1=L+(selVp.i1+1-s)*xStep;
+    if(mx>=x0&&mx<=x1){
+      const p=pointToAnnotationCoord(ev);
+      if(p)return {type:"vp-move",obj:selVp,grabIdx:p.idx,orig:{i0:selVp.i0,i1:selVp.i1}};
+    }
+  }
+  return null;
+}
+function shapeHandleCursor(h){
+  if(!h)return "";
+  if(h.type==="hline")return "ns-resize";
+  if(h.type==="vp-edge")return "ew-resize";
+  if(h.type==="move"||h.type==="vp-move")return "move";
+  return ((h.ix==="i0")===(h.py==="p1"))?"nwse-resize":"nesw-resize";
+}
+function updateShapeDrag(ev){
+  const sd=shapeDrag;
+  if(!sd)return;
+  const p=pointToAnnotationCoord(ev);
+  if(!p)return;
+  const d=sd.obj;
+  if(sd.type==="hline"){
+    d.price=p.price;
+  } else if(sd.type==="corner"){
+    d[sd.ix]=p.idx; d[sd.py]=p.price;
+    // Dragging a corner across the opposite edge flips which edge the cursor holds.
+    if(d.i0>d.i1){ const t=d.i0; d.i0=d.i1; d.i1=t; sd.ix=sd.ix==="i0"?"i1":"i0"; }
+    if(d.p0>d.p1){ const t=d.p0; d.p0=d.p1; d.p1=t; sd.py=sd.py==="p0"?"p1":"p0"; }
+  } else if(sd.type==="move"){
+    const di=p.idx-sd.grabIdx, dp=p.price-sd.grabPrice, w=sd.orig.i1-sd.orig.i0;
+    d.i0=Math.max(0,sd.orig.i0+di); d.i1=d.i0+w;
+    d.p0=sd.orig.p0+dp; d.p1=sd.orig.p1+dp;
+  } else if(sd.type==="vp-edge"){
+    d[sd.edge]=p.idx;
+    if(d.i0>d.i1){ const t=d.i0; d.i0=d.i1; d.i1=t; sd.edge=sd.edge==="i0"?"i1":"i0"; }
+    d.levels=computeVpLevels(d.i0,d.i1);
+  } else if(sd.type==="vp-move"){
+    const di=p.idx-sd.grabIdx, w=sd.orig.i1-sd.orig.i0;
+    d.i0=Math.max(0,sd.orig.i0+di); d.i1=d.i0+w;
+    d.levels=computeVpLevels(d.i0,d.i1);
+  }
+  draw();
+}
+function finalizeShapeDrag(){
+  const sd=shapeDrag;
+  if(!sd)return;
+  shapeDrag=null;
+  const d=sd.obj;
+  if(sd.type==="hline"){ d.price=Number(Number(d.price).toFixed(2)); saveDrawings(); }
+  else if(sd.type==="corner"||sd.type==="move"){
+    d.p0=Number(Number(d.p0).toFixed(2)); d.p1=Number(Number(d.p1).toFixed(2));
+    saveDrawings();
+  }
+  // vp-edge / vp-move: levels were recomputed live; profiles are session-local (not persisted).
+  draw();
+}
+function drawShapeHandles(ctx,points){
+  for(const [hx,hy] of points){
+    ctx.fillStyle="#fff"; ctx.strokeStyle="#2563eb"; ctx.lineWidth=1.4;
+    ctx.beginPath(); ctx.arc(hx,hy,3.5,0,Math.PI*2); ctx.fill(); ctx.stroke();
+  }
+}
+function drawDrawings(ctx,L,T,pw,ph,xStep,y,s,e){
+  ctx.save();
+  const all=drawDraft?[...drawings,drawDraft]:drawings;
+  for(const d of all){
+    const sel=selectedShape&&selectedShape.kind==="drawing"&&selectedShape.obj===d;
+    const draft=d===drawDraft, color="#2563eb";
+    if(d.type==="hline"){
+      const yy=y(d.price);
+      if(yy<T||yy>T+ph)continue;
+      ctx.strokeStyle=colorAlpha(color,sel?1:0.85); ctx.lineWidth=sel?2.4:1.4;
+      ctx.beginPath(); ctx.moveTo(L,yy); ctx.lineTo(L+pw,yy); ctx.stroke();
+      ctx.fillStyle=color; ctx.font="10px Segoe UI, Arial"; ctx.textAlign="left"; ctx.textBaseline="bottom";
+      ctx.fillText(Number(d.price).toFixed(2),L+4,yy-3);
+      if(sel)drawShapeHandles(ctx,[[L+pw/2,yy]]);
+    } else if(d.type==="vwap"){
+      const vals=vwapValues(d), vc=vwapColor(d);
+      ctx.strokeStyle=colorAlpha(vc,sel?1:0.9);
+      ctx.lineWidth=sel?2.6:1.6;
+      ctx.beginPath();
+      let started=false, lastX=null, lastY=null;
+      for(let i=Math.max(0,s);i<Math.min(e,vals.length);i++){
+        const v=vals[i];
+        if(v==null||!isFinite(v)){ started=false; continue; }
+        const x=L+(i-s+0.5)*xStep, yy=y(v);
+        if(yy<T-40||yy>T+ph+40){ started=false; continue; }
+        if(!started||(d._rs&&d._rs.has(i))){ ctx.moveTo(x,yy); started=true; }
+        else ctx.lineTo(x,yy);
+        lastX=x; lastY=yy;
+      }
+      ctx.stroke();
+      if(lastX!=null){
+        ctx.fillStyle=vc; ctx.font="700 10px Segoe UI, Arial"; ctx.textAlign="left"; ctx.textBaseline="bottom";
+        ctx.fillText(vwapLabel(d),Math.min(lastX+6,L+pw-52),lastY-4);
+      }
+      // Anchor marker for bar-anchored VWAP.
+      if(d.anchor==="bar"&&d.i0>=s&&d.i0<e&&vals[d.i0]!=null){
+        const ax=L+(d.i0-s+0.5)*xStep, ay=y(vals[d.i0]);
+        ctx.fillStyle="#fff"; ctx.strokeStyle=vc; ctx.lineWidth=1.6;
+        ctx.beginPath(); ctx.arc(ax,ay,4,0,Math.PI*2); ctx.fill(); ctx.stroke();
+      }
+      if(sel&&lastX!=null)drawShapeHandles(ctx,[[lastX,lastY]]);
+    } else {
+      const i0=Math.min(d.i0,d.i1), i1=Math.max(d.i0,d.i1);
+      if(i1<s||i0>e)continue;
+      const x0=clamp(L+(i0-s)*xStep,L,L+pw), x1=clamp(L+(i1+1-s)*xStep,L,L+pw);
+      const top=y(Math.max(d.p0,d.p1)), bot=y(Math.min(d.p0,d.p1));
+      const yy=Math.min(top,bot), hh=Math.max(2,Math.abs(bot-top)), w=Math.max(2,x1-x0);
+      if(yy>T+ph||yy+hh<T)continue;
+      ctx.fillStyle=colorAlpha(color,draft?0.10:0.08);
+      ctx.fillRect(x0,yy,w,hh);
+      ctx.strokeStyle=colorAlpha(color,sel||draft?1:0.85);
+      ctx.lineWidth=sel?2.4:1.4;
+      if(draft)ctx.setLineDash([6,4]);
+      ctx.strokeRect(x0,yy,w,hh);
+      ctx.setLineDash([]);
+      if(sel)drawShapeHandles(ctx,[[x0,yy],[x0+w,yy],[x0,yy+hh],[x0+w,yy+hh]]);
+    }
+  }
+  ctx.restore();
+}
+
 // ---------- volume/delta profile draw tool ----------
 function setVpMode(on){
   vpMode=!!on;
@@ -1311,20 +1679,23 @@ function finalizeVpDraft(){
   const i0=Math.min(vpDraft.startIdx,vpDraft.endIdx), i1=Math.max(vpDraft.startIdx,vpDraft.endIdx);
   vpDraft=null;
   if(i1<=i0){
-    // A plain click (no real drag): remove the topmost existing profile under the cursor, if any.
-    const hit=[...vpProfiles].reverse().find(p=>i0>=p.i0&&i0<=p.i1);
-    if(hit)vpProfiles=vpProfiles.filter(p=>p!==hit);
-    draw();
+    // A plain click (no real drag): nothing drawn, just leave the one-shot tool. Existing
+    // profiles are removed by selecting them in pan mode and pressing Delete.
+    setVpMode(false);
     return;
   }
   const levels=computeVpLevels(i0,i1);
-  if(levels.length)vpProfiles.push({id:`vp_${Date.now()}_${Math.random().toString(16).slice(2)}`,i0,i1,levels});
+  if(levels.length){
+    vpProfiles.push({id:`vp_${Date.now()}_${Math.random().toString(16).slice(2)}`,i0,i1,levels});
+    setVpMode(false); // one-shot: drawing a profile drops back to pan mode
+    return;
+  }
   draw();
 }
 // Renders as two back-to-back histograms per price level, split at a center spine: delta grows
 // left (colored by sign), total volume grows right (grey, POC row highlighted) -- same visual
 // language as the strategy-emitted VolumeProfile plot, just for a user-picked bar range.
-function drawVpProfileBox(ctx,i0,i1,levels,L,T,pw,ph,xStep,y,tick,s,e,labelLayout,draft){
+function drawVpProfileBox(ctx,i0,i1,levels,L,T,pw,ph,xStep,y,tick,s,e,labelLayout,draft,sel=false){
   if(i1<s||i0>=e||!levels.length)return;
   const x0=clamp(L+(i0-s)*xStep,L,L+pw), x1=clamp(L+(i1+1-s)*xStep,L,L+pw);
   const width=Math.max(2,x1-x0), half=width/2, mid=x0+half;
@@ -1350,12 +1721,13 @@ function drawVpProfileBox(ctx,i0,i1,levels,L,T,pw,ph,xStep,y,tick,s,e,labelLayou
     ctx.fillStyle=lv===poc?"#f59e0b":"rgba(100,116,139,0.75)";
     ctx.fillRect(mid,yy,Math.max(1,totalW),hh);
   }
-  ctx.strokeStyle=draft?"rgba(37,99,235,0.9)":"rgba(17,24,39,0.5)";
+  ctx.strokeStyle=draft?"rgba(37,99,235,0.9)":(sel?"rgba(37,99,235,0.95)":"rgba(17,24,39,0.5)");
   ctx.setLineDash(draft?[6,4]:[]);
-  ctx.lineWidth=draft?1.6:1;
+  ctx.lineWidth=draft?1.6:(sel?2.4:1);
   ctx.strokeRect(x0,T,width,ph);
   ctx.beginPath(); ctx.moveTo(mid,T); ctx.lineTo(mid,T+ph); ctx.strokeStyle="rgba(17,24,39,0.3)"; ctx.lineWidth=1; ctx.stroke();
   ctx.setLineDash([]);
+  if(sel)drawShapeHandles(ctx,[[x0,T+ph/2],[x1,T+ph/2]]);
   ctx.restore();
   if(isFinite(minY)){
     const t=vpTotals(levels);
@@ -1363,7 +1735,8 @@ function drawVpProfileBox(ctx,i0,i1,levels,L,T,pw,ph,xStep,y,tick,s,e,labelLayou
   }
 }
 function drawVpProfiles(ctx,L,T,pw,ph,xStep,y,tick,s,e,labelLayout){
-  for(const p of vpProfiles)drawVpProfileBox(ctx,p.i0,p.i1,p.levels,L,T,pw,ph,xStep,y,tick,s,e,labelLayout,false);
+  for(const p of vpProfiles)drawVpProfileBox(ctx,p.i0,p.i1,p.levels,L,T,pw,ph,xStep,y,tick,s,e,labelLayout,false,
+    !!(selectedShape&&selectedShape.kind==="vp"&&selectedShape.obj===p));
   if(vpDraft){
     const i0=Math.min(vpDraft.startIdx,vpDraft.endIdx), i1=Math.max(vpDraft.startIdx,vpDraft.endIdx);
     if(i1>i0)drawVpProfileBox(ctx,i0,i1,computeVpLevels(i0,i1),L,T,pw,ph,xStep,y,tick,s,e,labelLayout,true);
@@ -1377,11 +1750,12 @@ function drawAnnotationBox(ctx,ann,L,T,pw,ph,xStep,y,s,e,draft=false){
   const top=y(Math.max(ann.price_low,ann.price_high)), bot=y(Math.min(ann.price_low,ann.price_high));
   const yy=Math.min(top,bot), hh=Math.max(2,Math.abs(bot-top)), w=Math.max(2,x1-x0);
   const color=annotationColor(ann.label);
+  const sel=selectedShape&&selectedShape.kind==="annotation"&&selectedShape.obj===ann;
   ctx.save();
   ctx.fillStyle=colorAlpha(color,draft?0.10:0.07);
   ctx.fillRect(x0,yy,w,hh);
-  ctx.strokeStyle=colorAlpha(color,draft?0.95:0.78);
-  ctx.lineWidth=draft?2:1.5;
+  ctx.strokeStyle=colorAlpha(color,draft||sel?0.95:0.78);
+  ctx.lineWidth=draft?2:(sel?2.6:1.5);
   if(draft)ctx.setLineDash([6,4]);
   ctx.strokeRect(x0,yy,w,hh);
   ctx.setLineDash([]);
@@ -1558,6 +1932,7 @@ function attach(canvas,name){
     if(chartMode==="heatmap"&&name==="price"&&heatView){ const L=PADL,top=10,bottom=30,pw=Math.max(1,r.width-L-AXIS_W),ph=Math.max(1,r.height-top-bottom),factor=ev.deltaY<0?0.82:1.22; if(ev.shiftKey||x>r.width-AXIS_W){ heatZoomPrice(factor,clamp((ev.clientY-r.top-top)/ph,0,1)); } else { heatZoomTime(factor,clamp((x-L)/pw,0,1)); } draw(); scheduleHeatFetch(); return; }
     if(ev.shiftKey||x>r.width-AXIS_W){ const top=name==="price"?14:12,bottom=name==="price"?34:30; const frac=clamp((ev.clientY-r.top-top)/Math.max(1,r.height-top-bottom),0,1); zoomY(name,ev.deltaY<0?1.18:1/1.18,frac); } else { const ratio=clamp((x-PADL)/Math.max(1,r.width-PADL-AXIS_W),0,1); setBarsPerView(barsPerView*(ev.deltaY<0?0.82:1.22),ratio); }},{passive:false});
   canvas.addEventListener("mousedown",ev=>{
+    lastDown={x:ev.clientX,y:ev.clientY};
     // TradingView-style axis scaling: drag the right price axis vertically or the bottom
     // time axis horizontally to zoom instead of panning.
     const r=canvas.getBoundingClientRect(), mx=ev.clientX-r.left, my=ev.clientY-r.top;
@@ -1569,11 +1944,23 @@ function attach(canvas,name){
       drag={axis,name,x:ev.clientX,y:ev.clientY,start,bpv:barsPerView,lo:st?.lo,hi:st?.hi,heat:(chartMode==="heatmap"&&name==="price"&&heatView)?{t0:heatView.t0,t1:heatView.t1,pmin:heatView.pmin,pmax:heatView.pmax}:null};
       canvas.classList.add("dragging"); ev.preventDefault(); return;
     }
-    if(annotationMode&&name==="price"&&chartMode!=="heatmap"&&ev.button===0){ startAnnotationDraft(ev); return; } if(vpMode&&name==="price"&&chartMode!=="heatmap"&&ev.button===0){ startVpDraft(ev); return; } lockYZoom(name); const st=yZoom[name]; drag={x:ev.clientX,y:ev.clientY,start,name,lo:st?.lo,hi:st?.hi,heat:(chartMode==="heatmap"&&heatView)?{t0:heatView.t0,t1:heatView.t1,pmin:heatView.pmin,pmax:heatView.pmax}:null}; canvas.classList.add("dragging");});
+    if(drawTool&&name==="price"&&chartMode!=="heatmap"&&ev.button===0){ startDrawTool(ev); return; } if(annotationMode&&name==="price"&&chartMode!=="heatmap"&&ev.button===0){ startAnnotationDraft(ev); return; } if(vpMode&&name==="price"&&chartMode!=="heatmap"&&ev.button===0){ startVpDraft(ev); return; }
+    if(name==="price"&&chartMode!=="heatmap"&&ev.button===0&&!drawTool&&!annotationMode&&!vpMode){
+      const h=shapeHandleAt(ev);
+      if(h){ shapeDrag=h; selectedShape={kind:h.type.startsWith("vp")?"vp":"drawing",obj:h.obj}; draw(); ev.preventDefault(); return; }
+    }
+    lockYZoom(name); const st=yZoom[name]; drag={x:ev.clientX,y:ev.clientY,start,name,lo:st?.lo,hi:st?.hi,heat:(chartMode==="heatmap"&&heatView)?{t0:heatView.t0,t1:heatView.t1,pmin:heatView.pmin,pmax:heatView.pmax}:null}; canvas.classList.add("dragging");});
   canvas.addEventListener("mousemove",ev=>{const r=canvas.getBoundingClientRect(); hover={canvas:name,x:ev.clientX-r.left,y:ev.clientY-r.top};
-    if(!drag){
+    if(!drag&&!shapeDrag){
       const bottomH=(name==="price"&&chartMode!=="heatmap")?34:30;
-      canvas.style.cursor=hover.x>r.width-AXIS_W?"ns-resize":(hover.y>r.height-bottomH?"ew-resize":"");
+      let cur=hover.x>r.width-AXIS_W?"ns-resize":(hover.y>r.height-bottomH?"ew-resize":"");
+      if(!cur){
+        if(drawTool)cur="crosshair";
+        else if(name==="price"&&!annotationMode&&!vpMode&&chartMode!=="heatmap"){
+          cur=shapeHandleCursor(shapeHandleAt(ev))||(shapeAt(ev)?"pointer":"");
+        }
+      }
+      canvas.style.cursor=cur;
     }
     if(drag&&drag.axis){
       if(drag.axis==="y"){
@@ -1604,6 +1991,8 @@ function attach(canvas,name){
       const hit=hitEconomicEventMarker(hover.x,hover.y);
       if(hit)showEconomicEventPopover(hit.group,hit.x,hit.y,false); else hideEconomicEventPopover();
     }
+    if(name==="price"&&shapeDrag){ updateShapeDrag(ev); return; }
+    if(name==="price"&&drawDraft&&drawDraft.dragging){ updateDrawDraft(ev); return; }
     if(annotationMode&&name==="price"&&annotationDraft&&annotationDraft.dragging){ updateAnnotationDraft(ev); return; }
     if(vpMode&&name==="price"&&vpDraft&&vpDraft.dragging){ updateVpDraft(ev); return; }
     if(drag&&chartMode==="heatmap"&&drag.name==="price"&&drag.heat){ const L=PADL,top=10,bottom=30,pw=Math.max(1,r.width-L-AXIS_W),ph=Math.max(1,r.height-top-bottom); heatPan(ev.clientX-drag.x,ev.clientY-drag.y,pw,ph,drag.heat); draw(); scheduleHeatFetch(); return; }
@@ -1616,10 +2005,22 @@ function attach(canvas,name){
       ev.preventDefault();
     }
   });
-  canvas.addEventListener("click",ev=>{ if(name!=="price")return; const r=canvas.getBoundingClientRect(), x=ev.clientX-r.left, y=ev.clientY-r.top; const hit=hitEconomicEventMarker(x,y); if(hit){ pinnedEconEvent=hit.group; showEconomicEventPopover(hit.group,hit.x,hit.y,true); ev.preventDefault(); } else if(pinnedEconEvent){ pinnedEconEvent=null; hideEconomicEventPopover(true); draw(); } });
+  canvas.addEventListener("click",ev=>{
+    if(name!=="price")return;
+    const r=canvas.getBoundingClientRect(), x=ev.clientX-r.left, y=ev.clientY-r.top;
+    const hit=hitEconomicEventMarker(x,y);
+    if(hit){ pinnedEconEvent=hit.group; showEconomicEventPopover(hit.group,hit.x,hit.y,true); ev.preventDefault(); return; }
+    if(pinnedEconEvent){ pinnedEconEvent=null; hideEconomicEventPopover(true); draw(); }
+    // A plain click (not the tail of a pan) selects the drawing/annotation under the
+    // cursor; clicking empty chart deselects. Delete removes the selection.
+    if(lastDown&&(Math.abs(ev.clientX-lastDown.x)>4||Math.abs(ev.clientY-lastDown.y)>4))return;
+    if(drawTool||annotationMode||vpMode||chartMode==="heatmap")return;
+    const shape=shapeAt(ev);
+    if(shape||selectedShape){ selectedShape=shape; draw(); }
+  });
   canvas.addEventListener("mouseleave",()=>{hover=null; if(!pinnedEconEvent)hideEconomicEventPopover(); draw();});
 }
-window.addEventListener("mouseup",()=>{ if(annotationDraft)annotationDraft.dragging=false; if(vpDraft)finalizeVpDraft(); drag=null; price.classList.remove("dragging"); equity.classList.remove("dragging"); updateAnnotationUi(); });
+window.addEventListener("mouseup",()=>{ if(annotationDraft)annotationDraft.dragging=false; if(vpDraft)finalizeVpDraft(); if(drawDraft)finalizeDrawDraft(); if(shapeDrag)finalizeShapeDrag(); drag=null; price.classList.remove("dragging"); equity.classList.remove("dragging"); updateAnnotationUi(); });
 splitter.addEventListener("mousedown",ev=>{
   splitDrag={y:ev.clientY,h:equity.getBoundingClientRect().height};
   splitter.classList.add("dragging");
@@ -1652,6 +2053,16 @@ setCardsCollapsed(cardsCollapsed,false);
 $("toggleEquity").onclick=()=>setEquityCollapsed(!equityCollapsed);
 setEquityCollapsed(equityCollapsed,false);
 $("toggleVp").onclick=()=>setVpMode(!vpMode);
+$("toolHline").onclick=()=>setDrawTool("hline");
+$("toolRect").onclick=()=>setDrawTool("rect");
+$("toolVwap").onclick=()=>toggleVwapMenu();
+// Close the VWAP menu when clicking anywhere else.
+document.addEventListener("mousedown",ev=>{
+  const m=$("vwapMenu");
+  if(m&&m.classList.contains("visible")&&!m.contains(ev.target)&&ev.target.id!=="toolVwap")m.classList.remove("visible");
+},true);
+// Right-click is reserved for a future custom menu: suppress the browser menu everywhere.
+document.addEventListener("contextmenu",ev=>ev.preventDefault());
 function setCrosshair(on,persist=true){
   crosshairOn=!!on;
   const b=$("toggleCross");
@@ -1671,9 +2082,19 @@ window.addEventListener("keydown",ev=>{
   if(annotationConfig.enabled&&ev.key.toLowerCase()==="a"){ setAnnotationMode(!annotationMode); ev.preventDefault(); return; }
   if(ev.key.toLowerCase()==="v"){ setVpMode(!vpMode); ev.preventDefault(); return; }
   if(ev.key.toLowerCase()==="c"){ setCrosshair(!crosshairOn); ev.preventDefault(); return; }
+  if(ev.key.toLowerCase()==="h"){ setDrawTool("hline"); ev.preventDefault(); return; }
+  if(ev.key.toLowerCase()==="r"){ setDrawTool("rect"); ev.preventDefault(); return; }
+  if(ev.key==="Delete"||ev.key==="Backspace"){
+    if(selectedShape){ deleteSelectedShape(); ev.preventDefault(); }
+    return;
+  }
   if(ev.key==="Escape"){
     const rm=$("runMeta");
     if(rm&&rm.classList.contains("visible")&&!metaCollapsed){ setMetaCollapsed(true); ev.preventDefault(); return; }
+    const vm=$("vwapMenu");
+    if(vm&&vm.classList.contains("visible")){ vm.classList.remove("visible"); ev.preventDefault(); return; }
+    if(drawDraft||drawTool){ drawDraft=null; setDrawTool(null); ev.preventDefault(); return; }
+    if(selectedShape){ selectedShape=null; draw(); ev.preventDefault(); return; }
     if(vpDraft){ vpDraft=null; draw(); ev.preventDefault(); return; }
     if(vpMode){ setVpMode(false); ev.preventDefault(); return; }
     if(annotationMode){ cancelAnnotationDraft(); ev.preventDefault(); }
@@ -1688,6 +2109,7 @@ async function init(){
   document.body.classList.add("viewer");
   $("status").textContent="result viewer";
   setupAnnotations();
+  loadDrawings();
   resize();
   try{ await loadResult(); }
   catch(err){ $("status").textContent="Unable to load result: "+(err&&err.message?err.message:err); }

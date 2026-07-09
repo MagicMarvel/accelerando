@@ -188,11 +188,9 @@ where
         serde_json::to_string(&SummaryPayload { runs: &summaries }).expect("serialize summaries");
     let annotation_json =
         serde_json::to_string(&annotation_config).expect("serialize annotation config");
-    let index_html = if replay.is_some() {
-        replay::experiment_html_with_replay_button()
-    } else {
-        EXPERIMENT_HTML.to_string()
-    };
+    // The index page probes /api/replay/sessions itself and hides the manual-replay tab
+    // when replay is disabled, so one static page serves both configurations.
+    let index_html = EXPERIMENT_HTML.to_string();
     let addr = format!("0.0.0.0:{port}");
     let server = Server::http(&addr)
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, format!("bind {addr}: {e}")))?;
@@ -249,19 +247,44 @@ where
                 }
             }
             (Method::Post, "/api/replay/new") => match &replay {
-                Some(replay) => match replay.create_session() {
-                    Ok(state) => json_response(
-                        &serde_json::json!({ "ok": true, "id": state.id, "url": format!("/replay?id={}", state.id), "replay": state })
-                            .to_string(),
-                    ),
-                    Err(e) => json_error(400, &e),
-                },
+                Some(replay) => {
+                    let body = replay::read_json(&mut request).unwrap_or_default();
+                    match replay.create_session(body) {
+                        Ok(state) => json_response(
+                            &serde_json::json!({ "ok": true, "id": state.id, "url": format!("/replay?id={}", state.id), "replay": state })
+                                .to_string(),
+                        ),
+                        Err(e) => json_error(400, &e),
+                    }
+                }
+                None => json_error(404, "replay disabled"),
+            },
+            (Method::Get, "/api/replay/sessions") => match &replay {
+                Some(replay) => json_response(
+                    &serde_json::json!({ "sessions": replay.list_sessions() }).to_string(),
+                ),
+                None => json_error(404, "replay disabled"),
+            },
+            (Method::Post, "/api/replay/delete") => match &replay {
+                Some(replay) => {
+                    let id = query_param(&raw_url, "id").unwrap_or_default();
+                    match replay.delete_session(&id) {
+                        Ok(()) => json_response(&serde_json::json!({ "ok": true }).to_string()),
+                        Err(e) => json_error(400, &e),
+                    }
+                }
                 None => json_error(404, "replay disabled"),
             },
             (Method::Get, "/api/replay/state") => match &replay {
                 Some(replay) => {
                     let id = query_param(&raw_url, "id").unwrap_or_default();
-                    match replay.state_value(&id) {
+                    let since_fp = query_param(&raw_url, "since_fp")
+                        .and_then(|v| v.parse().ok())
+                        .unwrap_or(0);
+                    let since_eq = query_param(&raw_url, "since_eq")
+                        .and_then(|v| v.parse().ok())
+                        .unwrap_or(0);
+                    match replay.state_value(&id, since_fp, since_eq) {
                         Ok(value) => json_response(&value.to_string()),
                         Err(e) => json_error(404, &e),
                     }
@@ -288,12 +311,44 @@ where
                     let body = replay::read_json(&mut request).unwrap_or(replay::StepRequest {
                         count: Some(1),
                         to_ts_ms: None,
+                        stop_on_event: None,
                     });
+                    let stop_on_event = body.stop_on_event.unwrap_or(true);
                     let stepped = match body.to_ts_ms {
-                        Some(ts_ms) => replay.advance_to_ts(&id, ts_ms.saturating_mul(1_000_000)),
-                        None => replay.advance(&id, body.count.unwrap_or(1)),
+                        Some(ts_ms) => {
+                            replay.advance_to_ts(&id, ts_ms.saturating_mul(1_000_000), stop_on_event)
+                        }
+                        None => replay.advance(&id, body.count.unwrap_or(1), stop_on_event),
                     };
                     match stepped {
+                        Ok(state) => {
+                            json_response(&serde_json::json!({ "ok": true, "replay": state }).to_string())
+                        }
+                        Err(e) => json_error(400, &e),
+                    }
+                }
+                None => json_error(404, "replay disabled"),
+            },
+            (Method::Post, "/api/replay/back") => match &replay {
+                Some(replay) => {
+                    let id = query_param(&raw_url, "id").unwrap_or_default();
+                    let body: replay::BackRequest = replay::read_json(&mut request)
+                        .unwrap_or(replay::BackRequest { count: Some(1) });
+                    match replay.back(&id, body.count.unwrap_or(1)) {
+                        Ok(state) => {
+                            json_response(&serde_json::json!({ "ok": true, "replay": state }).to_string())
+                        }
+                        Err(e) => json_error(400, &e),
+                    }
+                }
+                None => json_error(404, "replay disabled"),
+            },
+            (Method::Post, "/api/replay/config") => match &replay {
+                Some(replay) => {
+                    let id = query_param(&raw_url, "id").unwrap_or_default();
+                    match replay::read_json(&mut request)
+                        .and_then(|body| replay.update_config(&id, body))
+                    {
                         Ok(state) => {
                             json_response(&serde_json::json!({ "ok": true, "replay": state }).to_string())
                         }
@@ -340,11 +395,15 @@ where
                 }
                 None => json_error(404, "replay disabled"),
             },
-            (Method::Get, "/api/annotations") | (Method::Post, "/api/annotations") => {
+            (Method::Get, "/api/annotations")
+            | (Method::Post, "/api/annotations")
+            | (Method::Delete, "/api/annotations") => {
                 let run_id = query_param(&raw_url, "id").unwrap_or_default();
+                let ann_id = query_param(&raw_url, "ann").unwrap_or_default();
                 handle_annotations(
                     &annotation_config,
                     &run_id,
+                    &ann_id,
                     request.method().clone(),
                     &mut request,
                 )
@@ -384,6 +443,7 @@ fn studio_html_for_run(
 fn handle_annotations(
     cfg: &AnnotationConfig,
     run_id: &str,
+    ann_id: &str,
     method: Method,
     request: &mut Request,
 ) -> Response<Cursor<Vec<u8>>> {
@@ -403,8 +463,56 @@ fn handle_annotations(
             ),
             Err(e) => json_error(400, &e),
         },
+        Method::Delete => match delete_annotation(cfg, run_id, ann_id) {
+            Ok(true) => json_response(&serde_json::json!({ "ok": true }).to_string()),
+            Ok(false) => json_error(404, "annotation not found"),
+            Err(e) => json_error(400, &e),
+        },
         _ => Response::from_string("method not allowed").with_status_code(405),
     }
+}
+
+/// Remove one annotation (matched by its `id` and `run`) from the JSONL file, rewriting it
+/// atomically. Returns Ok(false) when nothing matched.
+fn delete_annotation(cfg: &AnnotationConfig, run_id: &str, ann_id: &str) -> Result<bool, String> {
+    if ann_id.is_empty() {
+        return Err("ann query parameter is required".to_string());
+    }
+    let path = Path::new(&cfg.save_path);
+    if !path.exists() {
+        return Ok(false);
+    }
+    let file = File::open(path).map_err(|e| format!("open annotation file: {e}"))?;
+    let mut kept = Vec::new();
+    let mut removed = false;
+    for line in BufReader::new(file).lines() {
+        let line = line.map_err(|e| format!("read annotation file: {e}"))?;
+        if line.trim().is_empty() {
+            continue;
+        }
+        let matches = serde_json::from_str::<Value>(&line).is_ok_and(|value| {
+            value.get("id").and_then(Value::as_str) == Some(ann_id)
+                && (run_id.is_empty()
+                    || value.get("run").and_then(Value::as_str) == Some(run_id))
+        });
+        if matches && !removed {
+            removed = true;
+        } else {
+            kept.push(line);
+        }
+    }
+    if !removed {
+        return Ok(false);
+    }
+    let tmp = path.with_extension("jsonl.tmp");
+    {
+        let mut out = File::create(&tmp).map_err(|e| format!("create annotation tmp: {e}"))?;
+        for line in &kept {
+            writeln!(out, "{line}").map_err(|e| format!("write annotation tmp: {e}"))?;
+        }
+    }
+    fs::rename(&tmp, path).map_err(|e| format!("replace annotation file: {e}"))?;
+    Ok(true)
 }
 
 fn load_annotations(cfg: &AnnotationConfig, run_id: &str) -> std::io::Result<Vec<Value>> {
