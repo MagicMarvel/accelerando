@@ -150,6 +150,37 @@ impl ParamSpec {
         }
         p
     }
+
+    /// Check `overrides` against this spec: every key must be declared, and every value for a
+    /// [`ParamRange::Choice`] must be one of its options. Returns a human-readable error
+    /// otherwise — the point is to fail loudly on typos instead of silently using defaults.
+    pub fn validate(&self, overrides: &Params) -> Result<(), String> {
+        for (key, value) in &overrides.0 {
+            let Some(entry) = self.entries.iter().find(|e| &e.name == key) else {
+                let mut known: Vec<&str> = self.entries.iter().map(|e| e.name.as_str()).collect();
+                known.sort_unstable();
+                return Err(format!(
+                    "unknown parameter `{key}`; declared parameters: {}",
+                    known.join(", ")
+                ));
+            };
+            if let ParamRange::Choice(options) = &entry.range {
+                let Some(chosen) = value.as_str() else {
+                    return Err(format!(
+                        "parameter `{key}` is a choice and must be a string (one of: {})",
+                        options.join(", ")
+                    ));
+                };
+                if !options.iter().any(|o| o == chosen) {
+                    return Err(format!(
+                        "parameter `{key}` has invalid value `{chosen}`; valid options: {}",
+                        options.join(", ")
+                    ));
+                }
+            }
+        }
+        Ok(())
+    }
 }
 
 /// A concrete map of parameter values. Keys are local to a component (e.g. `window`); the
@@ -212,8 +243,16 @@ pub trait Configurable: Sized {
     fn from_params(params: &Params) -> Self;
 
     /// Convenience: resolve raw overrides against the spec defaults, then build.
+    ///
+    /// Panics if `overrides` contains a key the spec does not declare or an invalid choice
+    /// value. A typo'd parameter name silently falling back to its default is the worst
+    /// failure mode a backtest framework can have, so misconfiguration fails loudly here.
     fn build(overrides: &Params) -> Self {
-        let resolved = Self::param_spec().defaults().merged_with(overrides);
+        let spec = Self::param_spec();
+        if let Err(err) = spec.validate(overrides) {
+            panic!("invalid params: {err}");
+        }
+        let resolved = spec.defaults().merged_with(overrides);
         Self::from_params(&resolved)
     }
 }

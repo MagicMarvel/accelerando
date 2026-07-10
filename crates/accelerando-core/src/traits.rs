@@ -5,6 +5,7 @@ use crate::broker::OrderCtx;
 use crate::event::{EventInterest, OrderFlowEvent};
 use crate::footprint::Footprint;
 use crate::progress::ProgressHandle;
+use crate::result::Trade;
 
 // The stage traits are object-safe (`dyn`) on purpose: the engine holds them behind `Box<dyn _>`.
 // Concrete adapters additionally implement [`crate::params::Configurable`]; the registry builders
@@ -75,4 +76,9 @@ pub trait Strategy {
 
     /// Called once per completed (and indicator-enriched) footprint.
     fn on_footprint(&mut self, _fp: &Footprint, _ctx: &mut OrderCtx) {}
+
+    /// Called once for each round-trip the broker recorded on the current footprint (fills
+    /// resolve before the strategy sees the bar), right before [`Strategy::on_footprint`].
+    /// Lets strategies react to their own exits without re-deriving them from position flips.
+    fn on_trade_closed(&mut self, _trade: &Trade) {}
 }

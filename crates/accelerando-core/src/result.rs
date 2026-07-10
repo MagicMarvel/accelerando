@@ -40,6 +40,20 @@ pub struct Trade {
     /// Realized PnL in account currency, net of commission.
     pub pnl: f64,
     pub reason: TradeReason,
+    /// Free-form setup tag attached at entry via `OrderCtx::label_next_entry` (features,
+    /// location type, ...), for per-setup analysis of the trade list.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
+}
+
+/// A per-run line overlay sampled once per footprint (e.g. a VWAP and its bands).
+/// `points` are `(footprint index, value)` pairs, sorted by index.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct Series {
+    pub id: String,
+    #[serde(default)]
+    pub color: String,
+    pub points: Vec<(u32, f64)>,
 }
 
 /// A point on the equity curve, sampled at each footprint close (mark-to-market).
@@ -83,6 +97,9 @@ pub struct BacktestResult {
     /// Resting order-book liquidity snapshots for Bookmap-style heatmap rendering.
     #[serde(default)]
     pub liquidity_heatmap: LiquidityHeatmap,
+    /// Per-run line overlays collected via `OrderCtx::series`.
+    #[serde(default)]
+    pub series: Vec<Series>,
     pub tick_size: f64,
     pub multiplier: f64,
 }

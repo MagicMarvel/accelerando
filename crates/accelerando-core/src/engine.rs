@@ -6,9 +6,40 @@ use crate::event::{EventInterest, OrderFlowEvent};
 use crate::footprint::Footprint;
 use crate::metrics::Metrics;
 use crate::progress::ProgressHandle;
-use crate::result::{BacktestResult, LiquidityHeatmap, LiquidityLevel, LiquiditySnapshot};
+use crate::result::{
+    BacktestResult, LiquidityHeatmap, LiquidityLevel, LiquiditySnapshot, Series,
+};
 use crate::traits::{DataSource, FootprintAggregator, Indicator, Strategy};
+use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
+
+/// Collects `OrderCtx::series` points across bars into per-id [`Series`].
+#[derive(Default)]
+struct SeriesCollector {
+    map: BTreeMap<String, Series>,
+}
+
+impl SeriesCollector {
+    fn extend(&mut self, bar_index: usize, points: Vec<(String, f64, Option<String>)>) {
+        for (id, value, color) in points {
+            let series = self.map.entry(id.clone()).or_insert_with(|| Series {
+                id,
+                color: String::new(),
+                points: Vec::new(),
+            });
+            if series.color.is_empty() {
+                if let Some(color) = color {
+                    series.color = color;
+                }
+            }
+            series.points.push((bar_index as u32, value));
+        }
+    }
+
+    fn finish(self) -> Vec<Series> {
+        self.map.into_values().collect()
+    }
+}
 
 #[derive(Clone, Copy, Debug, Default)]
 struct BookLevel {
@@ -142,9 +173,10 @@ pub struct Pipeline {
 ///
 /// This is the reusable middle layer for multi-strategy / multi-parameter batches where the data
 /// adapter, aggregator and indicators are identical but strategies differ.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct PreparedBacktestData {
     pub footprints: Vec<Footprint>,
+    #[serde(default)]
     pub liquidity_heatmap: LiquidityHeatmap,
     pub tick_size: f64,
     pub multiplier: f64,
@@ -284,18 +316,26 @@ pub fn run_prepared_backtest(
     } else {
         0
     });
+    let mut series = SeriesCollector::default();
     let mut last_close = f64::NAN;
     let mut last_ts = 0i64;
 
-    for source_fp in &data.footprints {
+    for (bar_index, source_fp) in data.footprints.iter().enumerate() {
         last_close = source_fp.close;
         last_ts = source_fp.ts_last_ns;
+        let trades_before = broker.trades.len();
         broker.on_new_footprint(source_fp);
+        for i in trades_before..broker.trades.len() {
+            let trade = broker.trades[i].clone();
+            strategy.on_trade_closed(&trade);
+        }
         let mut ctx = OrderCtx::new(&mut broker);
         strategy.on_footprint(source_fp, &mut ctx);
+        let (plots, points) = ctx.take_outputs();
+        series.extend(bar_index, points);
         if keep_footprints {
             let mut fp = source_fp.clone();
-            fp.plots.extend(ctx.take_plots());
+            fp.plots.extend(plots);
             history.push(fp);
         }
     }
@@ -315,6 +355,7 @@ pub fn run_prepared_backtest(
         } else {
             LiquidityHeatmap::default()
         },
+        series: series.finish(),
         tick_size: data.tick_size,
         multiplier: data.multiplier,
     }
@@ -363,16 +404,23 @@ pub fn run_backtest_progress(
         source.set_progress(h.clone());
     }
 
+    let mut series = SeriesCollector::default();
     let handle = |fp: Footprint,
                   broker: &mut Broker,
                   history: &mut Vec<Footprint>,
                   indicators: &mut Vec<Box<dyn Indicator>>,
                   strategy: &mut Box<dyn Strategy>,
                   liquidity_heatmap: &mut LiquidityHeatmap,
-                  book_depth: Option<&BookDepth>| {
+                  book_depth: Option<&BookDepth>,
+                  series: &mut SeriesCollector| {
         let mut fp = fp;
         // Broker first: fill last bar's intent at this open, check stops, mark equity.
+        let trades_before = broker.trades.len();
         broker.on_new_footprint(&fp);
+        for i in trades_before..broker.trades.len() {
+            let trade = broker.trades[i].clone();
+            strategy.on_trade_closed(&trade);
+        }
         // Indicators enrich the footprint causally.
         for ind in indicators.iter_mut() {
             ind.on_footprint(&mut fp, history);
@@ -387,7 +435,9 @@ pub fn run_backtest_progress(
         {
             let mut ctx = OrderCtx::new(broker);
             strategy.on_footprint(&fp, &mut ctx);
-            fp.plots.extend(ctx.take_plots());
+            let (plots, points) = ctx.take_outputs();
+            series.extend(history.len(), points);
+            fp.plots.extend(plots);
         }
         history.push(fp);
     };
@@ -421,6 +471,7 @@ pub fn run_backtest_progress(
                             &mut strategy,
                             &mut liquidity_heatmap,
                             book_depth.as_ref(),
+                            &mut series,
                         );
                         if let Some(h) = &progress {
                             h.inc_footprints();
@@ -452,6 +503,7 @@ pub fn run_backtest_progress(
             &mut strategy,
             &mut liquidity_heatmap,
             book_depth.as_ref(),
+            &mut series,
         );
         if let Some(h) = &progress {
             h.inc_footprints();
@@ -474,6 +526,7 @@ pub fn run_backtest_progress(
         equity: broker.equity,
         footprints: if keep_footprints { history } else { Vec::new() },
         liquidity_heatmap,
+        series: series.finish(),
         tick_size,
         multiplier,
     }

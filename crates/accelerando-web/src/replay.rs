@@ -967,6 +967,7 @@ impl ReplayManager {
             max_adverse_ticks: pos.max_adverse_ticks,
             pnl: gross - entry_fee_share - exit_fee,
             reason,
+            label: None,
         });
         pos.entry_fee -= entry_fee_share;
         pos.qty -= qty;

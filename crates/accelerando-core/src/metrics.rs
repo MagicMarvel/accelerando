@@ -181,6 +181,7 @@ mod tests {
             max_adverse_ticks,
             pnl,
             reason: TradeReason::Signal,
+            label: None,
         }
     }
 

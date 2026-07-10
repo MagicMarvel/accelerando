@@ -25,19 +25,26 @@ impl Default for BrokerConfig {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 struct EntryOrder {
     dir: i32,
     qty: f64,
     stop_ticks: f64,
     target_ticks: f64,
+    /// Absolute stop price; wins over `stop_ticks` when set. Structural stops (a level plus a
+    /// buffer) should use this so an open gap cannot silently move the protection.
+    stop_px: Option<f64>,
+    /// Absolute take-profit price; wins over `target_ticks` when set.
+    target_px: Option<f64>,
     entry_min: Option<f64>,
     entry_max: Option<f64>,
     entry_limit: Option<f64>,
+    /// Free-form setup tag carried onto the resulting [`Trade`] for later analysis.
+    label: Option<String>,
 }
 
 /// The position change a strategy wants after the next fill.
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 enum PendingKind {
     Flat,
     /// Legacy single-position behavior: if already purely in that direction, do nothing;
@@ -47,7 +54,7 @@ enum PendingKind {
     Add(EntryOrder),
 }
 
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 struct PendingIntent {
     kind: PendingKind,
     age: usize,
@@ -61,7 +68,7 @@ impl PendingIntent {
 
 const LIMIT_ORDER_TTL_BARS: usize = 8;
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 struct Position {
     dir: i32,
     qty: f64,
@@ -76,6 +83,28 @@ struct Position {
     /// the fill — counting it would be look-ahead. The adverse extreme is reached after the fill, so
     /// the stop stays active.
     entered_intrabar: bool,
+    /// Completed bars this lot has been open; its fill bar counts as 1.
+    bars_open: usize,
+    label: Option<String>,
+}
+
+/// A snapshot of the open position a strategy can query through [`OrderCtx::open_position`].
+#[derive(Clone, Debug)]
+pub struct PositionInfo {
+    /// +1 net long, -1 net short.
+    pub dir: i32,
+    /// Total quantity across open lots in `dir`.
+    pub qty: f64,
+    /// Volume-weighted average entry price.
+    pub entry_px: f64,
+    /// Entry timestamp of the earliest open lot.
+    pub entry_ts_ns: i64,
+    /// Bars the earliest open lot has been held; its fill bar counts as 1.
+    pub bars_held: usize,
+    /// Stop of the earliest open lot.
+    pub stop: Option<f64>,
+    /// Target of the earliest open lot.
+    pub target: Option<f64>,
 }
 
 /// The broker simulator: tracks open lots, fills next-bar orders, records trades and equity.
@@ -87,6 +116,7 @@ pub struct Broker {
     peak_equity: f64,
     positions: Vec<Position>,
     pending: Vec<PendingIntent>,
+    next_label: Option<String>,
     pub trades: Vec<Trade>,
     pub equity: Vec<EquityPoint>,
 }
@@ -101,6 +131,7 @@ impl Broker {
             peak_equity: cfg.starting_equity,
             positions: Vec::new(),
             pending: Vec::new(),
+            next_label: None,
             trades: Vec::new(),
             equity: Vec::new(),
         }
@@ -150,6 +181,7 @@ impl Broker {
             max_adverse_ticks: pos.max_adverse_ticks,
             pnl,
             reason,
+            label: pos.label,
         });
     }
 
@@ -162,34 +194,26 @@ impl Broker {
     }
 
     /// Open a fresh position at `px` (slippage already applied), charging entry commission.
-    #[allow(clippy::too_many_arguments)]
-    fn open_position(
-        &mut self,
-        dir: i32,
-        qty: f64,
-        px: f64,
-        ts: i64,
-        stop_ticks: f64,
-        target_ticks: f64,
-        entered_intrabar: bool,
-    ) {
-        self.realized -= self.commission(qty); // entry-side commission
-        let stop = if stop_ticks > 0.0 {
-            Some(px - dir as f64 * stop_ticks * self.tick_size)
-        } else {
-            None
-        };
-        let target = if target_ticks > 0.0 {
-            Some(px + dir as f64 * target_ticks * self.tick_size)
-        } else {
-            None
-        };
-        if qty <= 0.0 {
+    /// Absolute bracket prices on the order win over tick distances.
+    fn open_position(&mut self, order: &EntryOrder, px: f64, ts: i64, entered_intrabar: bool) {
+        if order.qty <= 0.0 {
             return;
         }
+        self.realized -= self.commission(order.qty); // entry-side commission
+        let dir = order.dir;
+        let stop = order.stop_px.or(if order.stop_ticks > 0.0 {
+            Some(px - dir as f64 * order.stop_ticks * self.tick_size)
+        } else {
+            None
+        });
+        let target = order.target_px.or(if order.target_ticks > 0.0 {
+            Some(px + dir as f64 * order.target_ticks * self.tick_size)
+        } else {
+            None
+        });
         self.positions.push(Position {
             dir,
-            qty,
+            qty: order.qty,
             entry_px: px,
             entry_ts: ts,
             stop,
@@ -197,6 +221,8 @@ impl Broker {
             max_adverse_excursion: 0.0,
             max_adverse_ticks: 0.0,
             entered_intrabar,
+            bars_open: 0,
+            label: order.label.clone(),
         });
     }
 
@@ -211,13 +237,16 @@ impl Broker {
         let pending = std::mem::take(&mut self.pending);
         let mut still_pending = Vec::new();
         for mut intent in pending {
-            if self.transition(intent.kind, intent.age, fp) {
+            if self.transition(intent.kind.clone(), intent.age, fp) {
                 intent.age += 1;
                 still_pending.push(intent);
             }
         }
         self.pending = still_pending;
-        // 2) Track adverse movement after entry, then check stops/targets against this bar.
+        // 2) Track holding time and adverse movement, then check stops/targets against this bar.
+        for pos in &mut self.positions {
+            pos.bars_open += 1;
+        }
         self.update_adverse_excursion(fp);
         self.check_exits(fp);
         // 3) Mark-to-market equity at the close.
@@ -258,32 +287,27 @@ impl Broker {
         if replace_existing {
             self.close_all_at_open(open, ts, TradeReason::Signal);
         }
-        self.open_position(
-            order.dir,
-            order.qty,
-            self.slip(fill_px, order.dir),
-            ts,
-            order.stop_ticks,
-            order.target_ticks,
-            entered_intrabar,
-        );
+        self.open_position(&order, self.slip(fill_px, order.dir), ts, entered_intrabar);
         false
     }
 
     fn check_exits(&mut self, fp: &Footprint) {
         for idx in (0..self.positions.len()).rev() {
-            let pos = self.positions[idx];
+            let pos = self.positions[idx].clone();
             // On the bar an intrabar limit entry filled, the favorable extreme may predate the
             // fill, so the target is not eligible yet (avoids look-ahead). The adverse extreme is
             // reached after the fill, so the stop stays active. From the next bar on, both are
             // eligible normally.
             let on_entry_bar = pos.entry_ts == fp.ts_first_ns;
             let target_eligible = !(on_entry_bar && pos.entered_intrabar);
-            // Conservative ordering: assume stop is touched before target within the bar.
+            // Conservative ordering: assume the stop is touched before the target within a bar.
+            // A bar that OPENS through the stop fills at that open (gap-through) — a resting
+            // stop cannot fill at a price the market never traded. Targets stay at the target
+            // price, which is the conservative side for a resting limit.
             let exit = if pos.dir > 0 {
                 if let Some(stop) = pos.stop {
                     if fp.low <= stop {
-                        Some((stop, TradeReason::StopLoss))
+                        Some((fp.open.min(stop), TradeReason::StopLoss))
                     } else {
                         None
                     }
@@ -302,7 +326,7 @@ impl Broker {
             } else {
                 if let Some(stop) = pos.stop {
                     if fp.high >= stop {
-                        Some((stop, TradeReason::StopLoss))
+                        Some((fp.open.max(stop), TradeReason::StopLoss))
                     } else {
                         None
                     }
@@ -355,13 +379,51 @@ impl Broker {
     }
 
     fn set_single_pending(&mut self, kind: PendingKind) {
+        let kind = self.attach_label(kind);
         self.pending.clear();
         self.pending.push(PendingIntent::new(kind));
     }
 
     fn add_pending(&mut self, order: EntryOrder) {
-        self.pending
-            .push(PendingIntent::new(PendingKind::Add(order)));
+        let kind = self.attach_label(PendingKind::Add(order));
+        self.pending.push(PendingIntent::new(kind));
+    }
+
+    /// Move a label set via [`OrderCtx::label_next_entry`] onto the order being queued.
+    fn attach_label(&mut self, mut kind: PendingKind) -> PendingKind {
+        if let PendingKind::Replace(order) | PendingKind::Add(order) = &mut kind {
+            if order.label.is_none() {
+                order.label = self.next_label.take();
+            }
+        }
+        kind
+    }
+
+    /// Snapshot of the open position (lots in the current net direction), if any.
+    pub fn open_position_info(&self) -> Option<PositionInfo> {
+        let dir = self.current_dir();
+        if dir == 0 {
+            return None;
+        }
+        let lots: Vec<&Position> = self.positions.iter().filter(|p| p.dir == dir).collect();
+        let qty: f64 = lots.iter().map(|p| p.qty).sum();
+        if qty <= 0.0 {
+            return None;
+        }
+        let entry_px = lots.iter().map(|p| p.entry_px * p.qty).sum::<f64>() / qty;
+        let oldest = lots
+            .iter()
+            .max_by_key(|p| p.bars_open)
+            .expect("non-empty lots");
+        Some(PositionInfo {
+            dir,
+            qty,
+            entry_px,
+            entry_ts_ns: oldest.entry_ts,
+            bars_held: oldest.bars_open,
+            stop: oldest.stop,
+            target: oldest.target,
+        })
     }
 
     fn clear_pending(&mut self) {
@@ -461,6 +523,7 @@ fn price_in_band(px: f64, min: Option<f64>, max: Option<f64>) -> bool {
 pub struct OrderCtx<'b> {
     broker: &'b mut Broker,
     plots: Vec<Plot>,
+    series: Vec<(String, f64, Option<String>)>,
 }
 
 impl<'b> OrderCtx<'b> {
@@ -468,6 +531,7 @@ impl<'b> OrderCtx<'b> {
         Self {
             broker,
             plots: Vec::new(),
+            series: Vec::new(),
         }
     }
 
@@ -476,9 +540,38 @@ impl<'b> OrderCtx<'b> {
         self.plots.push(p);
     }
 
+    /// Record one point of a named per-run line series (e.g. a VWAP) at this footprint.
+    /// Stored once per run as `BacktestResult::series` — far leaner than a `Plot::Line`
+    /// per bar when the line has a value on every footprint.
+    pub fn series(&mut self, id: &str, value: f64) {
+        self.series.push((id.to_string(), value, None));
+    }
+
+    /// [`OrderCtx::series`] with an explicit color (first point's color wins per id).
+    pub fn series_colored(&mut self, id: &str, value: f64, color: &str) {
+        self.series
+            .push((id.to_string(), value, Some(color.to_string())));
+    }
+
     /// Drain the collected plots (called by the engine after the strategy returns).
     pub fn take_plots(self) -> Vec<Plot> {
         self.plots
+    }
+
+    /// Drain plots and series points (called by the engine after the strategy returns).
+    pub fn take_outputs(self) -> (Vec<Plot>, Vec<(String, f64, Option<String>)>) {
+        (self.plots, self.series)
+    }
+
+    /// Snapshot of the currently open position: average entry, bars held, protection.
+    pub fn open_position(&self) -> Option<PositionInfo> {
+        self.broker.open_position_info()
+    }
+
+    /// Tag the next entry order queued through this or a later ctx; the label rides the
+    /// position onto the recorded [`Trade`] for later per-setup analysis.
+    pub fn label_next_entry(&mut self, label: &str) {
+        self.broker.next_label = Some(label.to_string());
     }
 
     /// Net position direction: -1 net short, 0 flat/hedged, +1 net long.
@@ -689,6 +782,42 @@ impl<'b> OrderCtx<'b> {
         ));
     }
 
+    /// Desire a long position next bar with **absolute** stop/target prices. Structural
+    /// protection (a level plus a buffer) should use this instead of tick distances so an
+    /// open gap cannot move the stop along with the fill.
+    pub fn go_long_bracket(&mut self, qty: f64, stop_px: Option<f64>, target_px: Option<f64>) {
+        self.broker
+            .set_single_pending(PendingKind::Replace(EntryOrder {
+                dir: 1,
+                qty,
+                stop_ticks: 0.0,
+                target_ticks: 0.0,
+                stop_px,
+                target_px,
+                entry_min: None,
+                entry_max: None,
+                entry_limit: None,
+                label: None,
+            }));
+    }
+
+    /// Desire a short position next bar with **absolute** stop/target prices.
+    pub fn go_short_bracket(&mut self, qty: f64, stop_px: Option<f64>, target_px: Option<f64>) {
+        self.broker
+            .set_single_pending(PendingKind::Replace(EntryOrder {
+                dir: -1,
+                qty,
+                stop_ticks: 0.0,
+                target_ticks: 0.0,
+                stop_px,
+                target_px,
+                entry_min: None,
+                entry_max: None,
+                entry_limit: None,
+                label: None,
+            }));
+    }
+
     /// Cancel resting pending orders without closing existing lots.
     pub fn cancel_pending_orders(&mut self) {
         self.broker.clear_pending();
@@ -714,9 +843,12 @@ fn entry_order(
         qty,
         stop_ticks,
         target_ticks,
+        stop_px: None,
+        target_px: None,
         entry_min,
         entry_max,
         entry_limit,
+        label: None,
     }
 }
 

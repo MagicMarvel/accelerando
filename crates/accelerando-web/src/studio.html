@@ -220,7 +220,7 @@
 const COLORS = { up:"#6d6dff", down:"#ff6d6d", buy:"#6d6dff", sell:"#ff6d6d", tradeText:"#ffffff", grid:"#e2e8f0", axis:"#475569" };
 // TradingView-style layout: thin left padding, price axis on the right.
 const AXIS_W=64, PADL=8;
-let SCHEMA=null, CONFIG=null, DATA=null, fps=[], eq=[], trades=[];
+let SCHEMA=null, CONFIG=null, DATA=null, fps=[], eq=[], trades=[], runSeries=[];
 let barsPerView=300, start=0, hover=null, drag=null, splitDrag=null, chartMode="candles", heatMetric="total", poll=null;
 // Overlay visibility, keyed by category ("bands", "trades", or a marker group). Persisted across
 // re-renders so a hidden overlay stays hidden when the result is reloaded.
@@ -542,7 +542,7 @@ function renderResult(data){
   // on the first load; otherwise a user's manual pan/zoom would get wiped out by every
   // subsequent update (most jarringly right as an SL/TP drag completes).
   const isReplay=data.replay!=null, firstLoad=fps.length===0;
-  DATA=data; fps=data.footprints||[]; eq=data.equity||[]; trades=data.trades||[];
+  DATA=data; fps=data.footprints||[]; eq=data.equity||[]; trades=data.trades||[]; runSeries=data.series||[];
   pinnedEconEvent=null; econEventMarkers=[]; hideEconomicEventPopover(true);
   heatView=null; heatData=null; heatImg=null; // reset zoomable heatmap window for the new run
   for(const t of trades){ t._ei=idxForEntryTs(t.entry_ts_ns); t._xi=idxForTs(t.exit_ts_ns); }
@@ -570,6 +570,7 @@ function overlayCategories(){
     else if(p.kind==="VolumeProfile")markerGroups.add(volumeProfileCat(p));
     else if(p.kind==="PriceBox")markerGroups.add(priceBoxCat(p));
   } }
+  for(const s of runSeries)markerGroups.add(lineCat(s));
   const cats=[];
   if(hasBands)cats.push("bands");
   for(const g of [...markerGroups].sort())cats.push(g);
@@ -917,6 +918,33 @@ function drawImbalanceLine(ctx,p,vis,i,x,yy,L,pw,xStep){
   }
   ctx.restore();
 }
+// Per-run line series (BacktestResult.series): each is [(footprint index, value)] sorted by
+// index. Rendered like Line plots but stored once per run instead of once per bar.
+function drawRunSeries(ctx,L,T,ph,xStep,y,s,e){
+  if(!runSeries.length)return;
+  ctx.save();
+  ctx.lineWidth=1.5; ctx.lineJoin="round";
+  for(const sr of runSeries){
+    if(!overlayOn(lineCat(sr)))continue;
+    const pts=sr.points||[];
+    // Binary-search the first visible point (points are sorted by footprint index).
+    let lo=0,hi=pts.length;
+    while(lo<hi){const m=(lo+hi)>>1; if(pts[m][0]<s)lo=m+1; else hi=m;}
+    ctx.strokeStyle=colorAlpha(sr.color||"#0ea5e9",0.9);
+    ctx.beginPath();
+    let pen=false,prev=-2;
+    for(let k=lo;k<pts.length;k++){
+      const [i,v]=pts[k];
+      if(i>=e)break;
+      if(!isFinite(v)){pen=false;prev=i;continue;}
+      const x=L+(i-s)*xStep+xStep/2, yy=y(v);
+      if(pen&&i===prev+1)ctx.lineTo(x,yy); else ctx.moveTo(x,yy);
+      pen=true;prev=i;
+    }
+    ctx.stroke();
+  }
+  ctx.restore();
+}
 // Indicator/strategy Line plots: polylines connected across bars by id (e.g. a VWAP and its
 // bands). A bar without a point for an id breaks the path (session resets stay visible).
 function drawPlotLines(ctx,vis,L,T,ph,xStep,y){
@@ -1243,6 +1271,7 @@ function drawPrice(){
   drawDrawings(pctx,L,T,pw,ph,xStep,y,s,e);
   drawVolumeProfiles(pctx,vis,L,T,pw,ph,xStep,y,tick,labelLayout);
   drawVpProfiles(pctx,L,T,pw,ph,xStep,y,tick,s,e,labelLayout);
+  drawRunSeries(pctx,L,T,ph,xStep,y,s,e);
   drawPlotLines(pctx,vis,L,T,ph,xStep,y);
   drawPlotMarkers(pctx,vis,L,T,pw,ph,xStep,y,labelLayout);
   if(overlayOn("trades")) drawTradePositions(pctx,trades,s,e,L,T,ph,xStep,y,labelLayout);

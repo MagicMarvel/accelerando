@@ -14,6 +14,7 @@ pub mod footprint;
 #[cfg(feature = "footprint-image")]
 pub mod footprint_image;
 pub mod heatmap;
+pub mod market_time;
 pub mod metrics;
 pub mod params;
 pub mod progress;
@@ -21,7 +22,7 @@ pub mod registry;
 pub mod result;
 pub mod traits;
 
-pub use broker::{Broker, BrokerConfig, OrderCtx};
+pub use broker::{Broker, BrokerConfig, OrderCtx, PositionInfo};
 pub use engine::{
     prepare_backtest_data, run_backtest, run_backtest_progress, run_prepared_backtest, Pipeline,
     PreparedBacktestData,
@@ -44,6 +45,6 @@ pub use progress::{ProgressHandle, ProgressSnapshot};
 pub use registry::Registry;
 pub use result::{
     BacktestResult, ExperimentResult, ExperimentRun, ExperimentRunSummary, LiquidityHeatmap,
-    LiquidityLevel, LiquiditySnapshot, Trade, TradeReason,
+    LiquidityLevel, LiquiditySnapshot, Series, Trade, TradeReason,
 };
 pub use traits::{DataSource, FootprintAggregator, Indicator, Strategy};

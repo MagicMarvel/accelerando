@@ -119,6 +119,25 @@ replay 未启用时手动页签自动隐藏。
 | `POST /api/replay/cancel?id=` / `flatten?id=` | 撤单 / 全平 |
 | `POST /api/replay/config?id=` | 改手续费/滑点 |
 
+## 写策略时值得知道的机制
+
+- **参数校验**：`Configurable::build` 会把传入的 Params 和 `param_spec()` 对照,**未声明的参数名
+  或非法的 choice 取值直接 panic**(附合法名单),拼错参数不再静默用默认值
+- **持仓可见**：`ctx.open_position()` 返回 `PositionInfo`（方向、均价、持有 bar 数、当前止损止盈）,
+  时间止损直接 `pos.bars_held >= N` 即可;策略还可实现 `on_trade_closed(&Trade)` 在每笔平仓时收到回调
+- **绝对价 bracket**：`ctx.go_long_bracket(qty, stop_px, target_px)` / `go_short_bracket` 用**绝对价格**
+  下保护单——结构性止损（某个价位 + buffer）应当用它,跳空不会把止损跟着 fill 挪走;
+  旧的 `go_long(qty, stop_ticks, target_ticks)`（相对下根开盘的 tick 距离）仍可用
+- **同一根 bar 内先止损后止盈**（保守假设）;开盘直接跳过止损价时按**开盘价**成交（gap-through）,
+  不会出现"在市场没到过的价格成交"
+- **线型输出用 series**：`ctx.series("vwap", v)` / `series_colored` 每 run 存一份
+  `BacktestResult.series`,studio 自动连线渲染（legend 按 id 前缀分组开关）,别再每根 bar push `Plot::Line`
+- **trade 标签**：入场前 `ctx.label_next_entry("特征文本")`,标签跟随持仓落到成交记录 JSON 里,
+  供之后按 setup 特征做统计
+- **时区工具**：`accelerando_core::market_time` 提供 ns→美东日期/分钟（含夏令时）、时段窗口解析等
+- **Sharpe 口径**：metrics 里的 sharpe 是逐 bar equity 收益的 `均值/标准差×√N`（t 统计式,不年化）,
+  它同时反映单笔质量和交易次数,笔数少的策略天然到不了高 Sharpe
+
 ## 开发
 
 ```bash
