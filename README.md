@@ -38,6 +38,7 @@ direct code-only construction.
 | `accelerando-example-indicators` | example indicators, including `technical` |
 | `accelerando-example-strategy` | example strategy, `indicator_cross` |
 | `accelerando-hyperopt` | library-only parameter search primitives |
+| `accelerando-ml` | factor mining: PerpetualBooster (GBM) training, Spearman IC, factor-effectiveness reports |
 | `accelerando-web` | embeddable, zero-build result viewer |
 
 There is intentionally no official CLI crate. Applications should build their own small runner so
@@ -141,6 +142,38 @@ let score = |params: &Params| {
 ```
 
 This keeps parameter search compatible with custom strategies compiled into your runner.
+
+## Factor Mining (accelerando-ml)
+
+`accelerando-ml` wraps the [perpetual](https://github.com/perpetual-ml/perpetual) gradient-boosting
+crate (PerpetualBooster, hyperparameter-free GBM) for ranking candidate trading factors. Push one
+feature vector plus a forward-return label per bar into a `FactorTable` (chronological order,
+`f64::NAN` for missing values — handled natively by the booster), then evaluate:
+
+```rust
+use accelerando_ml::{evaluate_factors, FactorTable};
+
+let mut table = FactorTable::new(&["cvd_rate", "delta_ratio", "dist_vwap"]);
+for bar in &bars {
+    table.push_row(&features(bar), forward_return_ticks(bar));
+}
+// train_frac, budget, coverage floor
+let report = evaluate_factors(&table, 0.7, 1.0, 0.01)?;
+for f in &report.factors {
+    println!("{:<16} IC {:+.4}  importance {:.1}%", f.name, f.ic, f.importance * 100.0);
+}
+println!("OOS R2 {:.4}, hit {:.1}%", report.test_r2, report.test_hit_rate * 100.0);
+```
+
+`evaluate_factors` does a chronological train/test split (no look-ahead), fits a `SquaredLoss`
+booster, and reports per-factor coverage, univariate Spearman IC, normalized total-gain importance,
+plus out-of-sample R² and direction hit rate against a majority-sign baseline. Columns below the
+coverage floor are dropped and listed instead of silently fit.
+
+**Build note:** `perpetual` declares `#![feature(array_ptr_get)]` even though that API is stable in
+current rustc. This workspace's `.cargo/config.toml` sets the scoped escape hatch
+`RUSTC_BOOTSTRAP = "perpetual"` so exactly that crate compiles on the stable toolchain; downstream
+applications depending on `accelerando-ml` need the same entry in their own `.cargo/config.toml`.
 
 ## License
 

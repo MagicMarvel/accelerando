@@ -7,6 +7,7 @@ members = [
     "crates/accelerando-example-indicators",
     "crates/accelerando-example-strategy",
     "crates/accelerando-hyperopt",
+    "crates/accelerando-ml",
     "crates/accelerando-web",
     "crates/accelerando",
 ]
@@ -25,6 +26,7 @@ accelerando-example-aggregators = { path = "crates/accelerando-example-aggregato
 accelerando-example-indicators = { path = "crates/accelerando-example-indicators" }
 accelerando-example-strategy = { path = "crates/accelerando-example-strategy" }
 accelerando-hyperopt = { path = "crates/accelerando-hyperopt" }
+accelerando-ml = { path = "crates/accelerando-ml" }
 accelerando-web = { path = "crates/accelerando-web" }
 accelerando = { path = "crates/accelerando" }
 

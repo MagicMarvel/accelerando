@@ -1,0 +1,15 @@
+[package]
+name = "accelerando-ml"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Machine-learning helpers for Accelerando: factor tables, PerpetualBooster (GBM) training and factor-effectiveness reports."
+
+[dependencies]
+# perpetual declares `#![feature(array_ptr_get)]` (nightly-only gate) even though that API is
+# stable since well before rustc 1.96. The workspace `.cargo/config.toml` sets
+# `RUSTC_BOOTSTRAP=perpetual` so this one crate builds on the stable toolchain.
+perpetual = "2.1"
+serde = { workspace = true }
+serde_json = { workspace = true }

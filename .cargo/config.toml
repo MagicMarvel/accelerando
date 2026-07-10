@@ -1,0 +1,5 @@
+# The `perpetual` GBM crate gates itself behind `#![feature(array_ptr_get)]`, which has long
+# been stabilized. Scoped RUSTC_BOOTSTRAP lets exactly that crate compile on stable rustc
+# without affecting codegen or any other crate.
+[env]
+RUSTC_BOOTSTRAP = "perpetual"

@@ -34,6 +34,7 @@ BacktestResult <- Broker <- Strategy <- Indicator 逐层增强
 | `accelerando-example-indicators` | 示例指标（含 `technical`、ATAS 式对角线 `stacked_imbalance`） |
 | `accelerando-example-strategy` | 示例策略 `indicator_cross` |
 | `accelerando-hyperopt` | 纯库形式的参数搜索原语 |
+| `accelerando-ml` | 因子挖掘：PerpetualBooster（GBM）训练、Spearman IC、因子有效性报告 |
 
 ## 作为库使用
 
@@ -138,10 +139,37 @@ replay 未启用时手动页签自动隐藏。
 - **Sharpe 口径**：metrics 里的 sharpe 是逐 bar equity 收益的 `均值/标准差×√N`（t 统计式,不年化）,
   它同时反映单笔质量和交易次数,笔数少的策略天然到不了高 Sharpe
 
+## 因子挖掘（accelerando-ml）
+
+`accelerando-ml` 封装 [perpetual](https://github.com/perpetual-ml/perpetual)（PerpetualBooster,
+免调参 GBM）用于给候选交易因子做有效性排名。按时间顺序往 `FactorTable` 里逐 bar 推入
+特征向量 + 未来收益标签（缺失值用 `f64::NAN`,booster 原生支持）,然后评估：
+
+```rust
+use accelerando_ml::{evaluate_factors, FactorTable};
+
+let mut table = FactorTable::new(&["cvd_rate", "delta_ratio", "dist_vwap"]);
+for bar in &bars {
+    table.push_row(&features(bar), forward_return_ticks(bar));
+}
+// 参数：训练集占比、budget、覆盖率下限
+let report = evaluate_factors(&table, 0.7, 1.0, 0.01)?;
+```
+
+`evaluate_factors` 做**按时间**的训练/测试切分（无未来函数）,拟合 `SquaredLoss` booster,
+输出每因子的覆盖率、单变量 Spearman IC、归一化 TotalGain importance,以及测试集 R² 和
+方向命中率（对照多数方向基线）。覆盖率低于下限的列会被剔除并在报告中列出,不会静默拟合。
+
+**构建注意**：`perpetual` 声明了 `#![feature(array_ptr_get)]`,但该 API 在当前 rustc 里早已
+stable。本工作区 `.cargo/config.toml` 里的 `RUSTC_BOOTSTRAP = "perpetual"`（作用域限定,只对
+这一个 crate 生效）让它在 stable 工具链上编译;下游依赖 `accelerando-ml` 的应用需要在自己的
+`.cargo/config.toml` 里加同样一条。
+
 ## 开发
 
 ```bash
 cargo test -p accelerando-web        # 回放引擎单元测试
+cargo test -p accelerando-ml         # 因子评估单元测试（含植入信号端到端验证）
 cargo run -p accelerando-web --example replay_smoke [port]   # 合成数据冒烟服务器（默认 18973）
 ```
 
