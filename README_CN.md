@@ -31,7 +31,7 @@ BacktestResult <- Broker <- Strategy <- Indicator 逐层增强
 | `accelerando-web` | 浏览器工作台：结果查看、实验对比、手动 bar 回放（详见下文） |
 | `accelerando-example-sources` | 示例数据源（含 `csv`） |
 | `accelerando-example-aggregators` | 示例聚合器（含 `range`、`time`） |
-| `accelerando-example-indicators` | 示例指标（含 `technical`） |
+| `accelerando-example-indicators` | 示例指标（含 `technical`、ATAS 式对角线 `stacked_imbalance`） |
 | `accelerando-example-strategy` | 示例策略 `indicator_cross` |
 | `accelerando-hyperopt` | 纯库形式的参数搜索原语 |
 
@@ -84,6 +84,8 @@ replay 未启用时手动页签自动隐藏。
   - 拖动模式下可直接点选图形（横线拖动、矩形四角缩放/整体平移、VP 拖边缘调范围），按 `Delete` 删除
   - 横线/矩形/VWAP 按 run 存 localStorage，刷新不丢
 - 标注模式（宿主启用后）：拖框打标签，服务端 JSONL 持久化，可选中后 Delete 删除
+- Stacked imbalance 区域带：`PriceBox`（group=imbalance）会画成 ATAS 风格的失衡区域，
+  自动向右延伸到"某根 K 收盘穿透区域"为止（买方带被收破下沿 / 卖方带被收破上沿即终止）
 - 全站右键菜单已禁用（预留给自定义菜单）
 
 ### 手动 bar 回放（ReplayManager）

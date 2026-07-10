@@ -1007,6 +1007,50 @@ function drawVolumeProfiles(ctx,vis,L,T,pw,ph,xStep,y,tick,labelLayout){
   }
   ctx.restore();
 }
+// Stacked-imbalance zones (PriceBox plots in group "imbalance"): ATAS-style bands anchored at
+// the bar that printed the stack, extended right until a later bar CLOSES through the far side
+// (below a buy zone / above a sell zone), or to the right edge while unbroken. Computed over the
+// full dataset (not just the visible window) and cached until the data changes.
+let imbZoneCache=null;
+function imbalanceZones(){
+  if(imbZoneCache&&imbZoneCache.fps===fps&&imbZoneCache.len===fps.length)return imbZoneCache.zones;
+  const zones=[];
+  for(let i=0;i<fps.length;i++){
+    for(const p of (fps[i].plots||[])){
+      if(p.kind!=="PriceBox"||priceBoxCat(p)!=="imbalance"||p.low==null||p.high==null)continue;
+      const isBuy=String(p.text||"").startsWith("buy");
+      let end=null;
+      for(let j=i+1;j<fps.length;j++){
+        const c=fps[j].close;
+        if(isBuy?c<p.low:c>p.high){ end=j; break; }
+      }
+      zones.push({idx:i,low:p.low,high:p.high,isBuy,color:p.color||(isBuy?"#6d6dff":"#ff6d6d"),text:String(p.text||""),end});
+    }
+  }
+  imbZoneCache={fps,len:fps.length,zones};
+  return zones;
+}
+function drawImbalanceZones(ctx,L,T,pw,ph,xStep,y,s,e,labelLayout){
+  if(!overlayOn("imbalance"))return;
+  ctx.save(); ctx.font="10px Segoe UI, Arial"; ctx.textBaseline="middle";
+  for(const z of imbalanceZones()){
+    if(z.idx>=e)continue;
+    if(z.end!=null&&z.end<s)continue;
+    const x0=Math.max(L,L+(z.idx-s)*xStep);
+    const x1=z.end==null?L+pw:Math.min(L+pw,L+(z.end-s)*xStep+xStep/2);
+    if(x1<=x0)continue;
+    const top=y(z.high), bot=y(z.low);
+    const yy=Math.min(top,bot), hh=Math.max(2,Math.abs(bot-top));
+    if(yy>T+ph||yy+hh<T)continue;
+    ctx.fillStyle=colorAlpha(z.color,0.16);
+    ctx.fillRect(x0,yy,x1-x0,hh);
+    ctx.strokeStyle=colorAlpha(z.color,0.9);
+    ctx.lineWidth=1;
+    ctx.strokeRect(x0,yy,x1-x0,hh);
+    if(z.text&&xStep>=8&&z.idx>=s){ drawLabel(ctx,z.text,x0+4,Math.max(T+10,yy-8),z.color,labelLayout); }
+  }
+  ctx.restore();
+}
 function drawPriceBoxes(ctx,vis,L,T,pw,ph,xStep,y,labelLayout){
   ctx.save(); ctx.font="10px Segoe UI, Arial"; ctx.textBaseline="middle";
   const lastById=new Map();
@@ -1019,6 +1063,7 @@ function drawPriceBoxes(ctx,vis,L,T,pw,ph,xStep,y,labelLayout){
     const b=vis[i];
     for(const p of (b.plots||[])){
       if(p.kind!=="PriceBox"||p.low==null||p.high==null)continue;
+      if(priceBoxCat(p)==="imbalance")continue;
       if(lastById.get(p.id||`__box_${i}`)!==i)continue;
       if(!overlayOn(priceBoxCat(p)))continue;
       const span=Math.max(1,Math.round(p.span||1));
@@ -1157,6 +1202,7 @@ function drawPrice(){
   if(chartMode==="footprint") drawFootprints(pctx,vis,L,T,ph,xStep,y,tick);
   else drawCandles(pctx,vis,L,T,ph,xStep,cw,y);
   drawPriceBoxes(pctx,vis,L,T,pw,ph,xStep,y,labelLayout);
+  drawImbalanceZones(pctx,L,T,pw,ph,xStep,y,s,e,labelLayout);
   drawAnnotations(pctx,L,T,pw,ph,xStep,y,s,e);
   drawDrawings(pctx,L,T,pw,ph,xStep,y,s,e);
   drawVolumeProfiles(pctx,vis,L,T,pw,ph,xStep,y,tick,labelLayout);
