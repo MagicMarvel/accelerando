@@ -866,16 +866,17 @@ function tradeMarkerColor(color){
   if(["#d97706","#f59e0b","#f97316","#e8832a"].includes(c))return COLORS.sell;
   return color;
 }
-function drawBigTradeBubble(ctx,p,x,yy,r){
+function drawBigTradeBubble(ctx,p,x,yy,r,n){
   const color=tradeMarkerColor(p.color), text=String(p.text??"");
+  const w=n==null?0.6:clamp(n,0,1);
   ctx.save();
   ctx.shadowColor="rgba(15,23,42,0.18)";
   ctx.shadowBlur=5;
   ctx.shadowOffsetY=1;
-  ctx.fillStyle=colorAlpha(color,0.74);
+  ctx.fillStyle=colorAlpha(color,0.30+0.55*w);
   ctx.beginPath(); ctx.arc(x,yy,r,0,Math.PI*2); ctx.fill();
   ctx.shadowColor="transparent";
-  ctx.strokeStyle=colorAlpha(color,0.88);
+  ctx.strokeStyle=colorAlpha(color,0.55+0.4*w);
   ctx.lineWidth=1.5;
   ctx.beginPath(); ctx.arc(x,yy,Math.max(2,r-0.75),0,Math.PI*2); ctx.stroke();
   if(text&&r>=9){
@@ -890,7 +891,30 @@ function drawBigTradeBubble(ctx,p,x,yy,r){
   }
   ctx.restore();
 }
-function drawPlotMarkers(ctx,vis,L,T,ph,xStep,y,labelLayout){
+// ATAS-style stacked imbalance: a horizontal ray from the imbalance level, extended right
+// until a later bar trades back through that price (or the right edge of the plot).
+function drawImbalanceLine(ctx,p,vis,i,x,yy,L,pw,xStep){
+  const price=p.price;
+  let endX=L+pw;
+  for(let j=i+1;j<vis.length;j++){
+    const b=vis[j];
+    if(b.low<=price&&price<=b.high){ endX=L+j*xStep+xStep/2; break; }
+  }
+  const color=p.color||"#6d6dff";
+  const x0=Math.max(L,x-candleWidth(xStep)/2);
+  ctx.save();
+  ctx.strokeStyle=colorAlpha(color,0.95);
+  ctx.lineWidth=2;
+  ctx.beginPath(); ctx.moveTo(x0,yy); ctx.lineTo(endX,yy); ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(x0,yy-4); ctx.lineTo(x0,yy+4); ctx.stroke();
+  if(xStep>=14){
+    ctx.font="700 9px Segoe UI, Arial"; ctx.textAlign="left"; ctx.textBaseline="bottom";
+    ctx.fillStyle=colorAlpha(color,0.95);
+    ctx.fillText(fmt(markerSize(p),0),x0+3,yy-2);
+  }
+  ctx.restore();
+}
+function drawPlotMarkers(ctx,vis,L,T,pw,ph,xStep,y,labelLayout){
   ctx.save(); ctx.font="10px Segoe UI, Arial"; ctx.textBaseline="middle";
   let maxBigTradeSize=0, minBigTradeSize=Infinity;
   for(const b of vis){
@@ -901,8 +925,8 @@ function drawPlotMarkers(ctx,vis,L,T,ph,xStep,y,labelLayout){
       }
     }
   }
-  const bubbleMin=clamp(xStep*0.18,3.5,8);
-  const bubbleMax=clamp(Math.min(xStep*0.48,ph*0.035),9,34);
+  const bubbleMin=clamp(xStep*0.12,2.5,5);
+  const bubbleMax=clamp(Math.max(xStep*0.55,ph*0.05),16,40);
   for(let i=0;i<vis.length;i++){
     const b=vis[i], x=L+i*xStep+xStep/2;
     for(const p of (b.plots||[])){
@@ -915,9 +939,14 @@ function drawPlotMarkers(ctx,vis,L,T,ph,xStep,y,labelLayout){
         const size=markerSize(p);
         const minSize=isFinite(minBigTradeSize)?minBigTradeSize:0;
         const denom=Math.max(1e-9,maxBigTradeSize-minSize);
-        const n=maxBigTradeSize>0?Math.sqrt((size-minSize)/denom):0.5;
+        // Linear radius (area grows quadratically) so relative size differences pop.
+        const n=maxBigTradeSize>minSize?(size-minSize)/denom:0.5;
         const r=clamp(bubbleMin+n*(bubbleMax-bubbleMin),bubbleMin,bubbleMax);
-        drawBigTradeBubble(ctx,p,x,yy,r);
+        drawBigTradeBubble(ctx,p,x,yy,r,n);
+        continue;
+      }
+      if(cat==="imbalance"){
+        drawImbalanceLine(ctx,p,vis,i,x,yy,L,pw,xStep);
         continue;
       }
       ctx.fillStyle=color; ctx.strokeStyle="#ffffff"; ctx.lineWidth=2;
@@ -1132,7 +1161,7 @@ function drawPrice(){
   drawDrawings(pctx,L,T,pw,ph,xStep,y,s,e);
   drawVolumeProfiles(pctx,vis,L,T,pw,ph,xStep,y,tick,labelLayout);
   drawVpProfiles(pctx,L,T,pw,ph,xStep,y,tick,s,e,labelLayout);
-  drawPlotMarkers(pctx,vis,L,T,ph,xStep,y,labelLayout);
+  drawPlotMarkers(pctx,vis,L,T,pw,ph,xStep,y,labelLayout);
   if(overlayOn("trades")) drawTradePositions(pctx,trades,s,e,L,T,ph,xStep,y,labelLayout);
   pctx.restore();
   drawEconomicEvents(pctx,s,e,L,T,pw,ph,xStep);
