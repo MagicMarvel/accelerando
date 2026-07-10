@@ -145,8 +145,7 @@
     <button id="tradeLast" title="Jump to last trade">Last</button>
   </span>
   <span class="seg" aria-label="chart mode">
-    <button id="modeCandles" class="active" title="Candlestick chart">Candles</button>
-    <button id="modeFootprint" title="Footprint chart">Footprint</button>
+    <button id="modeChart" class="active" title="Price chart: footprint when zoomed in, candles when zoomed out. Press M for a footprint magnifier.">Chart</button>
     <button id="modeHeatmap" title="L2 heatmap chart">Heatmap</button>
   </span>
   <label class="heat-pick">heat <select id="heatMetric"><option value="total">total</option><option value="bid">bid</option><option value="ask">ask</option></select></label>
@@ -221,7 +220,10 @@ const COLORS = { up:"#6d6dff", down:"#ff6d6d", buy:"#6d6dff", sell:"#ff6d6d", tr
 // TradingView-style layout: thin left padding, price axis on the right.
 const AXIS_W=64, PADL=8;
 let SCHEMA=null, CONFIG=null, DATA=null, fps=[], eq=[], trades=[], runSeries=[];
-let barsPerView=300, start=0, hover=null, drag=null, splitDrag=null, chartMode="candles", heatMetric="total", poll=null;
+let barsPerView=300, start=0, hover=null, drag=null, splitDrag=null, chartMode="chart", heatMetric="total", poll=null;
+// The merged price chart renders footprints once bars are at least this wide, candles below it.
+const FOOTPRINT_MIN_XSTEP=32;
+let magnifier=false; // M key: ATAS-style footprint lens under the cursor
 // Overlay visibility, keyed by category ("bands", "trades", or a marker group). Persisted across
 // re-renders so a hidden overlay stays hidden when the result is reloaded.
 let overlayState={};
@@ -778,7 +780,7 @@ function jumpToTrade(which){
   buildOverlayToggles();
   draw();
 }
-function setChartMode(mode){ chartMode=mode; $("modeCandles").classList.toggle("active",mode==="candles"); $("modeFootprint").classList.toggle("active",mode==="footprint"); $("modeHeatmap").classList.toggle("active",mode==="heatmap"); if(mode==="heatmap"){ heatView=null; heatData=null; heatImg=null; ensureHeat(); } draw(); }
+function setChartMode(mode){ if(mode==="candles"||mode==="footprint")mode="chart"; chartMode=mode; $("modeChart").classList.toggle("active",mode!=="heatmap"); $("modeHeatmap").classList.toggle("active",mode==="heatmap"); if(mode==="heatmap"){ heatView=null; heatData=null; heatImg=null; ensureHeat(); } draw(); }
 function tickSizeFor(vis){
   if(DATA&&DATA.tick_size>0)return DATA.tick_size;
   let best=Infinity;
@@ -1263,7 +1265,9 @@ function drawPrice(){
   drawTimeAxis(pctx,vis,L,T,pw,ph,W,R,"ts_last_ns",xStep);
   const labelLayout={boxes:[],L,T,pw,ph};
   pctx.save(); clipPlot(pctx,L,T,pw,ph);
-  if(chartMode==="footprint") drawFootprints(pctx,vis,L,T,ph,xStep,y,tick);
+  // Merged price mode: footprint cells once bars are wide enough to read, candles otherwise
+  // (press M for the magnifier to inspect footprint detail while zoomed out).
+  if(xStep>=FOOTPRINT_MIN_XSTEP) drawFootprints(pctx,vis,L,T,ph,xStep,y,tick);
   else drawCandles(pctx,vis,L,T,ph,xStep,cw,y);
   drawPriceBoxes(pctx,vis,L,T,pw,ph,xStep,y,labelLayout);
   drawImbalanceZones(pctx,L,T,pw,ph,xStep,y,s,e,labelLayout);
@@ -1301,8 +1305,54 @@ function drawPrice(){
       axisPriceTag(pctx,W,R,hover.y,pAt.toFixed(2),"#334155");
       axisTimeTag(pctx,x,T+ph,fmtCrosshairTs(b.ts_last_ns),L,pw);
     }
-    const tags=b.tags?Object.entries(b.tags).map(([k,v])=>`${k}:${v}`).join(" "):""; const base=`${s+idx+1}/${fps.length}  ${fmtTs(b.ts_last_ns)}  O ${b.open.toFixed(2)} H ${b.high.toFixed(2)} L ${b.low.toFixed(2)} C ${b.close.toFixed(2)}  D ${fmt(b.delta,0)}  ${tags}`; if(chartMode==="footprint"){ const totals=footprintTotals(b); const priceAt=hi-(hover.y-T)/Math.max(1,ph)*(hi-lo); const lv=nearestFootprintLevel(b,priceAt); $("status").textContent=base+`  bar sell/buy ${fmt(totals.sell,0)}/${fmt(totals.buy,0)}  level ${lv?lv.price.toFixed(2):priceAt.toFixed(2)} sell/buy ${lv?fmt(lv.sell_vol,0):"-"}/${lv?fmt(lv.buy_vol,0):"-"}`; } else { $("status").textContent=base; } } }
+    const tags=b.tags?Object.entries(b.tags).map(([k,v])=>`${k}:${v}`).join(" "):""; const base=`${s+idx+1}/${fps.length}  ${fmtTs(b.ts_last_ns)}  O ${b.open.toFixed(2)} H ${b.high.toFixed(2)} L ${b.low.toFixed(2)} C ${b.close.toFixed(2)}  D ${fmt(b.delta,0)}  ${tags}`; if(xStep>=FOOTPRINT_MIN_XSTEP||magnifier){ const totals=footprintTotals(b); const priceAt=hi-(hover.y-T)/Math.max(1,ph)*(hi-lo); const lv=nearestFootprintLevel(b,priceAt); $("status").textContent=base+`  bar sell/buy ${fmt(totals.sell,0)}/${fmt(totals.buy,0)}  level ${lv?lv.price.toFixed(2):priceAt.toFixed(2)} sell/buy ${lv?fmt(lv.sell_vol,0):"-"}/${lv?fmt(lv.buy_vol,0):"-"}`; } else { $("status").textContent=base; } } }
+  if(magnifier)drawMagnifier(pctx,W,R);
   $("range").textContent=`bars ${s+1}-${e} / ${fps.length}`;
+}
+// ATAS-style magnifier (M key): a lens near the cursor that renders the bars under it as a
+// full-size footprint, so footprint detail stays reachable while zoomed out to candles.
+const MAG_W=460, MAG_H=340, MAG_MIN_LEVEL_PX=12;
+function drawMagnifier(ctx,W,R){
+  if(!hover||hover.canvas!=="price"||!priceScale||!fps.length)return;
+  const {s,e,L,T,pw,ph,xStep}=priceScale;
+  const mx=hover.x,my=hover.y;
+  if(mx<L||mx>L+pw||my<T||my>T+ph)return;
+  const ci=clamp(Math.floor((mx-L)/xStep),0,Math.max(0,e-s-1))+s;
+  const nBars=Math.max(1,Math.round(MAG_W/110));
+  const b0=clamp(ci-(nBars>>1),0,Math.max(0,fps.length-nBars));
+  const bars=fps.slice(b0,b0+nBars);
+  if(!bars.length)return;
+  const tick=tickSizeFor(bars);
+  // Price window: the lens bars' full range, but capped so one tick level stays readable;
+  // when capped, center the window on the price under the cursor.
+  let lo=Infinity,hi=-Infinity;
+  for(const b of bars){ lo=Math.min(lo,b.low); hi=Math.max(hi,b.high); }
+  const innerT=22, innerH=MAG_H-30;
+  const maxSpan=innerH/MAG_MIN_LEVEL_PX*tick;
+  if(hi-lo>maxSpan){
+    const priceAt=priceScale.hi-(my-T)/ph*(priceScale.hi-priceScale.lo);
+    lo=clamp(priceAt-maxSpan/2,lo,hi-maxSpan);
+    hi=lo+maxSpan;
+  }
+  lo-=tick; hi+=tick;
+  let lx=mx+26, ly=my-MAG_H/2;
+  if(lx+MAG_W>L+pw-4)lx=mx-26-MAG_W;
+  lx=Math.max(L+4,lx); ly=clamp(ly,T+4,Math.max(T+4,T+ph-MAG_H-4));
+  ctx.save();
+  ctx.shadowColor="rgba(15,23,42,0.35)"; ctx.shadowBlur=16; ctx.shadowOffsetY=3;
+  ctx.fillStyle="#fbfcfe"; ctx.fillRect(lx,ly,MAG_W,MAG_H);
+  ctx.shadowColor="transparent";
+  ctx.strokeStyle="#334155"; ctx.lineWidth=1.5; ctx.strokeRect(lx,ly,MAG_W,MAG_H);
+  ctx.beginPath(); ctx.rect(lx+1,ly+1,MAG_W-2,MAG_H-2); ctx.clip();
+  const yy=p=>ly+innerT+(hi-p)/Math.max(1e-9,hi-lo)*innerH;
+  drawFootprints(ctx,bars,lx,ly+innerT,innerH,MAG_W/bars.length,yy,tick);
+  // Highlight the bar under the cursor.
+  const hx=lx+(ci-b0)*(MAG_W/bars.length);
+  ctx.strokeStyle="rgba(37,99,235,0.55)"; ctx.lineWidth=1;
+  ctx.strokeRect(hx,ly+innerT,MAG_W/bars.length,innerH);
+  ctx.fillStyle="#334155"; ctx.font="10px Segoe UI, Arial"; ctx.textAlign="left"; ctx.textBaseline="middle";
+  ctx.fillText(`magnifier  ${fmtCrosshairTs(fps[ci].ts_last_ns)}  (M to close)`,lx+8,ly+11);
+  ctx.restore();
 }
 function annotationLabels(){ return (annotationConfig.labels||[]).filter(Boolean); }
 function annotationRunId(){ return typeof globalThis.RUN_ID==="string"?globalThis.RUN_ID:""; }
@@ -2188,8 +2238,7 @@ $("tradeFirst").onclick=()=>jumpToTrade("first");
 $("tradePrev").onclick=()=>jumpToTrade("prev");
 $("tradeNext").onclick=()=>jumpToTrade("next");
 $("tradeLast").onclick=()=>jumpToTrade("last");
-$("modeCandles").onclick=()=>setChartMode("candles");
-$("modeFootprint").onclick=()=>setChartMode("footprint");
+$("modeChart").onclick=()=>setChartMode("chart");
 $("modeHeatmap").onclick=()=>setChartMode("heatmap");
 $("heatMetric").onchange=e=>{heatMetric=e.target.value; if(chartMode==="heatmap")fetchHeat(); else draw();};
 $("toggleMetrics").onclick=()=>setCardsCollapsed(!cardsCollapsed);
@@ -2228,11 +2277,13 @@ window.addEventListener("keydown",ev=>{
   if(ev.key.toLowerCase()==="c"){ setCrosshair(!crosshairOn); ev.preventDefault(); return; }
   if(ev.key.toLowerCase()==="h"){ setDrawTool("hline"); ev.preventDefault(); return; }
   if(ev.key.toLowerCase()==="r"){ setDrawTool("rect"); ev.preventDefault(); return; }
+  if(ev.key.toLowerCase()==="m"){ magnifier=!magnifier; draw(); ev.preventDefault(); return; }
   if(ev.key==="Delete"||ev.key==="Backspace"){
     if(selectedShape){ deleteSelectedShape(); ev.preventDefault(); }
     return;
   }
   if(ev.key==="Escape"){
+    if(magnifier){ magnifier=false; draw(); ev.preventDefault(); return; }
     const rm=$("runMeta");
     if(rm&&rm.classList.contains("visible")&&!metaCollapsed){ setMetaCollapsed(true); ev.preventDefault(); return; }
     const vm=$("vwapMenu");
