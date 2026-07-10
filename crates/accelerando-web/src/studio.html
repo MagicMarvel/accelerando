@@ -235,6 +235,8 @@ let vpProfiles=[], vpMode=false, vpDraft=null;
 const overlayLabel=cat=>cat==="bands"?"bands":cat==="trades"?"trades":cat==="ff_high_events"?"High events":cat.replace(/_/g," ");
 const overlayOn=cat=>overlayState[cat]!==false;
 const markerCat=p=>p.group||"markers";
+// Line plots group into one overlay toggle per id prefix ("vwap_up" -> "vwap").
+const lineCat=p=>String(p.id||"lines").split("_")[0]||"lines";
 const volumeProfileCat=p=>(p.id||"").startsWith("entry_vp_")?"entry_vp":"volume_profiles";
 const priceBoxCat=p=>p.group||"price_boxes";
 let yZoom={price:{manual:false,lo:null,hi:null},equity:{manual:false,lo:null,hi:null}};
@@ -564,6 +566,7 @@ function overlayCategories(){
   for(const b of fps){ for(const p of (b.plots||[])){
     if(p.kind==="BackgroundBand")hasBands=true;
     else if(p.kind==="Marker")markerGroups.add(markerCat(p));
+    else if(p.kind==="Line")markerGroups.add(lineCat(p));
     else if(p.kind==="VolumeProfile")markerGroups.add(volumeProfileCat(p));
     else if(p.kind==="PriceBox")markerGroups.add(priceBoxCat(p));
   } }
@@ -914,6 +917,39 @@ function drawImbalanceLine(ctx,p,vis,i,x,yy,L,pw,xStep){
   }
   ctx.restore();
 }
+// Indicator/strategy Line plots: polylines connected across bars by id (e.g. a VWAP and its
+// bands). A bar without a point for an id breaks the path (session resets stay visible).
+function drawPlotLines(ctx,vis,L,T,ph,xStep,y){
+  const paths=new Map(); // id -> {color, pts:[{x,v}|null]}
+  for(let i=0;i<vis.length;i++){
+    const seen=new Set();
+    for(const p of (vis[i].plots||[])){
+      if(p.kind!=="Line"||p.value==null||!isFinite(p.value))continue;
+      if(!overlayOn(lineCat(p)))continue;
+      const id=p.id||"line";
+      if(seen.has(id))continue;
+      seen.add(id);
+      if(!paths.has(id))paths.set(id,{color:p.color||"#0ea5e9",pts:new Array(vis.length).fill(null)});
+      paths.get(id).pts[i]={x:L+i*xStep+xStep/2,v:p.value};
+    }
+  }
+  if(!paths.size)return;
+  ctx.save();
+  ctx.lineWidth=1.5; ctx.lineJoin="round";
+  for(const [,path] of paths){
+    ctx.strokeStyle=colorAlpha(path.color,0.9);
+    ctx.beginPath();
+    let pen=false;
+    for(const pt of path.pts){
+      if(!pt){ pen=false; continue; }
+      const yy=y(pt.v);
+      if(pen)ctx.lineTo(pt.x,yy); else ctx.moveTo(pt.x,yy);
+      pen=true;
+    }
+    ctx.stroke();
+  }
+  ctx.restore();
+}
 function drawPlotMarkers(ctx,vis,L,T,pw,ph,xStep,y,labelLayout){
   ctx.save(); ctx.font="10px Segoe UI, Arial"; ctx.textBaseline="middle";
   let maxBigTradeSize=0, minBigTradeSize=Infinity;
@@ -1207,6 +1243,7 @@ function drawPrice(){
   drawDrawings(pctx,L,T,pw,ph,xStep,y,s,e);
   drawVolumeProfiles(pctx,vis,L,T,pw,ph,xStep,y,tick,labelLayout);
   drawVpProfiles(pctx,L,T,pw,ph,xStep,y,tick,s,e,labelLayout);
+  drawPlotLines(pctx,vis,L,T,ph,xStep,y);
   drawPlotMarkers(pctx,vis,L,T,pw,ph,xStep,y,labelLayout);
   if(overlayOn("trades")) drawTradePositions(pctx,trades,s,e,L,T,ph,xStep,y,labelLayout);
   pctx.restore();
