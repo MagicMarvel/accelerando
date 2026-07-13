@@ -19,6 +19,12 @@
   header .status { font-size:12px; color:#cbd5e1; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; max-width:40vw;}
   header .heat-pick { font-size:12px; color:#94a3b8; display:inline-flex; gap:5px; align-items:center; }
   header .heat-pick select { height:26px; background:#1e293b; color:#cbd5e1; border:1px solid #334155; border-radius:6px; font-size:12px; }
+  header .bubble-agg { display:none; margin-left:auto; min-width:300px; max-width:500px; flex:1 1 320px; align-items:center; gap:8px; color:#cbd5e1; font-size:12px; white-space:nowrap; }
+  header .bubble-agg.visible { display:flex; }
+  header .bubble-agg input { appearance:none; flex:1; height:5px; border-radius:4px; outline:0; background:linear-gradient(90deg,#334155,#3b82f6); cursor:pointer; }
+  header .bubble-agg input::-webkit-slider-thumb { appearance:none; width:15px; height:15px; border-radius:50%; border:2px solid #dbeafe; background:#2563eb; box-shadow:0 0 0 2px rgba(37,99,235,.3); }
+  header .bubble-agg input::-moz-range-thumb { width:13px; height:13px; border-radius:50%; border:2px solid #dbeafe; background:#2563eb; }
+  header .bubble-agg output { min-width:26px; color:#93c5fd; text-align:right; font-variant-numeric:tabular-nums; }
   button.tool-toggle { height:26px; padding:0 10px; border-radius:8px; background:#1e293b; border:1px solid #334155; color:#cbd5e1; font-size:12px; }
   button.tool-toggle:hover { background:#334155; }
   button.tool-toggle.active { background:#2563eb; border-color:#2563eb; color:#fff; }
@@ -149,6 +155,7 @@
     <button id="modeHeatmap" title="L2 heatmap chart">Heatmap</button>
   </span>
   <label class="heat-pick">heat <select id="heatMetric"><option value="total">total</option><option value="bid">bid</option><option value="ask">ask</option></select></label>
+  <button id="toggleCvd" class="tool-toggle active" type="button" title="隐藏 CVD 子图" aria-pressed="true" style="display:none;">CVD</button>
   <button id="toggleMetrics" class="tool-toggle active" type="button" title="Hide metrics" aria-pressed="true">Metrics</button>
   <button id="toggleEquity" class="tool-toggle active" type="button" title="Hide equity" aria-pressed="true">Equity</button>
   <button id="toggleRunMeta" class="meta-toggle" type="button" style="display:none;"></button>
@@ -158,6 +165,9 @@
     <button id="annoCancel" type="button" title="Cancel current box (Esc)" disabled>Cancel</button>
     <span id="annoHint" class="anno-hint"></span>
   </span>
+  <label id="bubbleAggControl" class="bubble-agg" title="低：显示更多独立小成交；高：把邻近成交聚合成大气泡">
+    <span>泡泡聚合度</span><span>低</span><input id="bubbleAgg" type="range" min="0" max="100" value="28" step="1"><span>高</span><output id="bubbleAggValue">28</output>
+  </label>
   <span class="rng" id="range"></span>
   <span class="status" id="status"></span>
 </header>
@@ -254,6 +264,7 @@ let equityCollapsed=readStoredBool("accelerando.equityCollapsed",false);
 let cardsCollapsed=readStoredBool("accelerando.cardsCollapsed",false);
 let crosshairOn=readStoredBool("accelerando.crosshair",true);
 let legendCollapsed=readStoredBool("accelerando.legendCollapsed",false);
+let cvdVisible=readStoredBool("accelerando.heatmapCvd",true);
 const fmt=(n,d=2)=>(n===null||n===undefined||!isFinite(n))?"-":Number(n).toLocaleString(undefined,{maximumFractionDigits:d,minimumFractionDigits:d});
 const fmtTs=ns=>new Date(Number(ns)/1e6).toLocaleString();
 const fmtAxisTs=ns=>new Date(Number(ns)/1e6).toLocaleTimeString([], {hour:"2-digit", minute:"2-digit"});
@@ -780,7 +791,7 @@ function jumpToTrade(which){
   buildOverlayToggles();
   draw();
 }
-function setChartMode(mode){ if(mode==="candles"||mode==="footprint")mode="chart"; chartMode=mode; $("modeChart").classList.toggle("active",mode!=="heatmap"); $("modeHeatmap").classList.toggle("active",mode==="heatmap"); if(mode==="heatmap"){ heatView=null; heatData=null; heatImg=null; ensureHeat(); } draw(); }
+function setChartMode(mode){ if(mode==="candles"||mode==="footprint")mode="chart"; chartMode=mode; $("modeChart").classList.toggle("active",mode!=="heatmap"); $("modeHeatmap").classList.toggle("active",mode==="heatmap"); $("bubbleAggControl").classList.toggle("visible",mode==="heatmap"); $("toggleCvd").style.display=""; if(mode==="heatmap"){ heatView=null; heatData=null; heatImg=null; ensureHeat(); } draw(); }
 function tickSizeFor(vis){
   if(DATA&&DATA.tick_size>0)return DATA.tick_size;
   let best=Infinity;
@@ -1252,17 +1263,26 @@ function drawFootprints(ctx,vis,L,T,ph,xStep,y,tick){
     }
   }
 }
+function drawFootprintCvd(ctx,vis,L,T,pw,ph,W,R,xStep){
+  const vals=new Float64Array(vis.length);let cvd=0,lo=0,hi=0;
+  for(let i=0;i<vis.length;i++){cvd+=Number(vis[i].delta)||0;vals[i]=cvd;lo=Math.min(lo,cvd);hi=Math.max(hi,cvd);}
+  if(hi===lo){hi+=1;lo-=1;}const pad=(hi-lo)*.08;hi+=pad;lo-=pad;const yy=v=>T+(hi-v)/(hi-lo)*ph,zero=yy(0);
+  ctx.fillStyle="#f8fafc";ctx.fillRect(L,T,pw,ph);ctx.strokeStyle="rgba(148,163,184,.18)";for(let i=0;i<=2;i++){const y0=T+ph*i/2;ctx.beginPath();ctx.moveTo(L,y0);ctx.lineTo(L+pw,y0);ctx.stroke();}
+  ctx.setLineDash([3,3]);ctx.strokeStyle="rgba(71,85,105,.42)";ctx.beginPath();ctx.moveTo(L,zero);ctx.lineTo(L+pw,zero);ctx.stroke();ctx.setLineDash([]);
+  for(let i=1;i<vis.length;i++){const x0=L+(i-.5)*xStep,x1=L+(i+.5)*xStep,y0=yy(vals[i-1]),y1=yy(vals[i]),up=vals[i]>=vals[i-1];ctx.beginPath();ctx.moveTo(x0,zero);ctx.lineTo(x0,y0);ctx.lineTo(x1,y1);ctx.lineTo(x1,zero);ctx.closePath();ctx.fillStyle=up?"rgba(41,98,255,.10)":"rgba(242,54,69,.09)";ctx.fill();ctx.beginPath();ctx.moveTo(x0,y0);ctx.lineTo(x1,y1);ctx.strokeStyle=up?"#2962ff":"#f23645";ctx.lineWidth=1.3;ctx.stroke();}
+  ctx.fillStyle="#475569";ctx.font="600 11px Segoe UI,Arial";ctx.fillText("CVD",L+5,T+13);ctx.fillStyle="#64748b";ctx.font="10px Segoe UI,Arial";ctx.fillText(fmt(hi,0),W-R+6,T+9);ctx.fillText(fmt(lo,0),W-R+6,T+ph);ctx.strokeStyle="#cbd5e1";ctx.strokeRect(L,T,pw,ph);
+  return {vals,lo,hi,y:yy};
+}
 function drawPrice(){
   const W=price.clientWidth,H=price.clientHeight; pctx.clearRect(0,0,W,H); pctx.fillStyle="#fbfcfe"; pctx.fillRect(0,0,W,H);
   if(!fps.length){ pctx.fillStyle="#94a3b8"; pctx.font="14px Segoe UI"; pctx.fillText("Run a backtest to view results", 20, H/2); return; }
   if(chartMode==="heatmap"){ drawHeatmap(pctx,price,"price"); const [s,e]=viewRange(); $("range").textContent=`bars ${s+1}-${e} / ${fps.length}`; return; }
-  const [s,e]=viewRange(); const vis=fps.slice(s,e); const L=PADL,R=AXIS_W,T=14,B=34; const pw=Math.max(1,W-L-R),ph=Math.max(1,H-T-B);
+  const [s,e]=viewRange(); const vis=fps.slice(s,e); const L=PADL,R=AXIS_W,T=14,B=34,pw=Math.max(1,W-L-R),totalPh=Math.max(1,H-T-B),cvdH=cvdVisible?Math.max(90,Math.min(155,totalPh*.2)):0,paneGap=cvdVisible?6:0,ph=Math.max(80,totalPh-cvdH-paneGap),cvdT=T+ph+paneGap;
   let lo=Infinity,hi=-Infinity; for(const b of vis){lo=Math.min(lo,b.low);hi=Math.max(hi,b.high);}
   const pad=Math.max(0.25,(hi-lo)*0.06); lo-=pad;hi+=pad; [lo,hi]=applyYZoom("price",lo,hi); yZoom.price.lo=lo; yZoom.price.hi=hi; const y=p=>T+(hi-p)/(hi-lo)*ph; const xStep=pw/Math.max(1,barsPerView); priceScale={s,e,L,T,pw,ph,lo,hi,xStep}; const cw=candleWidth(xStep); const tick=tickSizeFor(vis);
   if(overlayOn("bands")){ let i=0; while(i<vis.length){ const band=(vis[i].plots||[]).find(p=>p.kind==="BackgroundBand"); const col=band?band.color:null; let j=i+1; const same=k=>{const bb=(vis[k].plots||[]).find(p=>p.kind==="BackgroundBand"); return (bb?bb.color:null)===col;}; while(j<vis.length&&same(j))j++; if(col){pctx.fillStyle=col; pctx.fillRect(L+i*xStep,T,(j-i)*xStep,ph);} i=j; } }
   pctx.strokeStyle=COLORS.grid; pctx.fillStyle=COLORS.axis; pctx.font="11px Segoe UI, Arial"; pctx.lineWidth=1;
   for(let i=0;i<=6;i++){ const yy=T+ph*i/6,pr=hi-(hi-lo)*i/6; pctx.beginPath();pctx.moveTo(L,yy);pctx.lineTo(W-R,yy);pctx.stroke(); pctx.fillText(pr.toFixed(2),W-R+6,yy+4); }
-  drawTimeAxis(pctx,vis,L,T,pw,ph,W,R,"ts_last_ns",xStep);
   const labelLayout={boxes:[],L,T,pw,ph};
   pctx.save(); clipPlot(pctx,L,T,pw,ph);
   // Merged price mode: footprint cells once bars are wide enough to read, candles otherwise
@@ -1282,6 +1302,8 @@ function drawPrice(){
   pctx.restore();
   drawEconomicEvents(pctx,s,e,L,T,pw,ph,xStep);
   pctx.strokeStyle="#9aa4b2"; pctx.strokeRect(L,T,pw,ph);
+  const cvdPlot=cvdVisible?drawFootprintCvd(pctx,vis,L,cvdT,pw,cvdH,W,R,xStep):null;
+  drawTimeAxis(pctx,vis,L,T,pw,totalPh,W,R,"ts_last_ns",xStep);
   // Current price: dashed line + right-axis tag at the latest bar's close (TradingView-style).
   const lastB=fps[fps.length-1];
   if(lastB&&isFinite(lastB.close)){
@@ -1295,15 +1317,16 @@ function drawPrice(){
     }
   }
   if(hover&&hover.canvas==="price"){ const idx=clamp(Math.floor((hover.x-L)/xStep),0,vis.length-1); const b=vis[idx]; if(b){
-    if(crosshairOn&&hover.x>=L&&hover.x<=L+pw&&hover.y>=T&&hover.y<=T+ph){
+    if(crosshairOn&&hover.x>=L&&hover.x<=L+pw&&hover.y>=T&&hover.y<=T+totalPh){
       const x=L+idx*xStep+xStep/2;
       pctx.save(); pctx.setLineDash([4,4]); pctx.strokeStyle="rgba(71,85,105,0.75)"; pctx.lineWidth=1;
-      pctx.beginPath();pctx.moveTo(x,T);pctx.lineTo(x,T+ph);pctx.stroke();
+      pctx.beginPath();pctx.moveTo(x,T);pctx.lineTo(x,T+totalPh);pctx.stroke();
       pctx.beginPath();pctx.moveTo(L,hover.y);pctx.lineTo(L+pw,hover.y);pctx.stroke();
       pctx.setLineDash([]); pctx.restore();
-      const pAt=hi-(hover.y-T)/Math.max(1,ph)*(hi-lo);
-      axisPriceTag(pctx,W,R,hover.y,pAt.toFixed(2),"#334155");
-      axisTimeTag(pctx,x,T+ph,fmtCrosshairTs(b.ts_last_ns),L,pw);
+      const inPrice=hover.y<=T+ph,pAt=hi-(hover.y-T)/Math.max(1,ph)*(hi-lo);
+      if(inPrice)axisPriceTag(pctx,W,R,hover.y,pAt.toFixed(2),"#334155");
+      axisTimeTag(pctx,x,T+totalPh,fmtCrosshairTs(b.ts_last_ns),L,pw);
+      if(!inPrice&&cvdPlot)$("status").textContent=`${fmtTs(b.ts_last_ns)}   CVD ${fmt(cvdPlot.vals[idx],0)}`;
     }
     const tags=b.tags?Object.entries(b.tags).map(([k,v])=>`${k}:${v}`).join(" "):""; const base=`${s+idx+1}/${fps.length}  ${fmtTs(b.ts_last_ns)}  O ${b.open.toFixed(2)} H ${b.high.toFixed(2)} L ${b.low.toFixed(2)} C ${b.close.toFixed(2)}  D ${fmt(b.delta,0)}  ${tags}`; if(xStep>=FOOTPRINT_MIN_XSTEP||magnifier){ const totals=footprintTotals(b); const priceAt=hi-(hover.y-T)/Math.max(1,ph)*(hi-lo); const lv=nearestFootprintLevel(b,priceAt); $("status").textContent=base+`  bar sell/buy ${fmt(totals.sell,0)}/${fmt(totals.buy,0)}  level ${lv?lv.price.toFixed(2):priceAt.toFixed(2)} sell/buy ${lv?fmt(lv.sell_vol,0):"-"}/${lv?fmt(lv.buy_vol,0):"-"}`; } else { $("status").textContent=base; } } }
   if(magnifier)drawMagnifier(pctx,W,R);
@@ -1967,18 +1990,30 @@ function drawAnnotations(ctx,L,T,pw,ph,xStep,y,s,e){
 // The first stop is opaque instead of transparent so zero-liquidity buckets do not expose hard
 // canvas gaps; neighbouring interpolation then gives the continuous Bookmap-like look.
 const HEAT_LUT=(()=>{
-  const stops=[[0,[5,24,36,255]],[0.04,[6,44,66,255]],[0.16,[7,78,105,255]],[0.32,[0,126,142,255]],[0.50,[0,174,144,255]],[0.67,[245,58,24,255]],[0.84,[255,128,0,255]],[1,[255,242,38,255]]];
+  const stops=[[0,[20,47,55,255]],[0.035,[16,58,72,255]],[0.14,[10,82,111,255]],[0.29,[3,126,158,255]],[0.47,[80,168,185,255]],[0.62,[218,205,70,255]],[0.76,[238,91,27,255]],[0.89,[245,35,31,255]],[1,[255,229,54,255]]];
   const lut=new Uint8ClampedArray(256*4);
   for(let i=0;i<256;i++){ const n=i/255; let c=[0,0,0,0];
     for(let s=1;s<stops.length;s++){ if(n<=stops[s][0]){ const [t0,c0]=stops[s-1],[t1,c1]=stops[s]; const f=(n-t0)/Math.max(1e-6,t1-t0); c=[0,1,2,3].map(k=>Math.round(c0[k]+(c1[k]-c0[k])*f)); break; } }
     lut[i*4]=c[0];lut[i*4+1]=c[1];lut[i*4+2]=c[2];lut[i*4+3]=c[3]; }
   return lut;
 })();
-let heatCanvas=null, heatView=null, heatData=null, heatImg=null, heatPending=false, heatTimer=null, heatReqId=0;
+let heatCanvas=null, heatView=null, heatData=null, heatImg=null, heatPending=false, heatTimer=null, heatReqId=0, heatBubbleHits=[], bubbleAgg=28;
+// Keep recently rendered server windows in browser memory.  A 64 MiB LRU is large enough for
+// smooth back-and-forth navigation without turning a long replay session into an unbounded leak.
+const HEAT_CACHE_LIMIT=64*1024*1024;
+let heatWindowCache=[],heatWindowCacheBytes=0;
+// Manual replay may expose a bar to the server while revealing its order flow progressively.
+// This visual event-time cursor caps heatmap requests until the simulated clock reaches bar end.
+let replayVisualT1=null;
 function heatDataSpan(){ if(!fps.length)return null; return {t0:Number(fps[0].ts_first_ns), t1:Number(fps[fps.length-1].ts_last_ns)}; }
 function initHeatView(){
   const sp=heatDataSpan(); if(!sp)return;
-  const [s,e]=viewRange(); const vis=fps.slice(s,e); const src=vis.length?vis:fps;
+  const [s,e]=viewRange(); const vis=fps.slice(s,e);
+  // Manual replay centers the newest Chart bar and intentionally leaves future space on the
+  // right for order placement. A heatmap cannot request that future interval, so use a trailing
+  // revealed-data window instead and fill the full width up to the replay cursor.
+  const replayTrailing=DATA&&DATA.replay?fps.slice(Math.max(0,fps.length-barsPerView)):null;
+  const src=replayTrailing&&replayTrailing.length?replayTrailing:(vis.length?vis:fps);
   let lo=Infinity,hi=-Infinity; for(const b of src){lo=Math.min(lo,b.low);hi=Math.max(hi,b.high);} if(!isFinite(lo)){lo=0;hi=1;}
   const first=src[0], last=src[src.length-1];
   const t0=first?Number(first.ts_first_ns):sp.t0, t1=last?Number(last.ts_last_ns):sp.t1;
@@ -2007,84 +2042,191 @@ function buildHeatImg(d){
       img.data[oi]=HEAT_LUT[li]; img.data[oi+1]=HEAT_LUT[li+1]; img.data[oi+2]=HEAT_LUT[li+2]; img.data[oi+3]=HEAT_LUT[li+3];
     }
   }
-  if(!heatCanvas)heatCanvas=document.createElement("canvas"); heatCanvas.width=d.cols; heatCanvas.height=d.rows;
+  heatCanvas=document.createElement("canvas"); heatCanvas.width=d.cols; heatCanvas.height=d.rows;
   heatCanvas.getContext("2d").putImageData(img,0,0); heatImg=heatCanvas;
+  return heatCanvas;
+}
+function heatReplayCap(){
+  if(!(DATA&&DATA.replay&&fps.length))return Infinity;
+  let cap=Number(fps[fps.length-1].ts_last_ns);
+  if(Number.isFinite(replayVisualT1))cap=Math.min(cap,replayVisualT1);
+  return cap;
+}
+function heatCacheContext(){return `${typeof RUN_ID==="string"?RUN_ID:""}|${heatMetric}`;}
+function rememberHeatWindow(d,img){
+  const bytes=Math.max(1,d.cols*d.rows*4),context=heatCacheContext();
+  heatWindowCache=heatWindowCache.filter(e=>{if(e.context===context&&e.d.t0_ns===d.t0_ns&&e.d.t1_ns===d.t1_ns&&e.d.pmin===d.pmin&&e.d.pmax===d.pmax){heatWindowCacheBytes-=e.bytes;return false;}return true;});
+  heatWindowCache.push({d,img,bytes,context});heatWindowCacheBytes+=bytes;
+  while(heatWindowCacheBytes>HEAT_CACHE_LIMIT&&heatWindowCache.length>1){const e=heatWindowCache.shift();heatWindowCacheBytes-=e.bytes;}
+}
+function useCachedHeat(prefetchMargin=true){
+  if(!heatView)return false;
+  const ts=heatView.t1-heatView.t0,ps=heatView.pmax-heatView.pmin,m=prefetchMargin?0.10:0;
+  const t0=heatView.t0-ts*m,t1=heatView.t1+ts*m,pmin=heatView.pmin-ps*m,pmax=heatView.pmax+ps*m;
+  const cap=heatReplayCap(),context=heatCacheContext();
+  for(let i=heatWindowCache.length-1;i>=0;i--){const e=heatWindowCache[i],d=e.d;
+    // Never resurrect a raster containing order flow beyond the current manual-replay cursor.
+    if(e.context!==context||d.t1_ns>cap||d.t0_ns>t0||d.t1_ns<t1||d.pmin>pmin||d.pmax<pmax)continue;
+    heatWindowCache.splice(i,1);heatWindowCache.push(e);heatData=d;heatImg=e.img;heatCanvas=e.img;return true;
+  }
+  return false;
 }
 function ensureHeat(){ if(!heatView)initHeatView(); if(heatView)fetchHeat(); }
-function scheduleHeatFetch(){ if(heatTimer)clearTimeout(heatTimer); heatTimer=setTimeout(fetchHeat,90); }
+// Throttle instead of debounce: a debounce never fires while the pointer keeps moving, which
+// leaves the newly exposed sides blank until the drag ends.  Keeping one scheduled refresh lets
+// a long pan progressively catch up without flooding the server.
+function scheduleHeatFetch(){ if(useCachedHeat(true)){heatPending=false;return;} if(heatTimer)return; heatTimer=setTimeout(()=>{heatTimer=null;fetchHeat();},75); }
 async function fetchHeat(){
   if(!heatView)return;
+  if(useCachedHeat(true)){heatPending=false;draw();return;}
   const W=price.clientWidth,H=price.clientHeight,L=PADL,R=AXIS_W,T=10,B=30,pw=Math.max(50,W-L-R),ph=Math.max(50,H-T-B);
-  const cols=Math.max(60,Math.min(800,Math.round(pw*0.55)));
-  const spanMs=Math.max(1,(heatView.t1-heatView.t0)/1e6);
-  const bucketMs=Math.max(250,Math.min(5000,Math.round(spanMs/Math.max(1,cols))));
+  // Fetch beyond the viewport so the existing raster can slide under the canvas during the next
+  // pan.  The extra pixels are deliberately modest: enough for responsive dragging, while still
+  // keeping server work and response sizes bounded.
+  const timePad=(heatView.t1-heatView.t0)*0.5,pricePad=(heatView.pmax-heatView.pmin)*0.35;
+  let requestT0=heatView.t0-timePad,requestT1=heatView.t1+timePad;
+  const requestPmin=heatView.pmin-pricePad,requestPmax=heatView.pmax+pricePad;
+  const cols=Math.max(60,Math.min(800,Math.round(pw*1.1)));
+  const spanNs=Math.max(1,requestT1-requestT0);
+  // Quantize resolution to stable 1/2/5 steps.  Tiny replay-window changes then keep the same
+  // epoch-anchored quote buckets instead of regenerating a subtly different historical line.
+  const rawBucket=Math.max(1,Math.min(5e9,spanNs/Math.max(1,cols))),pow=Math.pow(10,Math.floor(Math.log10(rawBucket))),norm=rawBucket/pow;
+  const bucketNs=Math.max(1,Math.round((norm<=1?1:norm<=2?2:norm<=5?5:10)*pow));
   // One raster row per price tick so levels tile seamlessly (no horizontal striping).
   const tick=(DATA&&DATA.tick_size)||0.25;
-  const rows=Math.max(40,Math.min(900,Math.round((heatView.pmax-heatView.pmin)/tick)||Math.round(ph)));
+  const rows=Math.max(40,Math.min(900,Math.round((requestPmax-requestPmin)/tick)||Math.round(ph)));
   const id=typeof RUN_ID==="string"?RUN_ID:"";
-  const url=`/api/heatmap?id=${encodeURIComponent(id)}&t0=${Math.round(heatView.t0)}&t1=${Math.round(heatView.t1)}&pmin=${heatView.pmin}&pmax=${heatView.pmax}&cols=${cols}&rows=${rows}&metric=${heatMetric}&bucket_ms=${bucketMs}`;
+  if(DATA&&DATA.replay&&fps.length)requestT1=Math.min(requestT1,heatReplayCap());
+  if(requestT1<=requestT0){heatData=null;heatImg=null;heatPending=false;draw();return;}
+  const url=`/api/heatmap?id=${encodeURIComponent(id)}&t0=${Math.round(requestT0)}&t1=${Math.round(requestT1)}&pmin=${requestPmin}&pmax=${requestPmax}&cols=${cols}&rows=${rows}&metric=${heatMetric}&bucket_ns=${bucketNs}`;
   const myId=++heatReqId; heatPending=true;
-  try{ const r=await fetch(url); if(!r.ok){heatPending=false;draw();return;} const d=await r.json(); if(myId!==heatReqId)return; heatData=d; buildHeatImg(d); heatPending=false; draw(); }
+  try{ const r=await fetch(url); if(!r.ok){heatPending=false;draw();return;} const d=await r.json(); if(myId!==heatReqId)return; heatData=d; const img=buildHeatImg(d);rememberHeatWindow(d,img);heatPending=false; draw(); }
   catch(e){ heatPending=false; }
 }
-function fmtHeatAxis(t,spanNs){ const d=new Date(t/1e6); const hh=String(d.getHours()).padStart(2,"0"),mm=String(d.getMinutes()).padStart(2,"0"),ss=String(d.getSeconds()).padStart(2,"0"); if(spanNs>6*3600e9)return `${d.getMonth()+1}/${d.getDate()} ${hh}:${mm}`; if(spanNs>10*60e9)return `${hh}:${mm}`; return `${hh}:${mm}:${ss}`; }
+function fmtHeatAxis(t,spanNs){
+  const d=new Date(t/1e6),pad=(v,n=2)=>String(v).padStart(n,"0"),hh=pad(d.getHours()),mm=pad(d.getMinutes()),ss=pad(d.getSeconds()),ms=pad(d.getMilliseconds(),3);
+  if(spanNs>24*3600e9)return `${pad(d.getMonth()+1)}/${pad(d.getDate())} ${hh}:${mm}`;
+  if(spanNs>10*60e9)return `${hh}:${mm}`;
+  if(spanNs>15e9)return `${hh}:${mm}:${ss}`;
+  return `${hh}:${mm}:${ss}.${ms}`;
+}
 function drawHeatTimeAxis(ctx,L,T,pw,ph,W,R,t0,t1){
-  ctx.fillStyle="#94a3b8"; ctx.font="11px Segoe UI,Arial"; ctx.textAlign="center"; const span=t1-t0;
-  for(let i=0;i<=6;i++){ const t=t0+span*i/6,x=L+pw*i/6; ctx.strokeStyle="rgba(148,163,184,0.10)"; ctx.beginPath();ctx.moveTo(x,T);ctx.lineTo(x,T+ph);ctx.stroke(); ctx.fillText(fmtHeatAxis(t,span),Math.min(W-28,Math.max(L+24,x)),T+ph+16); }
+  const span=t1-t0,labelWidth=span<=15e9?108:span<=10*60e9?82:68,ticks=Math.max(2,Math.min(16,Math.floor(pw/labelWidth)));
+  ctx.fillStyle="#a8bdc3"; ctx.font="11px Consolas,Segoe UI,Arial"; ctx.textAlign="center";
+  for(let i=0;i<=ticks;i++){ const t=t0+span*i/ticks,x=L+pw*i/ticks; ctx.strokeStyle="rgba(166,194,201,0.22)";ctx.setLineDash([5,5]);ctx.beginPath();ctx.moveTo(x,T);ctx.lineTo(x,T+ph);ctx.stroke();ctx.setLineDash([]);ctx.fillText(fmtHeatAxis(t,span),Math.min(W-R-40,Math.max(L+40,x)),T+ph+18); }
   ctx.textAlign="left";
 }
 function drawHeatTraces(ctx,d,L,T,pw,ph,xT,y){
   const cols=d.cols,t0=d.t0_ns,t1=d.t1_ns,colT=i=>t0+(i+0.5)/cols*(t1-t0);
+  heatBubbleHits=[];
   ctx.save(); ctx.beginPath(); ctx.rect(L,T,pw,ph); ctx.clip();
-  const line=(arr,style)=>{ ctx.strokeStyle=style; ctx.lineWidth=1; ctx.beginPath(); let started=false; for(let i=0;i<cols;i++){ const v=arr[i]; if(!(v>0)){started=false;continue;} const x=xT(colT(i)),yy=y(v); started?ctx.lineTo(x,yy):ctx.moveTo(x,yy); started=true; } ctx.stroke(); };
-  line(d.col_bid,"rgba(52,224,180,0.6)");
-  line(d.col_ask,"rgba(255,93,122,0.6)");
-  line(d.col_last,"rgba(226,232,240,0.55)");
-  let maxDelta=0; for(let i=0;i<cols;i++){ const delta=(d.col_buy[i]||0)-(d.col_sell[i]||0); maxDelta=Math.max(maxDelta,Math.abs(delta)); }
-  if(maxDelta>0){
-    const pxPerCol=pw/cols, binCols=Math.max(1,Math.round(7/Math.max(0.001,pxPerCol))), rMax=Math.max(3,Math.min(binCols*pxPerCol*0.55,16));
-    for(let i=0;i<cols;i+=binCols){
-      let bv=0,sv=0,lastP=-1; const j1=Math.min(cols,i+binCols); for(let j=i;j<j1;j++){ bv+=d.col_buy[j]||0; sv+=d.col_sell[j]||0; if(d.col_last[j]>0)lastP=d.col_last[j]; }
-      const delta=bv-sv, mag=Math.abs(delta); if(mag<=0||lastP<=0)continue;
-      const x=xT(colT(i+binCols/2)),yy=y(lastP); if(yy<T-rMax||yy>T+ph+rMax)continue;
-      const r=2.5+rMax*Math.sqrt(mag/maxDelta);
-      ctx.beginPath(); ctx.arc(x,yy,r,0,Math.PI*2);
-      ctx.fillStyle=colorAlpha(delta>=0?COLORS.buy:COLORS.sell,0.9); ctx.fill();
-      ctx.lineWidth=1; ctx.strokeStyle="rgba(255,255,255,0.24)"; ctx.stroke();
+  const line=(arr,style,width=1)=>{ ctx.strokeStyle=style; ctx.lineWidth=width; ctx.beginPath(); let started=false; for(let i=0;i<cols;i++){ const v=arr[i]; if(!(v>0)){started=false;continue;} const x=xT(colT(i)),yy=y(v); started?ctx.lineTo(x,yy):ctx.moveTo(x,yy); started=true; } ctx.stroke(); };
+  // Draw exact timestamped BBO changes as a step line.  The old per-pixel arrays remain a
+  // compatibility fallback for recordings produced by an older server.
+  const quoteLine=(side,style,width)=>{const qs=d.quotes||[];if(!qs.length)return false;ctx.strokeStyle=style;ctx.lineWidth=width;ctx.beginPath();let prev=null;
+    for(const q of qs){const v=Number(q[side]);if(!(v>0))continue;const x=xT(Number(q.ts_ns)),yy=y(v);if(prev){ctx.lineTo(x,prev.y);ctx.lineTo(x,yy);}else ctx.moveTo(x,yy);prev={x,y:yy};}
+    if(prev)ctx.lineTo(xT(d.t1_ns),prev.y);ctx.stroke();return true;};
+  if(d.quotes&&d.quotes.length){quoteLine("bid","rgba(4,19,18,.88)",3.4);quoteLine("ask","rgba(4,19,18,.88)",3.4);quoteLine("bid","#00d783",1.45);quoteLine("ask","#ff493f",1.45);}
+  else {line(d.col_bid,"rgba(4,19,18,.88)",3.4);line(d.col_ask,"rgba(4,19,18,.88)",3.4);line(d.col_bid,"#00d783",1.45);line(d.col_ask,"#ff493f",1.45);}
+  // Bookmap-style last-price ribbon: green upticks and red downticks, with a dark underlay
+  // keeping it legible over the brightest liquidity bands.
+  ctx.lineCap="round";ctx.lineJoin="round";
+  for(let i=1;i<cols;i++){const a=d.col_last[i-1],b=d.col_last[i];if(!(a>0&&b>0))continue;const x0=xT(colT(i-1)),x1=xT(colT(i)),y0=y(a),y1=y(b);
+    ctx.beginPath();ctx.moveTo(x0,y0);ctx.lineTo(x1,y1);ctx.strokeStyle="rgba(4,15,18,.78)";ctx.lineWidth=4;ctx.stroke();
+    ctx.beginPath();ctx.moveTo(x0,y0);ctx.lineTo(x1,y1);ctx.strokeStyle=b>=a?"#00dc84":"#ff463d";ctx.lineWidth=2.15;ctx.stroke();}
+  const pxPerCol=pw/cols, targetBinPx=1.5+42*Math.pow(bubbleAgg/100,1.65), binCols=Math.max(1,Math.round(targetBinPx/Math.max(0.001,pxPerCol)));
+  const bubbles=[];
+  if(Array.isArray(d.trades)&&d.trades.length){
+    const groups=new Map();
+    for(const tr of d.trades){const col=clamp(Math.floor((Number(tr.ts_ns)-t0)/Math.max(1,t1-t0)*cols),0,cols-1),bin=Math.floor(col/binCols),g=groups.get(bin)||{bv:0,sv:0,wp:0,wc:0,w:0};const sz=Number(tr.size)||0;if(tr.is_buy)g.bv+=sz;else g.sv+=sz;g.wp+=Number(tr.price)*sz;g.wc+=col*sz;g.w+=sz;groups.set(bin,g);}
+    for(const g of groups.values()){const delta=g.bv-g.sv,mag=Math.abs(delta);if(mag<=0||g.w<=0)continue;const bubblePrice=g.wp/g.w,bubbleCol=g.wc/g.w,x=xT(colT(bubbleCol)),yy=y(bubblePrice);if(x<L||x>L+pw||yy<T||yy>T+ph)continue;bubbles.push({x,y:yy,delta,mag,buy:g.bv,sell:g.sv,price:bubblePrice});}
+  } else for(let i=0;i<cols;i+=binCols){
+    let bv=0,sv=0,weightedPrice=0,weightedCol=0,weight=0; const j1=Math.min(cols,i+binCols);
+    for(let j=i;j<j1;j++){const buy=d.col_buy[j]||0,sell=d.col_sell[j]||0,vol=buy+sell,px=d.col_last[j];bv+=buy;sv+=sell;if(vol>0&&px>0){weightedPrice+=px*vol;weightedCol+=j*vol;weight+=vol;}}
+    const delta=bv-sv,mag=Math.abs(delta); if(mag<=0||weight<=0)continue;
+    const bubblePrice=weightedPrice/weight,bubbleCol=weightedCol/weight;
+    const x=xT(colT(bubbleCol)),yy=y(bubblePrice); if(x<L||x>L+pw||yy<T||yy>T+ph)continue;
+    bubbles.push({x,y:yy,delta,mag,buy:bv,sell:sv,price:bubblePrice});
+  }
+  if(bubbles.length){
+    let minMag=Infinity,maxMag=0; for(const b of bubbles){minMag=Math.min(minMag,b.mag);maxMag=Math.max(maxMag,b.mag);}
+    const rMin=3.5,rMax=Math.max(10,Math.min(24,pw/35));
+    for(const b of bubbles){
+      const n=maxMag>minMag?(Math.sqrt(b.mag)-Math.sqrt(minMag))/(Math.sqrt(maxMag)-Math.sqrt(minMag)):0.5;
+      b.r=rMin+(rMax-rMin)*n;
+      const buy=b.delta>=0,base=buy?"#11be70":"#ef493c",light=buy?"#72e5a7":"#ff8b7e",edge=buy?"#064b32":"#681d18";
+      ctx.save();ctx.shadowColor=buy?"rgba(0,75,44,.7)":"rgba(92,20,14,.68)";ctx.shadowBlur=Math.min(8,b.r*.45);ctx.shadowOffsetY=Math.max(1,b.r*.10);
+      const g=ctx.createRadialGradient(b.x-b.r*.30,b.y-b.r*.35,Math.max(.4,b.r*.025),b.x+b.r*.08,b.y+b.r*.10,b.r*1.04);
+      g.addColorStop(0,"rgba(255,255,255,.82)");g.addColorStop(.09,light);g.addColorStop(.34,base);g.addColorStop(.78,buy?"#079656":"#c9322a");g.addColorStop(.96,edge);g.addColorStop(1,"rgba(3,18,18,.96)");
+      ctx.beginPath();ctx.arc(b.x,b.y,b.r,0,Math.PI*2);ctx.fillStyle=g;ctx.fill();ctx.shadowColor="transparent";
+      // Small off-axis specular reflection and a faint lower bounce give the sphere depth
+      // without the flat white outline used by the previous version.
+      ctx.save();ctx.beginPath();ctx.arc(b.x,b.y,b.r*.96,0,Math.PI*2);ctx.clip();
+      const shine=ctx.createRadialGradient(b.x-b.r*.38,b.y-b.r*.43,0,b.x-b.r*.38,b.y-b.r*.43,b.r*.43);
+      shine.addColorStop(0,"rgba(255,255,255,.72)");shine.addColorStop(.28,"rgba(255,255,255,.22)");shine.addColorStop(1,"rgba(255,255,255,0)");ctx.fillStyle=shine;ctx.fillRect(b.x-b.r,b.y-b.r,b.r*2,b.r*2);
+      const bounce=ctx.createLinearGradient(0,b.y+b.r*.35,0,b.y+b.r);bounce.addColorStop(0,"rgba(255,255,255,0)");bounce.addColorStop(1,buy?"rgba(78,220,145,.18)":"rgba(255,126,112,.18)");ctx.fillStyle=bounce;ctx.fillRect(b.x-b.r,b.y+b.r*.25,b.r*2,b.r*.75);ctx.restore();ctx.restore();
+      heatBubbleHits.push(b);
     }
   }
   ctx.restore();
 }
+function drawHeatBubbleTooltip(ctx,hit,W,H){
+  const side=hit.delta>=0?"买家":"卖家", hands=Math.abs(hit.delta);
+  const text=`${side} ${fmt(hands,hands<10?1:0)} 手`;
+  ctx.save();ctx.font="600 13px Segoe UI,Microsoft YaHei,Arial";const pad=9,h=30,w=ctx.measureText(text).width+pad*2;
+  let x=Math.min(W-w-8,hit.x+hit.r+9),y=Math.max(8,hit.y-h-8);if(x<8)x=8;
+  ctx.fillStyle="rgba(7,11,20,.94)";ctx.strokeStyle=hit.delta>=0?"#7777ff":"#ff676d";ctx.lineWidth=1;
+  ctx.beginPath();ctx.roundRect(x,y,w,h,6);ctx.fill();ctx.stroke();
+  ctx.fillStyle="#f8fafc";ctx.textAlign="left";ctx.textBaseline="middle";ctx.fillText(text,x+pad,y+h/2);ctx.restore();
+}
+function drawHeatCvd(ctx,d,L,T,pw,ph,W,R,xT){
+  const vals=new Float64Array(d.cols);let hi=1;
+  for(let i=0;i<d.cols;i++){vals[i]=(d.col_buy[i]||0)+(d.col_sell[i]||0);hi=Math.max(hi,vals[i]);}
+  const colT=i=>d.t0_ns+(i+.5)/d.cols*(d.t1_ns-d.t0_ns),base=T+ph;
+  ctx.fillStyle="rgba(18,43,50,.96)";ctx.fillRect(L,T,pw,ph);
+  ctx.strokeStyle="rgba(151,181,189,.24)";ctx.beginPath();ctx.moveTo(L,T+.5);ctx.lineTo(L+pw,T+.5);ctx.stroke();
+  const barW=Math.max(1.25,pw/d.cols+0.25);
+  for(let i=0;i<d.cols;i++){const vol=vals[i];if(!(vol>0))continue;const buy=d.col_buy[i]||0,sell=d.col_sell[i]||0,h=Math.max(1,vol/hi*(ph-8)),x=xT(colT(i))-barW/2;
+    ctx.fillStyle=buy>=sell?"#29cb78":"#f04c3d";ctx.fillRect(x,base-h,barW,h);}
+  ctx.fillStyle="rgba(214,230,233,.72)";ctx.font="10px Segoe UI,Arial";ctx.textAlign="left";ctx.fillText("VOL",L+5,T+12);
+  ctx.strokeStyle="#284852";ctx.strokeRect(L,T,pw,ph);ctx.textAlign="left";
+  return {vals,lo:0,hi,y:v=>base-v/hi*ph,colT};
+}
 // Heatmap zoom/pan operate on the time/price window (heatView), then refetch a fresh raster.
-function heatZoomTime(factor,fx){ const v=heatView; if(!v)return; const sp=heatDataSpan(); const span=v.t1-v.t0; let ns=Math.max(2e9,Math.min(span*factor,(sp.t1-sp.t0)*1.25)); const center=v.t0+fx*span; v.t0=center-fx*ns; v.t1=center+(1-fx)*ns; }
+function heatZoomTime(factor,fx){ const v=heatView; if(!v)return; const sp=heatDataSpan(); const span=v.t1-v.t0; let ns=Math.max(1,Math.min(span*factor,(sp.t1-sp.t0)*1.25)); const center=v.t0+fx*span; v.t0=center-fx*ns; v.t1=center+(1-fx)*ns; }
 function heatZoomPrice(factor,fy){ const v=heatView; if(!v)return; const span=v.pmax-v.pmin; const sp=Math.max(0.5,span*factor); const center=v.pmax-fy*span; v.pmin=center-(1-fy)*sp; v.pmax=center+fy*sp; }
 function heatPan(dxPx,dyPx,pw,ph,base){ const v=heatView; if(!v||!base)return; const dt=-dxPx/Math.max(1,pw)*(base.t1-base.t0); v.t0=base.t0+dt; v.t1=base.t1+dt; const dp=dyPx/Math.max(1,ph)*(base.pmax-base.pmin); v.pmin=base.pmin+dp; v.pmax=base.pmax+dp; }
 function drawHeatmap(ctx,canvas,hoverCanvas){
-  const W=canvas.clientWidth,H=canvas.clientHeight; ctx.clearRect(0,0,W,H); ctx.fillStyle="#070b14"; ctx.fillRect(0,0,W,H);
+  const W=canvas.clientWidth,H=canvas.clientHeight; ctx.clearRect(0,0,W,H); ctx.fillStyle="#142f37"; ctx.fillRect(0,0,W,H);
   if(!fps.length){ ctx.fillStyle="#94a3b8"; ctx.font="13px Segoe UI"; ctx.fillText("liquidity heatmap",20,H/2); return; }
   if(!heatView){ initHeatView(); ensureHeat(); }
-  const L=PADL,R=AXIS_W,T=10,B=30,pw=Math.max(1,W-L-R),ph=Math.max(1,H-T-B),v=heatView;
+  const L=PADL,R=AXIS_W,T=10,B=30,pw=Math.max(1,W-L-R),totalPh=Math.max(1,H-T-B),cvdH=cvdVisible?Math.max(90,Math.min(155,totalPh*.2)):0,paneGap=cvdVisible?6:0,ph=Math.max(80,totalPh-cvdH-paneGap),cvdT=T+ph+paneGap,v=heatView;
   const y=p=>T+(v.pmax-p)/Math.max(1e-9,v.pmax-v.pmin)*ph, xT=t=>L+(t-v.t0)/Math.max(1,v.t1-v.t0)*pw;
-  ctx.strokeStyle="rgba(148,163,184,0.14)"; ctx.fillStyle="#94a3b8"; ctx.font="11px Segoe UI,Arial"; ctx.lineWidth=1; ctx.textAlign="left";
+  ctx.fillStyle="#263f47";ctx.fillRect(W-R,0,R,H);ctx.fillStyle="#304952";ctx.fillRect(0,H-B,W,B);
+  ctx.strokeStyle="rgba(157,183,190,0.13)"; ctx.fillStyle="#a8bdc3"; ctx.font="12px Segoe UI,Arial"; ctx.lineWidth=1; ctx.textAlign="left";
   for(let i=0;i<=4;i++){ const yy=T+ph*i/4,pr=v.pmax-(v.pmax-v.pmin)*i/4; ctx.beginPath();ctx.moveTo(L,yy);ctx.lineTo(W-R,yy);ctx.stroke(); ctx.fillText(pr.toFixed(2),W-R+6,yy+4); }
   if(heatImg&&heatData){ ctx.imageSmoothingEnabled=true; ctx.imageSmoothingQuality="high"; const dx0=xT(heatData.t0_ns),dx1=xT(heatData.t1_ns),dy0=y(heatData.pmax),dy1=y(heatData.pmin); ctx.save(); ctx.beginPath(); ctx.rect(L,T,pw,ph); ctx.clip(); ctx.drawImage(heatImg,dx0,dy0,Math.max(1,dx1-dx0),Math.max(1,dy1-dy0)); ctx.restore(); }
   else { ctx.fillStyle="#cbd5e1"; ctx.font="12px Segoe UI,Arial"; ctx.fillText(heatPending?"loading heatmap...":"no heatmap data (run with --serve)",L+8,T+22); }
-  drawHeatTimeAxis(ctx,L,T,pw,ph,W,R,v.t0,v.t1);
   if(heatData)drawHeatTraces(ctx,heatData,L,T,pw,ph,xT,y);
   ctx.strokeStyle="#1e293b"; ctx.strokeRect(L,T,pw,ph);
-  ctx.fillStyle="#cbd5e1"; ctx.font="11px Segoe UI,Arial"; ctx.fillText(`book ${heatMetric}${heatPending?" - loading...":""}  -  drag = pan - wheel = zoom time - shift/left-edge wheel = zoom price`,L+4,T+13);
+  const cvdPlot=heatData&&cvdVisible?drawHeatCvd(ctx,heatData,L,cvdT,pw,cvdH,W,R,xT):null;
+  drawHeatTimeAxis(ctx,L,T,pw,totalPh,W,R,v.t0,v.t1);
+  ctx.fillStyle="rgba(218,232,235,.76)"; ctx.font="11px Segoe UI,Arial"; ctx.fillText(`${heatMetric.toUpperCase()}${heatPending?"  loading...":""}`,L+5,T+14);
   $("range").textContent=`${fmtTs(v.t0)}  ->  ${fmtTs(v.t1)}`;
-  if(hover&&hover.canvas===hoverCanvas&&hover.x>=L&&hover.x<=L+pw&&hover.y>=T&&hover.y<=T+ph){
-    const x=hover.x, tAt=v.t0+(x-L)/pw*(v.t1-v.t0), pAt=v.pmax-(hover.y-T)/Math.max(1,ph)*(v.pmax-v.pmin);
+  if(hover&&hover.canvas===hoverCanvas&&hover.x>=L&&hover.x<=L+pw&&hover.y>=T&&hover.y<=T+totalPh){
+    const x=hover.x, tAt=v.t0+(x-L)/pw*(v.t1-v.t0), inPrice=hover.y<=T+ph, pAt=v.pmax-(hover.y-T)/Math.max(1,ph)*(v.pmax-v.pmin);
     if(crosshairOn){
       ctx.save(); ctx.setLineDash([4,4]); ctx.strokeStyle="rgba(255,255,255,0.35)"; ctx.lineWidth=1;
-      ctx.beginPath();ctx.moveTo(x,T);ctx.lineTo(x,T+ph);ctx.stroke();
+      ctx.beginPath();ctx.moveTo(x,T);ctx.lineTo(x,T+totalPh);ctx.stroke();
       ctx.beginPath();ctx.moveTo(L,hover.y);ctx.lineTo(L+pw,hover.y);ctx.stroke();
       ctx.setLineDash([]); ctx.restore();
-      axisPriceTag(ctx,W,R,hover.y,pAt.toFixed(2),"#334155");
-      axisTimeTag(ctx,x,T+ph,fmtHeatAxis(tAt,v.t1-v.t0),L,pw);
+      if(inPrice)axisPriceTag(ctx,W,R,hover.y,pAt.toFixed(2),"#334155");
+      axisTimeTag(ctx,x,T+totalPh,fmtCrosshairTs(tAt),L,pw);
     }
-    $("status").textContent=`${fmtTs(tAt)}   px ${pAt.toFixed(2)}`;
+    let bubbleHit=null,best=Infinity;if(inPrice)for(const b of heatBubbleHits){const dx=hover.x-b.x,dy=hover.y-b.y,dd=dx*dx+dy*dy;if(dd<=(b.r+4)*(b.r+4)&&dd<best){best=dd;bubbleHit=b;}}
+    if(bubbleHit)drawHeatBubbleTooltip(ctx,bubbleHit,W,H);
+    if(!inPrice&&cvdPlot){const ci=clamp(Math.floor((x-L)/pw*heatData.cols),0,heatData.cols-1);$("status").textContent=`${fmtTs(tAt)}   Vol ${fmt(cvdPlot.vals[ci],0)}`;}
+    else $("status").textContent=`${fmtTs(tAt)}   px ${pAt.toFixed(2)}`;
   }
 }
 function drawEquity(){
@@ -2172,7 +2314,7 @@ function attach(canvas,name){
       // Drag left = zoom in (bars widen), drag right = zoom out, matching TradingView.
       const factor=Math.exp((ev.clientX-drag.x)/250);
       if(chartMode==="heatmap"&&drag.name==="price"&&drag.heat&&heatView){
-        const c=(drag.heat.t0+drag.heat.t1)/2, span=Math.max(2e9,(drag.heat.t1-drag.heat.t0)*factor);
+        const c=(drag.heat.t0+drag.heat.t1)/2, span=Math.max(1,(drag.heat.t1-drag.heat.t0)*factor);
         heatView.t0=c-span/2; heatView.t1=c+span/2; draw(); scheduleHeatFetch(); return;
       }
       const end=drag.start+drag.bpv;
@@ -2241,6 +2383,10 @@ $("tradeLast").onclick=()=>jumpToTrade("last");
 $("modeChart").onclick=()=>setChartMode("chart");
 $("modeHeatmap").onclick=()=>setChartMode("heatmap");
 $("heatMetric").onchange=e=>{heatMetric=e.target.value; if(chartMode==="heatmap")fetchHeat(); else draw();};
+$("bubbleAgg").oninput=e=>{bubbleAgg=Number(e.target.value);$("bubbleAggValue").value=String(bubbleAgg);if(chartMode==="heatmap")draw();};
+$("toggleCvd").onclick=()=>{cvdVisible=!cvdVisible;writeStoredBool("accelerando.heatmapCvd",cvdVisible);const b=$("toggleCvd");b.classList.toggle("active",cvdVisible);b.setAttribute("aria-pressed",String(cvdVisible));b.title=cvdVisible?"隐藏 CVD 子图":"显示 CVD 子图";draw();};
+$("toggleCvd").classList.toggle("active",cvdVisible);$("toggleCvd").setAttribute("aria-pressed",String(cvdVisible));$("toggleCvd").title=cvdVisible?"隐藏 CVD 子图":"显示 CVD 子图";
+$("toggleCvd").style.display="";
 $("toggleMetrics").onclick=()=>setCardsCollapsed(!cardsCollapsed);
 setCardsCollapsed(cardsCollapsed,false);
 $("toggleEquity").onclick=()=>setEquityCollapsed(!equityCollapsed);

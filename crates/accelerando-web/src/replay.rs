@@ -822,7 +822,10 @@ impl ReplayManager {
         let t1 = crate::query_param_from_query(query, "t1")
             .and_then(|v| v.parse::<i64>().ok())
             .unwrap_or(i64::MAX);
-        t1 <= last.ts_last_ns
+        // Browser timestamps are IEEE-754 numbers; epoch nanoseconds can round by a few hundred
+        // nanoseconds during JSON -> JS -> query conversion. Permit only that numeric ULP, not a
+        // data bucket, so the replay still cannot expose a future snapshot.
+        t1 <= last.ts_last_ns.saturating_add(1_024)
     }
 
     fn session(&self, id: &str) -> Result<ReplaySession, String> {
@@ -1473,6 +1476,7 @@ const REPLAY_CSS: &str = r#"
 .replay-panel label{display:inline-flex;gap:5px;align-items:center;font-size:12px;color:#374151}
 .replay-panel input,.replay-panel select{height:28px;border:1px solid #cbd5e1;border-radius:6px;padding:3px 6px;font-size:12px;background:#fff}
 .replay-panel input{width:72px}.replay-panel button{height:28px;padding:0 9px;border-radius:6px;font-size:12px}
+.replay-panel .play-speed{min-width:210px}.replay-panel .play-speed input{width:130px;padding:0;accent-color:#2563eb}.replay-panel .play-speed output{min-width:34px;text-align:right;color:#1d4ed8;font-weight:800;font-variant-numeric:tabular-nums}
 .replay-panel .primary{background:#2563eb;border-color:#2563eb;color:#fff;font-weight:800}
 .replay-panel .danger{color:#b45309}.replay-panel .state{font-size:12px;color:#475569;font-weight:700}
 .replay-panel .err{font-size:12px;color:#b45309;min-width:160px}
@@ -1522,6 +1526,12 @@ const REPLAY_LONG_COLOR="#2962ff";
 const REPLAY_SHORT_COLOR="#f23645";
 let replayBusy=false;
 let replayToastTimer=null;
+let replayPlaying=false;
+let replayPlayTimer=null;
+let replaySpeed=replayStoredNum("accelerando.replaySpeed",1);
+let replayVisualTarget=null;
+let replayStopAfterVisual=false;
+let replayTradeQueue=[];
 function replayTick(){return (DATA&&DATA.tick_size)||0.25;}
 function snapPrice(v){const t=replayTick();return Math.round(Number(v)/t)*t;}
 function num(id){const v=parseFloat($(id).value);return Number.isFinite(v)?v:null;}
@@ -1621,6 +1631,7 @@ function installReplayUi(){
   panel.className="replay-panel";
   panel.innerHTML=`<button id="replayBackBtn" title="Rewind one step: one bar of a skip or one order action (←)">← Back</button>
     <button id="replayStep" class="primary" title="Next bar (→)">Next K</button><button id="replayStep5" title="+5 bars (Shift+→)">+5</button>
+    <button id="replayPlay" class="primary" title="Play or pause market replay">&#9654; Play</button><label class="play-speed" title="1x advances one bar per second; high speeds advance in batches"><span>Speed</span><input id="replaySpeed" type="range" min="1" max="50" step="1" value="1"><output id="replaySpeedValue">1x</output></label>
     <label>Skip <input id="replaySkipN" type="number" min="1" max="20000" step="1" value="20" style="width:64px"></label><button id="replaySkip" title="Skip forward this many bars">Skip</button>
     <label>Go to <input id="replayGoTime" type="datetime-local" step="60" style="width:168px"></label><button id="replayGoto" title="Jump forward to this time">Go</button>
     <label title="Pause a skip on the first bar where an order fills or the position exits"><input type="checkbox" id="replayStopEvt" checked> stop on fill</label>
@@ -1642,26 +1653,29 @@ function installReplayUi(){
   renderResult=function(data){oldRender(data);REPLAY=data.replay||{};syncReplayUi();};
   const oldDraw=drawPrice;
   drawPrice=function(){oldDraw();drawReplayOverlay();};
-  $("modeHeatmap").style.display="none";
-  const heat=$("heatMetric"); if(heat&&heat.parentElement)heat.parentElement.style.display="none";
+  // Heatmap remains available during manual replay. The server validates every requested t1
+  // against the replay cursor, so switching modes cannot reveal future order-flow data.
   $("replayRisk").value=replayStoredNum("accelerando.replayRiskTicks",8);
   $("replayR").value=replayStoredNum("accelerando.replayRMultiple",2);
+  replaySpeed=Math.max(1,Math.min(50,Math.round(replaySpeed||1)));$("replaySpeed").value=String(replaySpeed);$("replaySpeedValue").value=`${replaySpeed}x`;
   $("replayRisk").addEventListener("change",()=>replayStoreNum("accelerando.replayRiskTicks",replayRiskTicks()));
   $("replayR").addEventListener("change",()=>replayStoreNum("accelerando.replayRMultiple",replayRMultiple()));
-  $("replayBackBtn").onclick=()=>replayBack(1);
-  $("replayStep").onclick=()=>replayStep(1);
-  $("replayStep5").onclick=()=>replayStep(5);
+  $("replayPlay").onclick=()=>setReplayPlaying(!replayPlaying);
+  $("replaySpeed").oninput=e=>{replaySpeed=Math.max(1,Math.min(50,Math.round(Number(e.target.value)||1)));$("replaySpeedValue").value=`${replaySpeed}x`;replayStoreNum("accelerando.replaySpeed",replaySpeed);if(replayPlaying)scheduleReplayPlay(0);};
+  $("replayBackBtn").onclick=()=>{setReplayPlaying(false);replayBack(1);};
+  $("replayStep").onclick=()=>{setReplayPlaying(false);replayStep(1);};
+  $("replayStep5").onclick=()=>{setReplayPlaying(false);replayStep(5);};
   $("replaySkip").onclick=()=>{
     const n=Math.max(1,Math.min(20000,Math.round(parseFloat($("replaySkipN").value)||0)));
     if(!n){replayToast("enter how many bars to skip");return;}
-    replayStep(n);
+    setReplayPlaying(false);replayStep(n);
   };
   $("replayGoto").onclick=async()=>{
     const v=$("replayGoTime").value;
     if(!v){replayToast("pick a target time first");return;}
     const ts=new Date(v).getTime();
     if(!Number.isFinite(ts)){replayToast("invalid target time");return;}
-    if(await replayAction("/api/replay/step",{to_ts_ms:ts,stop_on_event:replayStopOnEvent()}))replayAfterStep();
+    setReplayPlaying(false);if(await replayAction("/api/replay/step",{to_ts_ms:ts,stop_on_event:replayStopOnEvent()}))replayAfterStep();
   };
   $("replayBuy").onclick=()=>replayMarket(1);
   $("replaySell").onclick=()=>replayMarket(-1);
@@ -1689,6 +1703,50 @@ function installReplayUi(){
   window.addEventListener("keyup",replayKeyUp,true);
   window.addEventListener("blur",()=>setReplaySpace(false));
   updateReplayMode();
+}
+function setReplayPlaying(on){
+  replayPlaying=!!on&&!REPLAY.done;
+  if(replayPlayTimer){clearTimeout(replayPlayTimer);replayPlayTimer=null;}
+  const b=$("replayPlay");if(b){b.textContent=replayPlaying?"Pause":"Play";b.classList.toggle("active",replayPlaying);b.title=replayPlaying?"Pause market replay":"Play market replay";}
+  if(replayPlaying)scheduleReplayPlay(0);
+}
+function scheduleReplayPlay(delay){
+  if(replayPlayTimer)clearTimeout(replayPlayTimer);
+  if(replayPlaying)replayPlayTimer=setTimeout(replayPlayTick,Math.max(0,delay));
+}
+async function replayPlayTick(){
+  replayPlayTimer=null;if(!replayPlaying)return;if(REPLAY.done){setReplayPlaying(false);return;}
+  if(chartMode==="heatmap"&&Number.isFinite(replayVisualTarget)&&Number.isFinite(replayVisualT1)){replayAdvanceVisualClock();return;}
+  const speed=Math.max(1,replaySpeed),count=speed<=5?1:Math.max(1,Math.round(speed/5)),delay=speed<=5?1000/speed:200;
+  const beforeTs=fps.length?Number(fps[fps.length-1].ts_last_ns):null;
+  const before=Number(REPLAY.cursor)||0,beforeTrades=Number(REPLAY.trades)||0,beforeOpen=!!REPLAY.open_position,beforePending=!!REPLAY.pending_order;
+  // Heatmap playback reveals one bar's order flow using a simulated event-time cursor; other
+  // chart modes retain efficient batched bar playback at high speed.
+  const stepCount=chartMode==="heatmap"?1:count;
+  const ok=await replayAction("/api/replay/step",{count:stepCount,stop_on_event:replayStopOnEvent()});
+  if(!ok){setReplayPlaying(false);return;}replayAfterStep();
+  const advanced=(Number(REPLAY.cursor)||0)-before;
+  const eventChanged=beforeTrades!==(Number(REPLAY.trades)||0)||beforeOpen!==!!REPLAY.open_position||beforePending!==!!REPLAY.pending_order;
+  if(chartMode==="heatmap"&&Number.isFinite(beforeTs)&&fps.length){
+    const afterTs=Number(fps[fps.length-1].ts_last_ns);
+    if(afterTs>beforeTs){
+      replayVisualT1=beforeTs;replayVisualTarget=afterTs;replayStopAfterVisual=replayStopOnEvent()&&eventChanged;
+      try{const id=encodeURIComponent(globalThis.RUN_ID||""),u=`/api/heatmap?id=${id}&t0=${Math.round(beforeTs)}&t1=${Math.round(afterTs)}&pmin=0&pmax=1&cols=1&rows=1&metric=total&bucket_ns=1`;const tape=await fetchJson(u);replayTradeQueue=(tape.trades||[]).map(t=>Number(t.ts_ns)).filter(ts=>ts>beforeTs&&ts<=afterTs);}catch(_){replayTradeQueue=[];}
+      draw();scheduleHeatFetch();scheduleReplayPlay(0);return;
+    }
+  }
+  if(REPLAY.done||(replayStopOnEvent()&&(eventChanged||(count>1&&advanced<count)))){setReplayPlaying(false);return;}
+  scheduleReplayPlay(delay);
+}
+function replayAdvanceVisualClock(){
+  if(!replayPlaying||!Number.isFinite(replayVisualT1)||!Number.isFinite(replayVisualTarget))return;
+  while(replayTradeQueue.length&&replayTradeQueue[0]<=replayVisualT1)replayTradeQueue.shift();
+  const candidate=replayTradeQueue.length?replayTradeQueue.shift():null,next=Number.isFinite(candidate)?Math.min(candidate,replayVisualTarget):replayVisualTarget;
+  const delay=Math.max(0,(next-replayVisualT1)/1e6/Math.max(1,replaySpeed));
+  replayPlayTimer=setTimeout(()=>{replayPlayTimer=null;if(!replayPlaying)return;replayVisualT1=next;draw();scheduleHeatFetch();
+    if(replayVisualT1>=replayVisualTarget){replayVisualT1=null;replayVisualTarget=null;const stop=replayStopAfterVisual;replayStopAfterVisual=false;if(stop||REPLAY.done){setReplayPlaying(false);draw();scheduleHeatFetch();return;}scheduleReplayPlay(0);return;}
+    scheduleReplayPlay(120);
+  },delay);
 }
 function replayToggleTrades(force){
   const el=replayTradesPanel();
@@ -1750,6 +1808,7 @@ function syncReplayUi(){
   const tb=$("replayTradesBtn");
   if(tb)tb.textContent=`Trades (${REPLAY.trades||0})`;
   replayRenderTrades();
+  if(REPLAY.done)setReplayPlaying(false);
   if(REPLAY.done&&!replayDoneToasted){replayDoneToasted=true;replayToast("End of data reached",true);}
   if(!REPLAY.done)replayDoneToasted=false;
   updateReplayMode();

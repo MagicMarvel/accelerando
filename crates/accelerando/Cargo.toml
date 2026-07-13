@@ -11,3 +11,4 @@ accelerando-example-sources = { workspace = true }
 accelerando-example-aggregators = { workspace = true }
 accelerando-example-indicators = { workspace = true }
 accelerando-example-strategy = { workspace = true }
+accelerando-orderflow-features = { workspace = true }

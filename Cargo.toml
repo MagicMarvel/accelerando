@@ -6,6 +6,7 @@ members = [
     "crates/accelerando-example-aggregators",
     "crates/accelerando-example-indicators",
     "crates/accelerando-example-strategy",
+    "crates/accelerando-orderflow-features",
     "crates/accelerando-hyperopt",
     "crates/accelerando-ml",
     "crates/accelerando-web",
@@ -25,6 +26,7 @@ accelerando-example-sources = { path = "crates/accelerando-example-sources" }
 accelerando-example-aggregators = { path = "crates/accelerando-example-aggregators" }
 accelerando-example-indicators = { path = "crates/accelerando-example-indicators" }
 accelerando-example-strategy = { path = "crates/accelerando-example-strategy" }
+accelerando-orderflow-features = { path = "crates/accelerando-orderflow-features" }
 accelerando-hyperopt = { path = "crates/accelerando-hyperopt" }
 accelerando-ml = { path = "crates/accelerando-ml" }
 accelerando-web = { path = "crates/accelerando-web" }

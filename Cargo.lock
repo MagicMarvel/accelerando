@@ -27,6 +27,7 @@ dependencies = [
  "accelerando-example-indicators",
  "accelerando-example-sources",
  "accelerando-example-strategy",
+ "accelerando-orderflow-features",
 ]
 
 [[package]]
@@ -86,6 +87,13 @@ dependencies = [
  "perpetual",
  "serde",
  "serde_json",
+]
+
+[[package]]
+name = "accelerando-orderflow-features"
+version = "0.1.0"
+dependencies = [
+ "accelerando-core",
 ]
 
 [[package]]

@@ -36,7 +36,7 @@ pub use footprint_image::{
     TradeOutcomeFilter,
 };
 pub use heatmap::{
-    parse_heatmap_query, CompactLevel, HeatmapBucket, HeatmapMetric, HeatmapQuery, HeatmapWindow,
+    parse_heatmap_query, CompactLevel, CompactTrade, HeatmapBucket, HeatmapMetric, HeatmapQuery, HeatmapWindow,
     HiresHeatmap, SharedHeatmap, DEFAULT_HEATMAP_CACHE_DIR,
 };
 pub use metrics::Metrics;

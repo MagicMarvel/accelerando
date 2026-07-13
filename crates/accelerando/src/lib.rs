@@ -12,6 +12,7 @@ use accelerando_example_aggregators::register_all as register_aggregators;
 use accelerando_example_indicators::register_all as register_indicators;
 use accelerando_example_sources::register_all as register_sources;
 use accelerando_example_strategy::register_all as register_strategies;
+use accelerando_orderflow_features::register_all as register_orderflow_features;
 
 /// Build a registry containing all built-in adapters.
 ///
@@ -23,5 +24,6 @@ pub fn default_registry() -> CoreRegistry {
     register_aggregators(&mut registry);
     register_indicators(&mut registry);
     register_strategies(&mut registry);
+    register_orderflow_features(&mut registry);
     registry
 }

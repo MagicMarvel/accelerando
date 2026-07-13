@@ -1,0 +1,9 @@
+[package]
+name = "accelerando-orderflow-features"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Causal trade-flow features for footprints plus the shared ML dataset extractor/labeler."
+
+[dependencies]
+accelerando-core = { workspace = true }

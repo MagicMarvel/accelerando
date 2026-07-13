@@ -25,6 +25,14 @@ pub struct CompactLevel {
     pub ask: f32,
 }
 
+#[derive(Clone, Copy)]
+pub struct CompactTrade {
+    pub ts_ns: i64,
+    pub price: f64,
+    pub size: f32,
+    pub is_buy: bool,
+}
+
 /// One time bucket: the book snapshot plus the trade activity that occurred during it.
 #[derive(Default)]
 pub struct HeatmapBucket {
@@ -48,10 +56,16 @@ pub struct HiresHeatmap {
     pub interval_ns: i64,
     pub tick_size: f64,
     cache_path: PathBuf,
+    trade_path: PathBuf,
     remove_on_drop: bool,
     writer: Option<BufWriter<File>>,
     index: Vec<BucketIndex>,
     next_offset: u64,
+    trade_writer: Option<BufWriter<File>>,
+    /// Sparse time index: one entry per 4096 fixed-width trade records.
+    trade_index: Vec<BucketIndex>,
+    next_trade_offset: u64,
+    trade_count: u64,
 }
 
 impl Default for HiresHeatmap {
@@ -75,14 +89,20 @@ impl HiresHeatmap {
             "accelerando-heatmap-{}-{stamp}.bin",
             std::process::id()
         ));
+        let trade_path = cache_path.with_extension("trades.bin");
         Self {
             interval_ns: 0,
             tick_size: 0.25,
             cache_path,
+            trade_path,
             remove_on_drop: true,
             writer: None,
             index: Vec::new(),
             next_offset: 0,
+            trade_writer: None,
+            trade_index: Vec::new(),
+            next_trade_offset: 0,
+            trade_count: 0,
         }
     }
 
@@ -125,11 +145,29 @@ impl HiresHeatmap {
         Ok(())
     }
 
+    pub fn push_trade(&mut self, trade: CompactTrade) -> std::io::Result<()> {
+        if self.trade_writer.is_none() {
+            if let Some(parent) = self.trade_path.parent() { create_dir_all(parent)?; }
+            self.trade_writer = Some(BufWriter::new(OpenOptions::new().create(true).write(true).truncate(true).open(&self.trade_path)?));
+        }
+        let mut encoded = Vec::with_capacity(21);
+        encoded.extend_from_slice(&trade.ts_ns.to_le_bytes());
+        encoded.extend_from_slice(&trade.price.to_le_bytes());
+        encoded.extend_from_slice(&trade.size.to_le_bytes());
+        encoded.push(u8::from(trade.is_buy));
+        if self.trade_count % 4096 == 0 { self.trade_index.push(BucketIndex { ts_ns: trade.ts_ns, offset: self.next_trade_offset }); }
+        self.trade_writer.as_mut().unwrap().write_all(&encoded)?;
+        self.next_trade_offset+=encoded.len() as u64;
+        self.trade_count+=1;
+        Ok(())
+    }
+
     /// Downsample the requested window into a `cols x rows` intensity raster plus per-column traces.
     pub fn window(&mut self, q: &HeatmapQuery) -> HeatmapWindow {
         if let Some(writer) = self.writer.as_mut() {
             let _ = writer.flush();
         }
+        if let Some(writer) = self.trade_writer.as_mut() { let _ = writer.flush(); }
         let cols = q.cols.clamp(1, 4000);
         let rows = q.rows.clamp(1, 2000);
         let (t0, t1) = (q.t0_ns, q.t1_ns.max(q.t0_ns + 1));
@@ -139,7 +177,9 @@ impl HiresHeatmap {
             (q.pmin, q.pmin + self.tick_size.max(0.25))
         };
         let span_t = (t1 - t0) as f64;
-        let bucket_ns = q.bucket_ns.max(self.interval_ns.max(1));
+        // The query bucket controls rendering resolution and may be smaller than the recording
+        // cadence. This permits unrestricted chart zoom; it does not invent extra snapshots.
+        let bucket_ns = q.bucket_ns.max(1);
         let span_p = pmax - pmin;
 
         let mut grid = vec![0f32; cols * rows];
@@ -148,10 +188,26 @@ impl HiresHeatmap {
         let mut col_ask = vec![-1f32; cols];
         let mut col_buy = vec![0f32; cols];
         let mut col_sell = vec![0f32; cols];
+        // Timestamped BBO samples use epoch-anchored buckets.  This keeps history stable as a
+        // replay window moves while bounding JSON and canvas work to roughly the raster width.
+        let mut quotes = Vec::new();
+        let quote_bucket_ns = bucket_ns.max(((t1 - t0) / (cols as i64 * 2).max(1)).max(1));
+        let push_quote = |quotes: &mut Vec<HeatmapQuote>, ts_ns: i64, bid: f32, ask: f32| {
+            let anchored_ts = ts_ns.div_euclid(quote_bucket_ns) * quote_bucket_ns;
+            let quote = HeatmapQuote { ts_ns: anchored_ts, bid, ask };
+            if let Some(last) = quotes.last_mut() {
+                if last.ts_ns == anchored_ts { *last = quote; return; }
+                if last.bid == bid && last.ask == ask { return; }
+            }
+            quotes.push(quote);
+        };
 
+        // Include one snapshot before the window so quote traces can be carried into the first
+        // visible column. Liquidity/trade raster data from that snapshot is still clipped below.
         let lo = self
             .index
-            .partition_point(|b| b.ts_ns.saturating_add(bucket_ns) < t0);
+            .partition_point(|b| b.ts_ns < t0)
+            .saturating_sub(1);
         let hi = self.index.partition_point(|b| b.ts_ns <= t1);
         let mut reader = File::open(&self.cache_path)
             .ok()
@@ -160,6 +216,8 @@ impl HiresHeatmap {
             let _ = reader.seek(SeekFrom::Start(first.offset));
         }
         let mut used = 0usize;
+        let mut seed_bid = None;
+        let mut seed_ask = None;
         for _idx in &self.index[lo..hi] {
             let Some(reader) = reader.as_mut() else {
                 break;
@@ -167,11 +225,20 @@ impl HiresHeatmap {
             let Some(b) = read_bucket(reader) else {
                 continue;
             };
+            if b.ts_ns < t0 {
+                if b.best_bid > 0.0 {
+                    seed_bid = Some(b.best_bid as f32);
+                }
+                if b.best_ask > 0.0 {
+                    seed_ask = Some(b.best_ask as f32);
+                }
+            }
             let start = b.ts_ns.max(t0);
             let end = b.ts_ns.saturating_add(bucket_ns).min(t1);
             if end <= start {
                 continue;
             }
+            if b.best_bid > 0.0 && b.best_ask > 0.0 { push_quote(&mut quotes,b.ts_ns.max(t0),b.best_bid as f32,b.best_ask as f32); }
             let c0 = (((start - t0) as f64 / span_t) * cols as f64).floor() as isize;
             let c1 = (((end - t0) as f64 / span_t) * cols as f64).ceil() as isize;
             let c0 = c0.clamp(0, cols as isize - 1) as usize;
@@ -208,6 +275,24 @@ impl HiresHeatmap {
             used += 1;
         }
 
+        // BBO is state, not an isolated event: a quote remains current until the next snapshot.
+        // Forward-fill only these traces so they stay continuous at sub-recording-cadence zoom;
+        // trades and heat intensity remain sparse at their true timestamps.
+        let mut bid = seed_bid;
+        let mut ask = seed_ask;
+        for col in 0..cols {
+            if col_bid[col] > 0.0 {
+                bid = Some(col_bid[col]);
+            } else if let Some(value) = bid {
+                col_bid[col] = value;
+            }
+            if col_ask[col] > 0.0 {
+                ask = Some(col_ask[col]);
+            } else if let Some(value) = ask {
+                col_ask[col] = value;
+            }
+        }
+
         let maxv = grid.iter().copied().fold(0f32, f32::max);
         let denom = (1.0 + maxv).ln();
         let bytes: Vec<u8> = grid
@@ -221,6 +306,32 @@ impl HiresHeatmap {
             })
             .collect();
 
+        let sparse=self.trade_index.partition_point(|x|x.ts_ns<=t0).saturating_sub(1);
+        let start_offset=self.trade_index.get(sparse).map(|x|x.offset).unwrap_or(0);
+        if self.trade_count>0 {col_last.fill(-1.0);col_buy.fill(0.0);col_sell.fill(0.0);}
+        let derive_quotes=used==0;
+        let mut trades=Vec::new();let mut next_trade_ns=None;let mut too_many=false;
+        if let Ok(file)=File::open(&self.trade_path) {
+            let mut r=BufReader::with_capacity(1<<20,file);let _=r.seek(SeekFrom::Start(start_offset));
+            while let Some(t)=read_trade(&mut r){
+                if t.ts_ns<t0 {continue;} if t.ts_ns>t1 {next_trade_ns=Some(t.ts_ns);break;}
+                let col=((((t.ts_ns-t0) as f64/span_t)*cols as f64).floor() as isize).clamp(0,cols as isize-1) as usize;
+                col_last[col]=t.price as f32;if t.is_buy {col_buy[col]+=t.size;} else {col_sell[col]+=t.size;}
+                // No L2 snapshots: derive both sides from every aggressor trade. Carrying the
+                // opposite side from the query's first trade made history depend on window t0.
+                if derive_quotes {
+                    let (bid,ask)=if t.is_buy {
+                        ((t.price-self.tick_size) as f32,t.price as f32)
+                    } else {
+                        (t.price as f32,(t.price+self.tick_size) as f32)
+                    };
+                    col_bid[col]=bid; col_ask[col]=ask;
+                    push_quote(&mut quotes,t.ts_ns,bid,ask);
+                }
+                if !too_many { if trades.len()<200_000 {trades.push(HeatmapTrade{ts_ns:t.ts_ns,price:t.price,size:t.size,is_buy:t.is_buy});} else {trades.clear();too_many=true;} }
+            }
+        }
+        let mut bid=None;let mut ask=None;for col in 0..cols {if col_bid[col]>0.0{bid=Some(col_bid[col]);}else if let Some(v)=bid{col_bid[col]=v;}if col_ask[col]>0.0{ask=Some(col_ask[col]);}else if let Some(v)=ask{col_ask[col]=v;}}
         HeatmapWindow {
             cols,
             rows,
@@ -237,6 +348,9 @@ impl HiresHeatmap {
             col_ask,
             col_buy,
             col_sell,
+            quotes,
+            trades,
+            next_trade_ns,
         }
     }
 }
@@ -246,6 +360,7 @@ impl Drop for HiresHeatmap {
         let _ = self.writer.take();
         if self.remove_on_drop {
             let _ = remove_file(&self.cache_path);
+            let _ = remove_file(&self.trade_path);
         }
     }
 }
@@ -299,7 +414,18 @@ pub struct HeatmapWindow {
     pub col_ask: Vec<f32>,
     pub col_buy: Vec<f32>,
     pub col_sell: Vec<f32>,
+    /// Best bid/ask changes at their original event timestamps.  Unlike `col_bid/col_ask`,
+    /// these points do not move or merge when the client requests a differently sized raster.
+    pub quotes: Vec<HeatmapQuote>,
+    pub trades: Vec<HeatmapTrade>,
+    pub next_trade_ns: Option<i64>,
 }
+
+#[derive(Serialize)]
+pub struct HeatmapTrade { pub ts_ns:i64, pub price:f64, pub size:f32, pub is_buy:bool }
+
+#[derive(Serialize)]
+pub struct HeatmapQuote { pub ts_ns:i64, pub bid:f32, pub ask:f32 }
 
 /// Parse the `/api/heatmap` query string. Returns `None` if required window params are missing.
 pub fn parse_heatmap_query(query: &str) -> Option<HeatmapQuery> {
@@ -411,6 +537,11 @@ fn read_bucket<R: Read>(r: &mut R) -> Option<HeatmapBucket> {
     })
 }
 
+fn read_trade<R:Read>(r:&mut R)->Option<CompactTrade>{
+    let ts_ns=read_i64(r)?;let price=read_f64(r)?;let size=read_f32(r)?;let mut side=[0u8;1];r.read_exact(&mut side).ok()?;
+    Some(CompactTrade{ts_ns,price,size,is_buy:side[0]!=0})
+}
+
 fn read_i64<R: Read>(r: &mut R) -> Option<i64> {
     let mut buf = [0u8; 8];
     r.read_exact(&mut buf).ok()?;
@@ -463,4 +594,28 @@ fn base64_encode(data: &[u8]) -> String {
         });
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn exact_trade_tape_returns_window_and_next_event() {
+        let dir = std::env::temp_dir().join(format!("accelerando-trade-tape-{}", std::process::id()));
+        let mut h = HiresHeatmap::new(dir);
+        for (ts, price, size, is_buy) in [(100, 10.0, 2.0, true), (150, 10.25, 3.0, false), (220, 10.5, 4.0, true)] {
+            h.push_trade(CompactTrade { ts_ns: ts, price, size, is_buy }).unwrap();
+        }
+        let w = h.window(&HeatmapQuery { t0_ns: 90, t1_ns: 160, pmin: 9.0, pmax: 12.0, cols: 10, rows: 10, metric: HeatmapMetric::Total, bucket_ns: 1 });
+        assert_eq!(w.trades.len(), 2);
+        assert_eq!(w.trades[0].ts_ns, 100);
+        assert!(w.trades[0].is_buy);
+        assert_eq!(w.trades[1].size, 3.0);
+        assert_eq!(w.next_trade_ns, Some(220));
+        let shifted = h.window(&HeatmapQuery { t0_ns: 120, t1_ns: 230, pmin: 9.0, pmax: 12.0, cols: 10, rows: 10, metric: HeatmapMetric::Total, bucket_ns: 1 });
+        let a = w.quotes.iter().find(|q| q.ts_ns == 150).unwrap();
+        let b = shifted.quotes.iter().find(|q| q.ts_ns == 150).unwrap();
+        assert_eq!((a.bid, a.ask), (b.bid, b.ask), "overlapping inferred BBO must not depend on query start");
+    }
 }
