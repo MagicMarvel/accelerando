@@ -244,6 +244,13 @@ let econEventGroups=[], econEventMarkers=[], pinnedEconEvent=null;
 // the price chart to add one, click an existing one to remove it. Client-side only (computed from
 // the already-loaded footprint ladders), not persisted across reloads.
 let vpProfiles=[], vpMode=false, vpDraft=null;
+// Draft VP data must come from the complete server-side ladders as well. Requests are debounced
+// while the pointer moves and aborted when the selected range changes, so a stale/partial profile
+// is never presented as the current preview.
+let vpDraftTimer=null, vpDraftAbort=null, vpDraftRevision=0;
+// The initial result may contain sampled ladders only. Full ladders are filled into `fps` on
+// demand for footprint-readable windows; a generation guard discards responses from an old run.
+let ladderLoaded=new Set(), ladderPending=new Set(), ladderApiAvailable=true, ladderGeneration=0;
 const overlayLabel=cat=>cat==="bands"?"bands":cat==="trades"?"trades":cat==="ff_high_events"?"High events":cat.replace(/_/g," ");
 const overlayOn=cat=>overlayState[cat]!==false;
 const markerCat=p=>p.group||"markers";
@@ -556,6 +563,8 @@ function renderResult(data){
   // subsequent update (most jarringly right as an SL/TP drag completes).
   const isReplay=data.replay!=null, firstLoad=fps.length===0;
   DATA=data; fps=data.footprints||[]; eq=data.equity||[]; trades=data.trades||[]; runSeries=data.series||[];
+  ladderGeneration++; ladderLoaded=new Set(); ladderPending=new Set(); ladderApiAvailable=true;
+  for(let i=0;i<fps.length;i++){ if((fps[i].ladder||[]).length)ladderLoaded.add(i); }
   pinnedEconEvent=null; econEventMarkers=[]; hideEconomicEventPopover(true);
   heatView=null; heatData=null; heatImg=null; // reset zoomable heatmap window for the new run
   for(const t of trades){ t._ei=idxForEntryTs(t.entry_ts_ns); t._xi=idxForTs(t.exit_ts_ns); }
@@ -1273,6 +1282,40 @@ function drawFootprintCvd(ctx,vis,L,T,pw,ph,W,R,xStep){
   ctx.fillStyle="#475569";ctx.font="600 11px Segoe UI,Arial";ctx.fillText("CVD",L+5,T+13);ctx.fillStyle="#64748b";ctx.font="10px Segoe UI,Arial";ctx.fillText(fmt(hi,0),W-R+6,T+9);ctx.fillText(fmt(lo,0),W-R+6,T+ph);ctx.strokeStyle="#cbd5e1";ctx.strokeRect(L,T,pw,ph);
   return {vals,lo,hi,y:yy};
 }
+function runDataUrl(path,params={}){
+  const q=new URLSearchParams({id:String(globalThis.RUN_ID||""),...params});
+  return `${path}?${q}`;
+}
+async function ensureVisibleLadders(from,to){
+  if(!ladderApiAvailable||to<=from)return;
+  let first=-1,last=-1;
+  for(let i=from;i<to;i++){
+    if(!ladderLoaded.has(i)&&!ladderPending.has(i)){ if(first<0)first=i; last=i; }
+  }
+  if(first<0)return;
+  // Include a small pan buffer. Footprint mode can expose only a few dozen bars, well below the
+  // server's 2000-bar safety cap.
+  first=Math.max(0,first-Math.max(4,to-from));
+  last=Math.min(fps.length-1,last+Math.max(4,to-from));
+  for(let i=first;i<=last;i++)ladderPending.add(i);
+  const generation=ladderGeneration;
+  try{
+    const r=await fetch(runDataUrl("/api/footprint-ladders",{from:String(first),to:String(last+1)}));
+    if(!r.ok){ if(r.status===404)ladderApiAvailable=false; return; }
+    const data=await r.json();
+    if(generation!==ladderGeneration)return;
+    const base=Number(data.from)||0;
+    for(let j=0;j<(data.ladders||[]).length;j++){
+      const idx=base+j;
+      if(idx>=0&&idx<fps.length){ fps[idx].ladder=data.ladders[j]||[]; ladderLoaded.add(idx); }
+    }
+    draw();
+  }catch(_){
+    // A transient request failure is retried on the next interaction/redraw.
+  }finally{
+    if(generation===ladderGeneration){ for(let i=first;i<=last;i++)ladderPending.delete(i); }
+  }
+}
 function drawPrice(){
   const W=price.clientWidth,H=price.clientHeight; pctx.clearRect(0,0,W,H); pctx.fillStyle="#fbfcfe"; pctx.fillRect(0,0,W,H);
   if(!fps.length){ pctx.fillStyle="#94a3b8"; pctx.font="14px Segoe UI"; pctx.fillText("Run a backtest to view results", 20, H/2); return; }
@@ -1280,6 +1323,7 @@ function drawPrice(){
   const [s,e]=viewRange(); const vis=fps.slice(s,e); const L=PADL,R=AXIS_W,T=14,B=34,pw=Math.max(1,W-L-R),totalPh=Math.max(1,H-T-B),cvdH=cvdVisible?Math.max(90,Math.min(155,totalPh*.2)):0,paneGap=cvdVisible?6:0,ph=Math.max(80,totalPh-cvdH-paneGap),cvdT=T+ph+paneGap;
   let lo=Infinity,hi=-Infinity; for(const b of vis){lo=Math.min(lo,b.low);hi=Math.max(hi,b.high);}
   const pad=Math.max(0.25,(hi-lo)*0.06); lo-=pad;hi+=pad; [lo,hi]=applyYZoom("price",lo,hi); yZoom.price.lo=lo; yZoom.price.hi=hi; const y=p=>T+(hi-p)/(hi-lo)*ph; const xStep=pw/Math.max(1,barsPerView); priceScale={s,e,L,T,pw,ph,lo,hi,xStep}; const cw=candleWidth(xStep); const tick=tickSizeFor(vis);
+  if(xStep>=FOOTPRINT_MIN_XSTEP)ensureVisibleLadders(s,e);
   if(overlayOn("bands")){ let i=0; while(i<vis.length){ const band=(vis[i].plots||[]).find(p=>p.kind==="BackgroundBand"); const col=band?band.color:null; let j=i+1; const same=k=>{const bb=(vis[k].plots||[]).find(p=>p.kind==="BackgroundBand"); return (bb?bb.color:null)===col;}; while(j<vis.length&&same(j))j++; if(col){pctx.fillStyle=col; pctx.fillRect(L+i*xStep,T,(j-i)*xStep,ph);} i=j; } }
   pctx.strokeStyle=COLORS.grid; pctx.fillStyle=COLORS.axis; pctx.font="11px Segoe UI, Arial"; pctx.lineWidth=1;
   for(let i=0;i<=6;i++){ const yy=T+ph*i/6,pr=hi-(hi-lo)*i/6; pctx.beginPath();pctx.moveTo(L,yy);pctx.lineTo(W-R,yy);pctx.stroke(); pctx.fillText(pr.toFixed(2),W-R+6,yy+4); }
@@ -1713,8 +1757,8 @@ function shapeHandleAt(ev){
   for(let i=vpProfiles.length-1;i>=0;i--){
     const v=vpProfiles[i];
     const x0=L+(v.i0-s)*xStep, x1=L+(v.i1+1-s)*xStep;
-    if(Math.abs(mx-x0)<=6)return {type:"vp-edge",obj:v,edge:"i0"};
-    if(Math.abs(mx-x1)<=6)return {type:"vp-edge",obj:v,edge:"i1"};
+    if(Math.abs(mx-x0)<=6)return {type:"vp-edge",obj:v,edge:"i0",orig:{i0:v.i0,i1:v.i1}};
+    if(Math.abs(mx-x1)<=6)return {type:"vp-edge",obj:v,edge:"i1",orig:{i0:v.i0,i1:v.i1}};
   }
   // Body-move only when the shape is already selected, so plain drags still pan the chart.
   const sel=selectedShape&&selectedShape.kind==="drawing"?selectedShape.obj:null;
@@ -1762,15 +1806,13 @@ function updateShapeDrag(ev){
   } else if(sd.type==="vp-edge"){
     d[sd.edge]=p.idx;
     if(d.i0>d.i1){ const t=d.i0; d.i0=d.i1; d.i1=t; sd.edge=sd.edge==="i0"?"i1":"i0"; }
-    d.levels=computeVpLevels(d.i0,d.i1);
   } else if(sd.type==="vp-move"){
     const di=p.idx-sd.grabIdx, w=sd.orig.i1-sd.orig.i0;
-    d.i0=Math.max(0,sd.orig.i0+di); d.i1=d.i0+w;
-    d.levels=computeVpLevels(d.i0,d.i1);
+    d.i0=clamp(sd.orig.i0+di,0,Math.max(0,fps.length-1-w)); d.i1=d.i0+w;
   }
   draw();
 }
-function finalizeShapeDrag(){
+async function finalizeShapeDrag(){
   const sd=shapeDrag;
   if(!sd)return;
   shapeDrag=null;
@@ -1780,7 +1822,23 @@ function finalizeShapeDrag(){
     d.p0=Number(Number(d.p0).toFixed(2)); d.p1=Number(Number(d.p1).toFixed(2));
     saveDrawings();
   }
-  // vp-edge / vp-move: levels were recomputed live; profiles are session-local (not persisted).
+  else if(sd.type==="vp-edge"||sd.type==="vp-move"){
+    if(d.i0===sd.orig.i0&&d.i1===sd.orig.i1){ draw(); return; }
+    const revision=(d._revision||0)+1;
+    d._revision=revision; d.loading=true;
+    $("status").textContent=`loading full VP bars ${d.i0+1}-${d.i1+1}...`;
+    draw();
+    try{
+      const levels=await loadCompleteVpLevels(d.i0,d.i1);
+      if(d._revision!==revision)return;
+      d.levels=levels; d.loading=false;
+      $("status").textContent=`VP bars ${d.i0+1}-${d.i1+1}`;
+    }catch(err){
+      if(d._revision!==revision)return;
+      d.i0=sd.orig.i0; d.i1=sd.orig.i1; d.loading=false;
+      $("status").textContent=String(err);
+    }
+  }
   draw();
 }
 function drawShapeHandles(ctx,points){
@@ -1853,7 +1911,7 @@ function drawDrawings(ctx,L,T,pw,ph,xStep,y,s,e){
 // ---------- volume/delta profile draw tool ----------
 function setVpMode(on){
   vpMode=!!on;
-  if(!vpMode)vpDraft=null;
+  if(!vpMode){ cancelVpDraftPreview(); vpDraft=null; }
   const btn=$("toggleVp");
   if(btn){ btn.classList.toggle("active",vpMode); btn.setAttribute("aria-pressed",String(vpMode)); }
   draw();
@@ -1861,7 +1919,8 @@ function setVpMode(on){
 function startVpDraft(ev){
   const p=pointToAnnotationCoord(ev);
   if(!p)return false;
-  vpDraft={startIdx:p.idx,endIdx:p.idx,dragging:true};
+  cancelVpDraftPreview();
+  vpDraft={startIdx:p.idx,endIdx:p.idx,dragging:true,levels:[],completeKey:"",loading:false};
   draw();
   ev.preventDefault();
   return true;
@@ -1870,7 +1929,9 @@ function updateVpDraft(ev){
   if(!vpDraft)return false;
   const p=pointToAnnotationCoord(ev);
   if(!p)return false;
+  if(vpDraft.endIdx===p.idx)return true;
   vpDraft.endIdx=p.idx;
+  scheduleVpDraftPreview();
   draw();
   return true;
 }
@@ -1891,9 +1952,73 @@ function vpTotals(levels){
   let buy=0,sell=0; for(const lv of levels){buy+=lv.buy_vol;sell+=lv.sell_vol;}
   return {buy,sell,total:buy+sell,delta:buy-sell};
 }
-function finalizeVpDraft(){
+async function fetchVpLevels(i0,i1,signal){
+  const r=await fetch(runDataUrl("/api/volume-profile",{from:String(i0),to:String(i1)}),signal?{signal}:undefined);
+  if(!r.ok)throw new Error(`VP detail request failed: ${r.status}`);
+  const data=await r.json();
+  return data.levels||[];
+}
+function vpRangeIsLoaded(i0,i1){
+  for(let i=i0;i<=i1;i++){
+    if(!ladderLoaded.has(i)&&!(fps[i]&&fps[i].ladder&&fps[i].ladder.length))return false;
+  }
+  return true;
+}
+async function loadCompleteVpLevels(i0,i1){
+  try{
+    return await fetchVpLevels(i0,i1);
+  }catch(err){
+    // Standalone viewers have no detail endpoint but already carry complete ladders.
+    if(vpRangeIsLoaded(i0,i1))return computeVpLevels(i0,i1);
+    throw err;
+  }
+}
+function cancelVpDraftPreview(){
+  vpDraftRevision++;
+  if(vpDraftTimer!==null){ clearTimeout(vpDraftTimer); vpDraftTimer=null; }
+  if(vpDraftAbort){ vpDraftAbort.abort(); vpDraftAbort=null; }
+}
+function scheduleVpDraftPreview(delay=90){
+  cancelVpDraftPreview();
+  const draft=vpDraft;
+  if(!draft)return;
+  const i0=Math.min(draft.startIdx,draft.endIdx), i1=Math.max(draft.startIdx,draft.endIdx);
+  const key=`${i0}:${i1}`;
+  draft.levels=[]; draft.completeKey=""; draft.loading=i1>i0;
+  if(i1<=i0)return;
+  // A standalone viewer has no detail endpoint. Its in-memory ladders are complete, so it can
+  // still provide an immediate and accurate preview.
+  if(vpRangeIsLoaded(i0,i1)){
+    draft.levels=computeVpLevels(i0,i1); draft.completeKey=key; draft.loading=false;
+    return;
+  }
+  const revision=vpDraftRevision;
+  vpDraftTimer=setTimeout(async()=>{
+    vpDraftTimer=null;
+    const controller=globalThis.AbortController?new AbortController():null;
+    vpDraftAbort=controller;
+    try{
+      const levels=await fetchVpLevels(i0,i1,controller&&controller.signal);
+      if(revision!==vpDraftRevision||vpDraft!==draft)return;
+      draft.levels=levels; draft.completeKey=key; draft.loading=false;
+      draw();
+    }catch(err){
+      if(err&&err.name==="AbortError")return;
+      if(revision!==vpDraftRevision||vpDraft!==draft)return;
+      draft.loading=false;
+      $("status").textContent=String(err);
+      draw();
+    }finally{
+      if(vpDraftAbort===controller)vpDraftAbort=null;
+    }
+  },delay);
+}
+async function finalizeVpDraft(){
   if(!vpDraft)return;
   const i0=Math.min(vpDraft.startIdx,vpDraft.endIdx), i1=Math.max(vpDraft.startIdx,vpDraft.endIdx);
+  const key=`${i0}:${i1}`;
+  const previewLevels=vpDraft.completeKey===key&&!vpDraft.loading?vpDraft.levels:null;
+  cancelVpDraftPreview();
   vpDraft=null;
   if(i1<=i0){
     // A plain click (no real drag): nothing drawn, just leave the one-shot tool. Existing
@@ -1901,10 +2026,15 @@ function finalizeVpDraft(){
     setVpMode(false);
     return;
   }
-  const levels=computeVpLevels(i0,i1);
+  setVpMode(false);
+  $("status").textContent=`loading full VP bars ${i0+1}-${i1+1}...`;
+  let levels;
+  try{ levels=previewLevels||await loadCompleteVpLevels(i0,i1); }
+  catch(err){ $("status").textContent=String(err); draw(); return; }
   if(levels.length){
     vpProfiles.push({id:`vp_${Date.now()}_${Math.random().toString(16).slice(2)}`,i0,i1,levels});
-    setVpMode(false); // one-shot: drawing a profile drops back to pan mode
+    $("status").textContent=`VP bars ${i0+1}-${i1+1}`;
+    draw();
     return;
   }
   draw();
@@ -1913,19 +2043,19 @@ function finalizeVpDraft(){
 // left (colored by sign), total volume grows right (grey, POC row highlighted) -- same visual
 // language as the strategy-emitted VolumeProfile plot, just for a user-picked bar range.
 function drawVpProfileBox(ctx,i0,i1,levels,L,T,pw,ph,xStep,y,tick,s,e,labelLayout,draft,sel=false){
-  if(i1<s||i0>=e||!levels.length)return;
+  if(i1<s||i0>=e)return;
   const x0=clamp(L+(i0-s)*xStep,L,L+pw), x1=clamp(L+(i1+1-s)*xStep,L,L+pw);
   const width=Math.max(2,x1-x0), half=width/2, mid=x0+half;
   let maxTotal=0,maxDelta=0;
   for(const lv of levels){ maxTotal=Math.max(maxTotal,lv.buy_vol+lv.sell_vol); maxDelta=Math.max(maxDelta,Math.abs(lv.buy_vol-lv.sell_vol)); }
-  if(!(maxTotal>0))return;
-  let poc=levels[0];
-  for(const lv of levels){ if(lv.buy_vol+lv.sell_vol>poc.buy_vol+poc.sell_vol)poc=lv; }
+  const hasProfile=maxTotal>0;
+  let poc=hasProfile?levels[0]:null;
+  if(hasProfile)for(const lv of levels){ if(lv.buy_vol+lv.sell_vol>poc.buy_vol+poc.sell_vol)poc=lv; }
   ctx.save();
   ctx.fillStyle=draft?"rgba(37,99,235,0.06)":"rgba(100,116,139,0.05)";
   ctx.fillRect(x0,T,width,ph);
   let minY=Infinity;
-  for(const lv of levels){
+  if(hasProfile)for(const lv of levels){
     const top=y(lv.price+tick/2), bot=y(lv.price-tick/2);
     const yy=Math.min(top,bot), hh=Math.max(1,Math.abs(bot-top));
     if(yy>T+ph||yy+hh<T)continue;
@@ -1949,6 +2079,8 @@ function drawVpProfileBox(ctx,i0,i1,levels,L,T,pw,ph,xStep,y,tick,s,e,labelLayou
   if(isFinite(minY)){
     const t=vpTotals(levels);
     drawLabel(ctx,`VP  vol ${fmt(t.total,0)}  Δ ${t.delta>=0?"+":""}${fmt(t.delta,0)}`,x0+4,Math.max(T+10,minY-8),draft?"#2563eb":"#334155",labelLayout);
+  }else if(draft){
+    drawLabel(ctx,"VP loading full profile...",x0+4,T+10,"#2563eb",labelLayout);
   }
 }
 function drawVpProfiles(ctx,L,T,pw,ph,xStep,y,tick,s,e,labelLayout){
@@ -1956,7 +2088,7 @@ function drawVpProfiles(ctx,L,T,pw,ph,xStep,y,tick,s,e,labelLayout){
     !!(selectedShape&&selectedShape.kind==="vp"&&selectedShape.obj===p));
   if(vpDraft){
     const i0=Math.min(vpDraft.startIdx,vpDraft.endIdx), i1=Math.max(vpDraft.startIdx,vpDraft.endIdx);
-    if(i1>i0)drawVpProfileBox(ctx,i0,i1,computeVpLevels(i0,i1),L,T,pw,ph,xStep,y,tick,s,e,labelLayout,true);
+    if(i1>i0)drawVpProfileBox(ctx,i0,i1,vpDraft.levels||[],L,T,pw,ph,xStep,y,tick,s,e,labelLayout,true);
   }
 }
 function drawAnnotationBox(ctx,ann,L,T,pw,ph,xStep,y,s,e,draft=false){
@@ -2436,7 +2568,7 @@ window.addEventListener("keydown",ev=>{
     if(vm&&vm.classList.contains("visible")){ vm.classList.remove("visible"); ev.preventDefault(); return; }
     if(drawDraft||drawTool){ drawDraft=null; setDrawTool(null); ev.preventDefault(); return; }
     if(selectedShape){ selectedShape=null; draw(); ev.preventDefault(); return; }
-    if(vpDraft){ vpDraft=null; draw(); ev.preventDefault(); return; }
+    if(vpDraft){ cancelVpDraftPreview(); vpDraft=null; draw(); ev.preventDefault(); return; }
     if(vpMode){ setVpMode(false); ev.preventDefault(); return; }
     if(annotationMode){ cancelAnnotationDraft(); ev.preventDefault(); }
     return;

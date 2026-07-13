@@ -9,7 +9,10 @@ use std::io::{BufRead, BufReader, Cursor, Write};
 use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use accelerando_core::{result::{ExperimentResult, ExperimentRunSummary}, BacktestResult};
+use accelerando_core::{
+    result::{ExperimentResult, ExperimentRunSummary},
+    BacktestResult, Level, VpLevel,
+};
 use serde::Serialize;
 use serde_json::Value;
 use tiny_http::{Header, Method, Request, Response, Server};
@@ -97,6 +100,8 @@ pub fn serve(result: &BacktestResult, port: u16) -> std::io::Result<()> {
 pub struct Studio {
     summaries: Vec<ExperimentRunSummary>,
     load_result: Box<dyn Fn(&str) -> Option<BacktestResult>>,
+    load_ladders: Box<dyn Fn(&str, usize, usize) -> Option<Vec<Vec<Level>>>>,
+    load_volume_profile: Box<dyn Fn(&str, usize, usize) -> Option<Vec<VpLevel>>>,
     heatmap: Box<dyn Fn(&str) -> Option<String>>,
     annotations: AnnotationConfig,
     replay: Option<ReplayManager>,
@@ -114,6 +119,8 @@ impl Studio {
         Self {
             summaries: Vec::new(),
             load_result: Box::new(|_| None),
+            load_ladders: Box::new(|_, _, _| None),
+            load_volume_profile: Box::new(|_, _, _| None),
             heatmap: Box::new(|_| None),
             annotations: AnnotationConfig::disabled(),
             replay: None,
@@ -141,6 +148,27 @@ impl Studio {
     ) -> Self {
         self.summaries = summaries;
         self.load_result = Box::new(load_result);
+        self
+    }
+
+    /// Supply full footprint ladders for an exclusive bar range `[from, to)`. The chart calls
+    /// this only for a small, footprint-readable visible window, allowing the initial result JSON
+    /// to keep its ladders compacted.
+    pub fn footprint_ladders(
+        mut self,
+        load_ladders: impl Fn(&str, usize, usize) -> Option<Vec<Vec<Level>>> + 'static,
+    ) -> Self {
+        self.load_ladders = Box::new(load_ladders);
+        self
+    }
+
+    /// Supply an already-aggregated fixed-range volume profile for the inclusive bar range
+    /// `[from, to]`. Aggregating server-side avoids transferring every ladder in a large selection.
+    pub fn volume_profiles(
+        mut self,
+        load_volume_profile: impl Fn(&str, usize, usize) -> Option<Vec<VpLevel>> + 'static,
+    ) -> Self {
+        self.load_volume_profile = Box::new(load_volume_profile);
         self
     }
 
@@ -179,6 +207,8 @@ fn serve_studio(studio: Studio, port: u16) -> std::io::Result<()> {
     let Studio {
         summaries,
         load_result,
+        load_ladders,
+        load_volume_profile,
         heatmap,
         annotations: annotation_config,
         replay,
@@ -227,6 +257,50 @@ fn serve_studio(studio: Studio, port: u16) -> std::io::Result<()> {
                         &serde_json::to_string(&result).expect("serialize selected result"),
                     ),
                     None => Response::from_string("run not found").with_status_code(404),
+                }
+            }
+            (Method::Get, "/api/footprint-ladders") => {
+                const MAX_LADDER_WINDOW: usize = 2_000;
+                let run_id = query_param(&raw_url, "id").unwrap_or_default();
+                let from = query_usize(&raw_url, "from");
+                let to = query_usize(&raw_url, "to");
+                match (from, to) {
+                    (Some(from), Some(to)) if to > from && to - from <= MAX_LADDER_WINDOW => {
+                        match load_ladders(&run_id, from, to) {
+                            Some(ladders) => json_response(
+                                &serde_json::json!({ "from": from, "ladders": ladders })
+                                    .to_string(),
+                            ),
+                            None => Response::from_string("footprint ladders unavailable")
+                                .with_status_code(404),
+                        }
+                    }
+                    _ => json_error(
+                        400,
+                        "from/to must define a non-empty range of at most 2000 bars",
+                    ),
+                }
+            }
+            (Method::Get, "/api/volume-profile") => {
+                let run_id = query_param(&raw_url, "id").unwrap_or_default();
+                let from = query_usize(&raw_url, "from");
+                let to = query_usize(&raw_url, "to");
+                match (from, to) {
+                    (Some(from), Some(to)) if to >= from => {
+                        match load_volume_profile(&run_id, from, to) {
+                            Some(levels) => json_response(
+                                &serde_json::json!({
+                                    "from": from,
+                                    "to": to,
+                                    "levels": levels
+                                })
+                                .to_string(),
+                            ),
+                            None => Response::from_string("volume profile unavailable")
+                                .with_status_code(404),
+                        }
+                    }
+                    _ => json_error(400, "from/to must define a valid inclusive range"),
                 }
             }
             (Method::Get, "/api/heatmap") => {
@@ -589,6 +663,10 @@ fn append_annotation(
 fn query_param(url: &str, key: &str) -> Option<String> {
     let query = url.split_once('?')?.1;
     query_param_from_query(query, key)
+}
+
+fn query_usize(url: &str, key: &str) -> Option<usize> {
+    query_param(url, key)?.parse().ok()
 }
 
 pub(crate) fn query_param_from_query(query: &str, key: &str) -> Option<String> {
