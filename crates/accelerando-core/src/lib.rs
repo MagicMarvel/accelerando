@@ -22,7 +22,10 @@ pub mod registry;
 pub mod result;
 pub mod traits;
 
-pub use broker::{Broker, BrokerConfig, OrderCtx, PositionInfo};
+pub use broker::{
+    BracketSpec, Broker, BrokerConfig, EntryExecution, EntryIntent, OrderOutput, PortfolioSnapshot,
+    PositionInfo, StrategyOutput, TradeSide, VisualOutput,
+};
 pub use engine::{
     prepare_backtest_data, run_backtest, run_backtest_progress, run_prepared_backtest, Pipeline,
     PreparedBacktestData,
@@ -36,8 +39,8 @@ pub use footprint_image::{
     TradeOutcomeFilter,
 };
 pub use heatmap::{
-    parse_heatmap_query, CompactLevel, CompactTrade, HeatmapBucket, HeatmapMetric, HeatmapQuery, HeatmapWindow,
-    HiresHeatmap, SharedHeatmap, DEFAULT_HEATMAP_CACHE_DIR,
+    parse_heatmap_query, CompactLevel, CompactTrade, HeatmapBucket, HeatmapMetric, HeatmapQuery,
+    HeatmapWindow, HiresHeatmap, SharedHeatmap, DEFAULT_HEATMAP_CACHE_DIR,
 };
 pub use metrics::Metrics;
 pub use params::{Configurable, ParamRange, ParamSpec, ParamValue, Params};

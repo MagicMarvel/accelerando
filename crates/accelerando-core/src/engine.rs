@@ -1,19 +1,17 @@
 //! The streaming backtest engine: wires the four stages together and runs them one footprint
 //! at a time. This is the hot loop used by normal runs and hyperopt evaluators.
 
-use crate::broker::{Broker, BrokerConfig, OrderCtx};
+use crate::broker::{Broker, BrokerConfig, StrategyOutput};
 use crate::event::{EventInterest, OrderFlowEvent};
 use crate::footprint::Footprint;
 use crate::metrics::Metrics;
 use crate::progress::ProgressHandle;
-use crate::result::{
-    BacktestResult, LiquidityHeatmap, LiquidityLevel, LiquiditySnapshot, Series,
-};
+use crate::result::{BacktestResult, LiquidityHeatmap, LiquidityLevel, LiquiditySnapshot, Series};
 use crate::traits::{DataSource, FootprintAggregator, Indicator, Strategy};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
-/// Collects `OrderCtx::series` points across bars into per-id [`Series`].
+/// Collects strategy visual-series points across bars into per-id [`Series`].
 #[derive(Default)]
 struct SeriesCollector {
     map: BTreeMap<String, Series>,
@@ -329,9 +327,10 @@ pub fn run_prepared_backtest(
             let trade = broker.trades[i].clone();
             strategy.on_trade_closed(&trade);
         }
-        let mut ctx = OrderCtx::new(&mut broker);
-        strategy.on_footprint(source_fp, &mut ctx);
-        let (plots, points) = ctx.take_outputs();
+        let portfolio = broker.portfolio_snapshot();
+        let mut output = StrategyOutput::new(keep_footprints);
+        strategy.on_footprint(source_fp, &portfolio, &mut output);
+        let (plots, points) = broker.apply_strategy_output(output);
         series.extend(bar_index, points);
         if keep_footprints {
             let mut fp = source_fp.clone();
@@ -433,9 +432,10 @@ pub fn run_backtest_progress(
         }
         // Strategy reacts and sets intent for the next bar.
         {
-            let mut ctx = OrderCtx::new(broker);
-            strategy.on_footprint(&fp, &mut ctx);
-            let (plots, points) = ctx.take_outputs();
+            let portfolio = broker.portfolio_snapshot();
+            let mut output = StrategyOutput::new(keep_footprints);
+            strategy.on_footprint(&fp, &portfolio, &mut output);
+            let (plots, points) = broker.apply_strategy_output(output);
             series.extend(history.len(), points);
             fp.plots.extend(plots);
         }

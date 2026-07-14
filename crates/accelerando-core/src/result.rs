@@ -40,7 +40,7 @@ pub struct Trade {
     /// Realized PnL in account currency, net of commission.
     pub pnl: f64,
     pub reason: TradeReason,
-    /// Free-form setup tag attached at entry via `OrderCtx::label_next_entry` (features,
+    /// Free-form setup tag attached atomically through `EntryIntent::tagged` (features,
     /// location type, ...), for per-setup analysis of the trade list.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub label: Option<String>,
@@ -97,7 +97,7 @@ pub struct BacktestResult {
     /// Resting order-book liquidity snapshots for Bookmap-style heatmap rendering.
     #[serde(default)]
     pub liquidity_heatmap: LiquidityHeatmap,
-    /// Per-run line overlays collected via `OrderCtx::series`.
+    /// Per-run line overlays collected via `VisualOutput::series`.
     #[serde(default)]
     pub series: Vec<Series>,
     pub tick_size: f64,

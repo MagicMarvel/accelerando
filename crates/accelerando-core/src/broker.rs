@@ -1,4 +1,4 @@
-//! A minimal next-bar-fill broker simulator and the [`OrderCtx`] strategies use to express intent.
+//! A minimal next-bar-fill broker simulator and the typed strategy input/output API.
 //!
 //! Execution model: a strategy queues position changes on footprint `i`; the broker realizes
 //! them on footprint `i+1`, then checks every open lot's stop/target against that footprint's
@@ -88,7 +88,7 @@ struct Position {
     label: Option<String>,
 }
 
-/// A snapshot of the open position a strategy can query through [`OrderCtx::open_position`].
+/// A snapshot of the open position visible to a strategy.
 #[derive(Clone, Debug)]
 pub struct PositionInfo {
     /// +1 net long, -1 net short.
@@ -107,6 +107,238 @@ pub struct PositionInfo {
     pub target: Option<f64>,
 }
 
+/// Immutable broker state presented to a strategy for the current completed footprint.
+#[derive(Clone, Debug)]
+pub struct PortfolioSnapshot {
+    pub position: i32,
+    pub net_position_qty: f64,
+    pub position_count: usize,
+    pub pending_count: usize,
+    pub open_position: Option<PositionInfo>,
+}
+
+/// Trading direction for an entry intent.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TradeSide {
+    Long,
+    Short,
+}
+
+impl TradeSide {
+    fn dir(self) -> i32 {
+        match self {
+            Self::Long => 1,
+            Self::Short => -1,
+        }
+    }
+}
+
+/// Entry price behavior. All entries are evaluated on a later footprint.
+#[derive(Clone, Debug, PartialEq)]
+pub enum EntryExecution {
+    Market,
+    Limit {
+        price: f64,
+        fill_min: Option<f64>,
+        fill_max: Option<f64>,
+    },
+}
+
+/// Stop/target specification attached atomically to an entry intent.
+#[derive(Clone, Debug, PartialEq)]
+pub enum BracketSpec {
+    Ticks {
+        stop: f64,
+        target: f64,
+    },
+    Prices {
+        stop: Option<f64>,
+        target: Option<f64>,
+    },
+}
+
+/// A complete next-bar entry request, including its analysis tag.
+#[derive(Clone, Debug, PartialEq)]
+pub struct EntryIntent {
+    pub side: TradeSide,
+    pub qty: f64,
+    pub execution: EntryExecution,
+    pub bracket: BracketSpec,
+    pub tag: Option<String>,
+}
+
+impl EntryIntent {
+    pub fn market(side: TradeSide, qty: f64) -> Self {
+        Self {
+            side,
+            qty,
+            execution: EntryExecution::Market,
+            bracket: BracketSpec::Ticks {
+                stop: 0.0,
+                target: 0.0,
+            },
+            tag: None,
+        }
+    }
+
+    pub fn limit(side: TradeSide, qty: f64, price: f64) -> Self {
+        Self {
+            execution: EntryExecution::Limit {
+                price,
+                fill_min: None,
+                fill_max: None,
+            },
+            ..Self::market(side, qty)
+        }
+    }
+
+    pub fn fill_between(mut self, min: Option<f64>, max: Option<f64>) -> Self {
+        if let EntryExecution::Limit {
+            fill_min, fill_max, ..
+        } = &mut self.execution
+        {
+            *fill_min = min;
+            *fill_max = max;
+        }
+        self
+    }
+
+    pub fn tick_bracket(mut self, stop: f64, target: f64) -> Self {
+        self.bracket = BracketSpec::Ticks { stop, target };
+        self
+    }
+
+    pub fn price_bracket(mut self, stop: Option<f64>, target: Option<f64>) -> Self {
+        self.bracket = BracketSpec::Prices { stop, target };
+        self
+    }
+
+    pub fn tagged(mut self, tag: impl Into<String>) -> Self {
+        self.tag = Some(tag.into());
+        self
+    }
+
+    fn into_order(self) -> EntryOrder {
+        let (entry_limit, entry_min, entry_max) = match self.execution {
+            EntryExecution::Market => (None, None, None),
+            EntryExecution::Limit {
+                price,
+                fill_min,
+                fill_max,
+            } => (Some(price), fill_min, fill_max),
+        };
+        let (stop_ticks, target_ticks, stop_px, target_px) = match self.bracket {
+            BracketSpec::Ticks { stop, target } => (stop, target, None, None),
+            BracketSpec::Prices { stop, target } => (0.0, 0.0, stop, target),
+        };
+        EntryOrder {
+            dir: self.side.dir(),
+            qty: self.qty,
+            stop_ticks,
+            target_ticks,
+            stop_px,
+            target_px,
+            entry_min,
+            entry_max,
+            entry_limit,
+            label: self.tag,
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq)]
+enum OrderAction {
+    Replace(EntryIntent),
+    Add(EntryIntent),
+    CancelPending,
+    ExitPosition,
+}
+
+/// Typed order command buffer produced by a strategy and applied by the engine afterward.
+#[derive(Default)]
+pub struct OrderOutput {
+    actions: Vec<OrderAction>,
+}
+
+impl OrderOutput {
+    pub fn replace(&mut self, intent: EntryIntent) {
+        self.actions.push(OrderAction::Replace(intent));
+    }
+
+    pub fn add(&mut self, intent: EntryIntent) {
+        self.actions.push(OrderAction::Add(intent));
+    }
+
+    pub fn cancel_pending(&mut self) {
+        self.actions.push(OrderAction::CancelPending);
+    }
+
+    pub fn exit_position(&mut self) {
+        self.actions.push(OrderAction::ExitPosition);
+    }
+}
+
+/// Chart-only output. It can be disabled for headless parameter searches.
+pub struct VisualOutput {
+    enabled: bool,
+    plots: Vec<Plot>,
+    series: Vec<(String, f64, Option<String>)>,
+}
+
+impl VisualOutput {
+    fn new(enabled: bool) -> Self {
+        Self {
+            enabled,
+            plots: Vec::new(),
+            series: Vec::new(),
+        }
+    }
+
+    pub fn is_enabled(&self) -> bool {
+        self.enabled
+    }
+
+    pub fn push(&mut self, plot: Plot) {
+        if self.enabled {
+            self.plots.push(plot);
+        }
+    }
+
+    pub fn series(&mut self, id: &str, value: f64) {
+        self.series.push((id.to_string(), value, None));
+    }
+
+    pub fn series_colored(&mut self, id: &str, value: f64, color: &str) {
+        self.series
+            .push((id.to_string(), value, Some(color.to_string())));
+    }
+}
+
+/// All commands emitted by one strategy callback.
+pub struct StrategyOutput {
+    pub orders: OrderOutput,
+    pub visuals: VisualOutput,
+}
+
+impl StrategyOutput {
+    pub fn new(visuals_enabled: bool) -> Self {
+        Self {
+            orders: OrderOutput::default(),
+            visuals: VisualOutput::new(visuals_enabled),
+        }
+    }
+
+    fn into_parts(
+        self,
+    ) -> (
+        Vec<OrderAction>,
+        Vec<Plot>,
+        Vec<(String, f64, Option<String>)>,
+    ) {
+        (self.orders.actions, self.visuals.plots, self.visuals.series)
+    }
+}
+
 /// The broker simulator: tracks open lots, fills next-bar orders, records trades and equity.
 pub struct Broker {
     cfg: BrokerConfig,
@@ -116,7 +348,6 @@ pub struct Broker {
     peak_equity: f64,
     positions: Vec<Position>,
     pending: Vec<PendingIntent>,
-    next_label: Option<String>,
     pub trades: Vec<Trade>,
     pub equity: Vec<EquityPoint>,
 }
@@ -131,7 +362,6 @@ impl Broker {
             peak_equity: cfg.starting_equity,
             positions: Vec::new(),
             pending: Vec::new(),
-            next_label: None,
             trades: Vec::new(),
             equity: Vec::new(),
         }
@@ -379,24 +609,13 @@ impl Broker {
     }
 
     fn set_single_pending(&mut self, kind: PendingKind) {
-        let kind = self.attach_label(kind);
         self.pending.clear();
         self.pending.push(PendingIntent::new(kind));
     }
 
     fn add_pending(&mut self, order: EntryOrder) {
-        let kind = self.attach_label(PendingKind::Add(order));
-        self.pending.push(PendingIntent::new(kind));
-    }
-
-    /// Move a label set via [`OrderCtx::label_next_entry`] onto the order being queued.
-    fn attach_label(&mut self, mut kind: PendingKind) -> PendingKind {
-        if let PendingKind::Replace(order) | PendingKind::Add(order) = &mut kind {
-            if order.label.is_none() {
-                order.label = self.next_label.take();
-            }
-        }
-        kind
+        self.pending
+            .push(PendingIntent::new(PendingKind::Add(order)));
     }
 
     /// Snapshot of the open position (lots in the current net direction), if any.
@@ -454,6 +673,34 @@ impl Broker {
 
     fn pending_count(&self) -> usize {
         self.pending.len()
+    }
+
+    pub fn portfolio_snapshot(&self) -> PortfolioSnapshot {
+        PortfolioSnapshot {
+            position: self.current_dir(),
+            net_position_qty: self.net_position_qty(),
+            position_count: self.position_count(),
+            pending_count: self.pending_count(),
+            open_position: self.open_position_info(),
+        }
+    }
+
+    pub fn apply_strategy_output(
+        &mut self,
+        output: StrategyOutput,
+    ) -> (Vec<Plot>, Vec<(String, f64, Option<String>)>) {
+        let (actions, plots, series) = output.into_parts();
+        for action in actions {
+            match action {
+                OrderAction::Replace(intent) => {
+                    self.set_single_pending(PendingKind::Replace(intent.into_order()))
+                }
+                OrderAction::Add(intent) => self.add_pending(intent.into_order()),
+                OrderAction::CancelPending => self.clear_pending(),
+                OrderAction::ExitPosition => self.set_single_pending(PendingKind::Flat),
+            }
+        }
+        (plots, series)
     }
 
     fn has_only_position_dir(&self, dir: i32) -> bool {
@@ -518,340 +765,6 @@ fn price_in_band(px: f64, min: Option<f64>, max: Option<f64>) -> bool {
     true
 }
 
-/// Handed to the strategy each footprint; records the desired next-bar position and any
-/// chart overlays the strategy wants drawn.
-pub struct OrderCtx<'b> {
-    broker: &'b mut Broker,
-    plots: Vec<Plot>,
-    series: Vec<(String, f64, Option<String>)>,
-}
-
-impl<'b> OrderCtx<'b> {
-    pub fn new(broker: &'b mut Broker) -> Self {
-        Self {
-            broker,
-            plots: Vec::new(),
-            series: Vec::new(),
-        }
-    }
-
-    /// Append a chart overlay to this footprint (lines, markers, bands).
-    pub fn plot(&mut self, p: Plot) {
-        self.plots.push(p);
-    }
-
-    /// Record one point of a named per-run line series (e.g. a VWAP) at this footprint.
-    /// Stored once per run as `BacktestResult::series` — far leaner than a `Plot::Line`
-    /// per bar when the line has a value on every footprint.
-    pub fn series(&mut self, id: &str, value: f64) {
-        self.series.push((id.to_string(), value, None));
-    }
-
-    /// [`OrderCtx::series`] with an explicit color (first point's color wins per id).
-    pub fn series_colored(&mut self, id: &str, value: f64, color: &str) {
-        self.series
-            .push((id.to_string(), value, Some(color.to_string())));
-    }
-
-    /// Drain the collected plots (called by the engine after the strategy returns).
-    pub fn take_plots(self) -> Vec<Plot> {
-        self.plots
-    }
-
-    /// Drain plots and series points (called by the engine after the strategy returns).
-    pub fn take_outputs(self) -> (Vec<Plot>, Vec<(String, f64, Option<String>)>) {
-        (self.plots, self.series)
-    }
-
-    /// Snapshot of the currently open position: average entry, bars held, protection.
-    pub fn open_position(&self) -> Option<PositionInfo> {
-        self.broker.open_position_info()
-    }
-
-    /// Tag the next entry order queued through this or a later ctx; the label rides the
-    /// position onto the recorded [`Trade`] for later per-setup analysis.
-    pub fn label_next_entry(&mut self, label: &str) {
-        self.broker.next_label = Some(label.to_string());
-    }
-
-    /// Net position direction: -1 net short, 0 flat/hedged, +1 net long.
-    pub fn position(&self) -> i32 {
-        self.broker.current_dir()
-    }
-
-    /// Net signed quantity across all open lots.
-    pub fn net_position_qty(&self) -> f64 {
-        self.broker.net_position_qty()
-    }
-
-    /// Number of currently open lots.
-    pub fn position_count(&self) -> usize {
-        self.broker.position_count()
-    }
-
-    /// Number of active pending orders.
-    pub fn pending_count(&self) -> usize {
-        self.broker.pending_count()
-    }
-
-    /// Desire a long position of `qty` next bar, with stop/target distances in ticks (0 = none).
-    pub fn go_long(&mut self, qty: f64, stop_ticks: f64, target_ticks: f64) {
-        self.go_long_if_open_between(qty, stop_ticks, target_ticks, None, None);
-    }
-
-    /// Desire a long position only if the next bar opens inside the optional price band.
-    pub fn go_long_if_open_between(
-        &mut self,
-        qty: f64,
-        stop_ticks: f64,
-        target_ticks: f64,
-        entry_min: Option<f64>,
-        entry_max: Option<f64>,
-    ) {
-        self.broker
-            .set_single_pending(PendingKind::Replace(entry_order(
-                1,
-                qty,
-                stop_ticks,
-                target_ticks,
-                entry_min,
-                entry_max,
-                None,
-            )));
-    }
-
-    /// Desire a short position of `qty` next bar.
-    pub fn go_short(&mut self, qty: f64, stop_ticks: f64, target_ticks: f64) {
-        self.go_short_if_open_between(qty, stop_ticks, target_ticks, None, None);
-    }
-
-    /// Desire a short position only if the next bar opens inside the optional price band.
-    pub fn go_short_if_open_between(
-        &mut self,
-        qty: f64,
-        stop_ticks: f64,
-        target_ticks: f64,
-        entry_min: Option<f64>,
-        entry_max: Option<f64>,
-    ) {
-        self.broker
-            .set_single_pending(PendingKind::Replace(entry_order(
-                -1,
-                qty,
-                stop_ticks,
-                target_ticks,
-                entry_min,
-                entry_max,
-                None,
-            )));
-    }
-
-    /// Desire a long position using a next-bar limit entry inside an optional price band.
-    pub fn go_long_limit_next_bar(
-        &mut self,
-        qty: f64,
-        stop_ticks: f64,
-        target_ticks: f64,
-        entry_limit: f64,
-        entry_min: Option<f64>,
-        entry_max: Option<f64>,
-    ) {
-        self.broker
-            .set_single_pending(PendingKind::Replace(entry_order(
-                1,
-                qty,
-                stop_ticks,
-                target_ticks,
-                entry_min,
-                entry_max,
-                Some(entry_limit),
-            )));
-    }
-
-    /// Desire a short position using a next-bar limit entry inside an optional price band.
-    pub fn go_short_limit_next_bar(
-        &mut self,
-        qty: f64,
-        stop_ticks: f64,
-        target_ticks: f64,
-        entry_limit: f64,
-        entry_min: Option<f64>,
-        entry_max: Option<f64>,
-    ) {
-        self.broker
-            .set_single_pending(PendingKind::Replace(entry_order(
-                -1,
-                qty,
-                stop_ticks,
-                target_ticks,
-                entry_min,
-                entry_max,
-                Some(entry_limit),
-            )));
-    }
-
-    /// Add a new long lot next bar without closing existing lots.
-    pub fn add_long(&mut self, qty: f64, stop_ticks: f64, target_ticks: f64) {
-        self.add_long_if_open_between(qty, stop_ticks, target_ticks, None, None);
-    }
-
-    /// Add a new long lot only if the next bar opens inside the optional price band.
-    pub fn add_long_if_open_between(
-        &mut self,
-        qty: f64,
-        stop_ticks: f64,
-        target_ticks: f64,
-        entry_min: Option<f64>,
-        entry_max: Option<f64>,
-    ) {
-        self.broker.add_pending(entry_order(
-            1,
-            qty,
-            stop_ticks,
-            target_ticks,
-            entry_min,
-            entry_max,
-            None,
-        ));
-    }
-
-    /// Add a new short lot next bar without closing existing lots.
-    pub fn add_short(&mut self, qty: f64, stop_ticks: f64, target_ticks: f64) {
-        self.add_short_if_open_between(qty, stop_ticks, target_ticks, None, None);
-    }
-
-    /// Add a new short lot only if the next bar opens inside the optional price band.
-    pub fn add_short_if_open_between(
-        &mut self,
-        qty: f64,
-        stop_ticks: f64,
-        target_ticks: f64,
-        entry_min: Option<f64>,
-        entry_max: Option<f64>,
-    ) {
-        self.broker.add_pending(entry_order(
-            -1,
-            qty,
-            stop_ticks,
-            target_ticks,
-            entry_min,
-            entry_max,
-            None,
-        ));
-    }
-
-    /// Add a new long lot using a next-bar limit entry without closing existing lots.
-    pub fn add_long_limit_next_bar(
-        &mut self,
-        qty: f64,
-        stop_ticks: f64,
-        target_ticks: f64,
-        entry_limit: f64,
-        entry_min: Option<f64>,
-        entry_max: Option<f64>,
-    ) {
-        self.broker.add_pending(entry_order(
-            1,
-            qty,
-            stop_ticks,
-            target_ticks,
-            entry_min,
-            entry_max,
-            Some(entry_limit),
-        ));
-    }
-
-    /// Add a new short lot using a next-bar limit entry without closing existing lots.
-    pub fn add_short_limit_next_bar(
-        &mut self,
-        qty: f64,
-        stop_ticks: f64,
-        target_ticks: f64,
-        entry_limit: f64,
-        entry_min: Option<f64>,
-        entry_max: Option<f64>,
-    ) {
-        self.broker.add_pending(entry_order(
-            -1,
-            qty,
-            stop_ticks,
-            target_ticks,
-            entry_min,
-            entry_max,
-            Some(entry_limit),
-        ));
-    }
-
-    /// Desire a long position next bar with **absolute** stop/target prices. Structural
-    /// protection (a level plus a buffer) should use this instead of tick distances so an
-    /// open gap cannot move the stop along with the fill.
-    pub fn go_long_bracket(&mut self, qty: f64, stop_px: Option<f64>, target_px: Option<f64>) {
-        self.broker
-            .set_single_pending(PendingKind::Replace(EntryOrder {
-                dir: 1,
-                qty,
-                stop_ticks: 0.0,
-                target_ticks: 0.0,
-                stop_px,
-                target_px,
-                entry_min: None,
-                entry_max: None,
-                entry_limit: None,
-                label: None,
-            }));
-    }
-
-    /// Desire a short position next bar with **absolute** stop/target prices.
-    pub fn go_short_bracket(&mut self, qty: f64, stop_px: Option<f64>, target_px: Option<f64>) {
-        self.broker
-            .set_single_pending(PendingKind::Replace(EntryOrder {
-                dir: -1,
-                qty,
-                stop_ticks: 0.0,
-                target_ticks: 0.0,
-                stop_px,
-                target_px,
-                entry_min: None,
-                entry_max: None,
-                entry_limit: None,
-                label: None,
-            }));
-    }
-
-    /// Cancel resting pending orders without closing existing lots.
-    pub fn cancel_pending_orders(&mut self) {
-        self.broker.clear_pending();
-    }
-
-    /// Desire to be flat next bar.
-    pub fn flatten(&mut self) {
-        self.broker.set_single_pending(PendingKind::Flat);
-    }
-}
-
-fn entry_order(
-    dir: i32,
-    qty: f64,
-    stop_ticks: f64,
-    target_ticks: f64,
-    entry_min: Option<f64>,
-    entry_max: Option<f64>,
-    entry_limit: Option<f64>,
-) -> EntryOrder {
-    EntryOrder {
-        dir,
-        qty,
-        stop_ticks,
-        target_ticks,
-        stop_px: None,
-        target_px: None,
-        entry_min,
-        entry_max,
-        entry_limit,
-        label: None,
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -886,11 +799,14 @@ mod tests {
     #[test]
     fn additive_orders_open_multiple_lots_and_exit_independently() {
         let mut broker = broker();
-        {
-            let mut ctx = OrderCtx::new(&mut broker);
-            ctx.add_long_limit_next_bar(1.0, 10.0, 2.0, 100.0, None, None);
-            ctx.add_long_limit_next_bar(1.0, 10.0, 4.0, 99.0, None, None);
-        }
+        let mut output = StrategyOutput::new(false);
+        output
+            .orders
+            .add(EntryIntent::limit(TradeSide::Long, 1.0, 100.0).tick_bracket(10.0, 2.0));
+        output
+            .orders
+            .add(EntryIntent::limit(TradeSide::Long, 1.0, 99.0).tick_bracket(10.0, 4.0));
+        broker.apply_strategy_output(output);
 
         broker.on_new_footprint(&fp(100.0, 100.0, 99.0, 99.0, 1));
         assert_eq!(broker.position_count(), 2);
@@ -908,19 +824,21 @@ mod tests {
     }
 
     #[test]
-    fn legacy_replace_order_does_not_stack_same_direction_lots() {
+    fn replace_order_does_not_stack_same_direction_lots() {
         let mut broker = broker();
-        {
-            let mut ctx = OrderCtx::new(&mut broker);
-            ctx.go_long(1.0, 10.0, 0.0);
-        }
+        let mut output = StrategyOutput::new(false);
+        output
+            .orders
+            .replace(EntryIntent::market(TradeSide::Long, 1.0).tick_bracket(10.0, 0.0));
+        broker.apply_strategy_output(output);
         broker.on_new_footprint(&fp(100.0, 100.0, 100.0, 100.0, 1));
         assert_eq!(broker.position_count(), 1);
 
-        {
-            let mut ctx = OrderCtx::new(&mut broker);
-            ctx.go_long(1.0, 10.0, 0.0);
-        }
+        let mut output = StrategyOutput::new(false);
+        output
+            .orders
+            .replace(EntryIntent::market(TradeSide::Long, 1.0).tick_bracket(10.0, 0.0));
+        broker.apply_strategy_output(output);
         broker.on_new_footprint(&fp(101.0, 101.0, 101.0, 101.0, 2));
         assert_eq!(broker.position_count(), 1);
         assert!(broker.trades.is_empty());
@@ -929,18 +847,20 @@ mod tests {
     #[test]
     fn flatten_closes_every_open_lot() {
         let mut broker = broker();
-        {
-            let mut ctx = OrderCtx::new(&mut broker);
-            ctx.add_long(1.0, 10.0, 0.0);
-            ctx.add_long(1.0, 10.0, 0.0);
-        }
+        let mut output = StrategyOutput::new(false);
+        output
+            .orders
+            .add(EntryIntent::market(TradeSide::Long, 1.0).tick_bracket(10.0, 0.0));
+        output
+            .orders
+            .add(EntryIntent::market(TradeSide::Long, 1.0).tick_bracket(10.0, 0.0));
+        broker.apply_strategy_output(output);
         broker.on_new_footprint(&fp(100.0, 100.0, 100.0, 100.0, 1));
         assert_eq!(broker.position_count(), 2);
 
-        {
-            let mut ctx = OrderCtx::new(&mut broker);
-            ctx.flatten();
-        }
+        let mut output = StrategyOutput::new(false);
+        output.orders.exit_position();
+        broker.apply_strategy_output(output);
         broker.on_new_footprint(&fp(101.0, 101.0, 101.0, 101.0, 2));
         assert_eq!(broker.position_count(), 0);
         assert_eq!(broker.trades.len(), 2);
@@ -948,5 +868,45 @@ mod tests {
             .trades
             .iter()
             .all(|trade| trade.reason == TradeReason::Signal));
+    }
+
+    #[test]
+    fn cancel_pending_does_not_exit_an_open_position() {
+        let mut broker = broker();
+        let mut output = StrategyOutput::new(false);
+        output
+            .orders
+            .replace(EntryIntent::market(TradeSide::Long, 1.0).tick_bracket(10.0, 0.0));
+        broker.apply_strategy_output(output);
+        broker.on_new_footprint(&fp(100.0, 100.0, 100.0, 100.0, 1));
+
+        let mut output = StrategyOutput::new(false);
+        output.orders.cancel_pending();
+        broker.apply_strategy_output(output);
+        broker.on_new_footprint(&fp(101.0, 101.0, 101.0, 101.0, 2));
+
+        assert_eq!(broker.position_count(), 1);
+        assert!(broker.trades.is_empty());
+    }
+
+    #[test]
+    fn entry_tag_is_bound_to_the_resulting_trade() {
+        let mut broker = broker();
+        let mut output = StrategyOutput::new(false);
+        output.orders.replace(
+            EntryIntent::market(TradeSide::Long, 1.0)
+                .tick_bracket(10.0, 0.0)
+                .tagged("breakout"),
+        );
+        broker.apply_strategy_output(output);
+        broker.on_new_footprint(&fp(100.0, 100.0, 100.0, 100.0, 1));
+
+        let mut output = StrategyOutput::new(false);
+        output.orders.exit_position();
+        broker.apply_strategy_output(output);
+        broker.on_new_footprint(&fp(101.0, 101.0, 101.0, 101.0, 2));
+
+        assert_eq!(broker.trades.len(), 1);
+        assert_eq!(broker.trades[0].label.as_deref(), Some("breakout"));
     }
 }

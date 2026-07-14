@@ -134,22 +134,26 @@ Parameter validation is strict: `build` panics on unknown param names or illegal
 
 ## Mechanics worth knowing when writing strategies
 
-- **Position visibility**: `ctx.open_position()` returns `PositionInfo` (direction, average price,
+- **Read/write boundary**: `Strategy::on_footprint` receives an immutable `PortfolioSnapshot` and a
+  mutable `StrategyOutput`. Account state is read from `portfolio`; decisions are emitted through
+  `output.orders` and chart-only data through `output.visuals`.
+- **Position visibility**: `portfolio.open_position` contains `PositionInfo` (direction, average price,
   bars held, current stop/target) — a time stop is just `pos.bars_held >= N`. Strategies can also
   implement `on_trade_closed(&Trade)` to be called back on every round-trip close.
-- **Absolute-price brackets**: `ctx.go_long_bracket(qty, stop_px, target_px)` /
-  `go_short_bracket` place protection at **absolute prices** — use these for structural stops
-  (a level plus buffer) so an open gap cannot silently move the stop with the fill. The relative
-  form `go_long(qty, stop_ticks, target_ticks)` (ticks from next bar's open) still exists.
+- **Typed entries**: submit `EntryIntent::market(TradeSide::Long, qty)` or `EntryIntent::limit(...)`
+  through `output.orders.replace(...)` / `add(...)`. Attach structural protection with
+  `.price_bracket(stop, target)` or relative protection with `.tick_bracket(stop, target)`.
+- **Explicit cancellation and exits**: `output.orders.cancel_pending()` only removes resting entry
+  orders; `output.orders.exit_position()` requests a next-bar position exit.
 - **Fill model**: intent set on bar `i` fills at bar `i+1`'s open; stops/targets are checked
   intrabar against high/low. Within one bar the stop is assumed to hit before the target
   (conservative). If the open gaps through the stop, the fill is at the **open price** — never at
   a price the market did not trade.
-- **Line outputs use series**: `ctx.series("vwap", v)` / `series_colored` store one series per run
+- **Line outputs use series**: `output.visuals.series("vwap", v)` / `series_colored` store one series per run
   in `BacktestResult.series`; the studio renders them as polylines with a legend grouped by id
   prefix. Do not push a `Plot::Line` per bar.
-- **Trade labels**: call `ctx.label_next_entry("setup text")` before entering; the label rides the
-  position into the trade record for later per-setup statistics.
+- **Trade labels are atomic**: `.tagged("setup text")` is part of the `EntryIntent`, so metadata
+  cannot accidentally attach to a different later order.
 - **Time zone helpers**: `accelerando_core::market_time` converts ns timestamps to US-Eastern
   dates/minutes (DST-aware) and parses session windows.
 - **Sharpe convention**: the reported sharpe is per-bar equity-return `mean/std × √N`

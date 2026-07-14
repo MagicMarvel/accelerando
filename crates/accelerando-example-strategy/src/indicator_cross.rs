@@ -4,7 +4,10 @@
 //! Entries are moving-average crosses with RSI and volume filters; exits are opposite crosses or
 //! RSI exhaustion.
 
-use accelerando_core::{Configurable, Footprint, OrderCtx, ParamSpec, Params, Plot, Strategy};
+use accelerando_core::{
+    Configurable, EntryIntent, Footprint, ParamSpec, Params, Plot, PortfolioSnapshot, Strategy,
+    StrategyOutput, TradeSide, VisualOutput,
+};
 
 pub struct IndicatorCross {
     qty: f64,
@@ -52,7 +55,12 @@ impl Configurable for IndicatorCross {
 }
 
 impl Strategy for IndicatorCross {
-    fn on_footprint(&mut self, fp: &Footprint, ctx: &mut OrderCtx) {
+    fn on_footprint(
+        &mut self,
+        fp: &Footprint,
+        portfolio: &PortfolioSnapshot,
+        output: &mut StrategyOutput,
+    ) {
         let Some(fast) = fp.values.get("ema_fast").copied() else {
             return;
         };
@@ -75,24 +83,30 @@ impl Strategy for IndicatorCross {
             .map(|(pf, ps)| pf >= ps && fast < slow)
             .unwrap_or(false);
 
-        let pos = ctx.position();
+        let pos = portfolio.position;
         if pos > 0 && (crossed_below || rsi >= self.sell_rsi_min) {
-            ctx.flatten();
-            self.plot(fp, ctx, "exit_long", "#f97316");
+            output.orders.exit_position();
+            self.plot(fp, &mut output.visuals, "exit_long", "#f97316");
         } else if pos < 0 && (crossed_above || rsi <= self.cover_rsi_max) {
-            ctx.flatten();
-            self.plot(fp, ctx, "exit_short", "#f97316");
+            output.orders.exit_position();
+            self.plot(fp, &mut output.visuals, "exit_short", "#f97316");
         } else if pos == 0 && has_volume && crossed_above && rsi <= self.buy_rsi_max {
-            ctx.go_long(self.qty, self.stop_ticks, self.target_ticks);
-            self.plot(fp, ctx, "enter_long", "#16a34a");
+            output.orders.replace(
+                EntryIntent::market(TradeSide::Long, self.qty)
+                    .tick_bracket(self.stop_ticks, self.target_ticks),
+            );
+            self.plot(fp, &mut output.visuals, "enter_long", "#16a34a");
         } else if pos == 0
             && self.side == "long_short"
             && has_volume
             && crossed_below
             && rsi >= self.short_rsi_min
         {
-            ctx.go_short(self.qty, self.stop_ticks, self.target_ticks);
-            self.plot(fp, ctx, "enter_short", "#dc2626");
+            output.orders.replace(
+                EntryIntent::market(TradeSide::Short, self.qty)
+                    .tick_bracket(self.stop_ticks, self.target_ticks),
+            );
+            self.plot(fp, &mut output.visuals, "enter_short", "#dc2626");
         }
 
         self.prev_fast = Some(fast);
@@ -101,8 +115,8 @@ impl Strategy for IndicatorCross {
 }
 
 impl IndicatorCross {
-    fn plot(&self, fp: &Footprint, ctx: &mut OrderCtx, text: &str, color: &str) {
-        ctx.plot(Plot::Marker {
+    fn plot(&self, fp: &Footprint, visuals: &mut VisualOutput, text: &str, color: &str) {
+        visuals.push(Plot::Marker {
             price: fp.close,
             shape: "triangle".to_string(),
             color: color.to_string(),

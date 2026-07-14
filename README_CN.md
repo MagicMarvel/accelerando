@@ -129,20 +129,25 @@ let strategy = registry.build_strategy("my_strategy", &Params::default()).unwrap
 
 ## 写策略时值得知道的机制
 
-- **持仓可见**：`ctx.open_position()` 返回 `PositionInfo`（方向、均价、持有 bar 数、当前止损
+- **读写边界**：`Strategy::on_footprint` 接收只读 `PortfolioSnapshot` 和可写
+  `StrategyOutput`；账户状态从 `portfolio` 读取，订单写入 `output.orders`，纯绘图写入
+  `output.visuals`。
+- **持仓可见**：`portfolio.open_position` 包含 `PositionInfo`（方向、均价、持有 bar 数、当前止损
   止盈），时间止损直接 `pos.bars_held >= N` 即可；策略还可实现 `on_trade_closed(&Trade)`
   在每笔平仓时收到回调。
-- **绝对价 bracket**：`ctx.go_long_bracket(qty, stop_px, target_px)` / `go_short_bracket`
-  用**绝对价格**下保护单——结构性止损（某个价位 + buffer）应当用它，跳空不会把止损跟着 fill
-  挪走；旧的 `go_long(qty, stop_ticks, target_ticks)`（相对下根开盘的 tick 距离）仍可用。
+- **类型化入场**：用 `EntryIntent::market(...)` 或 `EntryIntent::limit(...)` 构造订单，通过
+  `output.orders.replace(...)` / `add(...)` 提交；结构止损用 `.price_bracket(...)`，相对 tick
+  距离用 `.tick_bracket(...)`。
+- **撤单与平仓分离**：`output.orders.cancel_pending()` 只撤待成交入场单；
+  `output.orders.exit_position()` 才请求下一根 bar 平仓。
 - **成交模型**：第 `i` 根 bar 设定的意图在第 `i+1` 根开盘成交；止损止盈按该 bar 高低价盘中
   检查。同一根 bar 内先止损后止盈（保守假设）；开盘直接跳过止损价时按**开盘价**成交
   （gap-through），不会出现"在市场没到过的价格成交"。
-- **线型输出用 series**：`ctx.series("vwap", v)` / `series_colored` 每 run 存一份
+- **线型输出用 series**：`output.visuals.series("vwap", v)` / `series_colored` 每 run 存一份
   `BacktestResult.series`，studio 自动连线渲染（legend 按 id 前缀分组开关），别再每根 bar
   push `Plot::Line`。
-- **trade 标签**：入场前 `ctx.label_next_entry("特征文本")`，标签跟随持仓落到成交记录里，
-  供之后按 setup 特征做统计。
+- **trade 标签原子化**：标签通过 `EntryIntent::tagged("特征文本")` 与订单一起提交，不会因
+  调用顺序错误附着到之后的其他订单。
 - **时区工具**：`accelerando_core::market_time` 提供 ns→美东日期/分钟（含夏令时）、时段窗口
   解析等。
 - **Sharpe 口径**：metrics 里的 sharpe 是逐 bar equity 收益的 `均值/标准差×√N`（t 统计式，

@@ -1,7 +1,7 @@
 //! The four pluggable stages. Each is [`Configurable`], so user crates can supply their own
 //! adapters and they slot straight into the engine and the hyperopt search space.
 
-use crate::broker::OrderCtx;
+use crate::broker::{PortfolioSnapshot, StrategyOutput};
 use crate::event::{EventInterest, OrderFlowEvent};
 use crate::footprint::Footprint;
 use crate::progress::ProgressHandle;
@@ -72,10 +72,23 @@ pub trait Strategy {
     /// Called once for every normalized order-flow event.
     ///
     /// This hook is reserved for custom engines. The built-in backtest runners do not call it.
-    fn on_event(&mut self, _ev: &OrderFlowEvent, _ctx: &mut OrderCtx) {}
+    fn on_event(
+        &mut self,
+        _ev: &OrderFlowEvent,
+        _portfolio: &PortfolioSnapshot,
+        _output: &mut StrategyOutput,
+    ) {
+    }
 
-    /// Called once per completed (and indicator-enriched) footprint.
-    fn on_footprint(&mut self, _fp: &Footprint, _ctx: &mut OrderCtx) {}
+    /// Called once per completed (and indicator-enriched) footprint. Market/account state is
+    /// immutable; orders and visuals are emitted into separate typed output channels.
+    fn on_footprint(
+        &mut self,
+        _fp: &Footprint,
+        _portfolio: &PortfolioSnapshot,
+        _output: &mut StrategyOutput,
+    ) {
+    }
 
     /// Called once for each round-trip the broker recorded on the current footprint (fills
     /// resolve before the strategy sees the bar), right before [`Strategy::on_footprint`].
