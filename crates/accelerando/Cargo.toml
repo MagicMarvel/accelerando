@@ -7,6 +7,7 @@ description = "Accelerando facade crate: common API and built-in default registr
 
 [dependencies]
 accelerando-core = { workspace = true }
+accelerando-hyperopt = { workspace = true }
 accelerando-example-sources = { workspace = true }
 accelerando-example-aggregators = { workspace = true }
 accelerando-example-indicators = { workspace = true }

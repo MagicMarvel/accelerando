@@ -27,6 +27,7 @@ dependencies = [
  "accelerando-example-indicators",
  "accelerando-example-sources",
  "accelerando-example-strategy",
+ "accelerando-hyperopt",
  "accelerando-orderflow-features",
 ]
 

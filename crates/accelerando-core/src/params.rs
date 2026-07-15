@@ -151,35 +151,140 @@ impl ParamSpec {
         p
     }
 
-    /// Check `overrides` against this spec: every key must be declared, and every value for a
-    /// [`ParamRange::Choice`] must be one of its options. Returns a human-readable error
-    /// otherwise — the point is to fail loudly on typos instead of silently using defaults.
+    /// Parse repeated `name=value` assignments according to the declared parameter types.
+    ///
+    /// String splitting may happen at an application's CLI boundary, but interpreting a value as
+    /// an integer, float, choice, or fixed value is framework-owned because only `ParamSpec` knows
+    /// those semantics.
+    pub fn parse_assignments(&self, assignments: &[String]) -> Result<Params, String> {
+        let mut overrides = Params::default();
+        for assignment in assignments {
+            let (name, raw) = assignment.split_once('=').ok_or_else(|| {
+                format!("invalid parameter assignment `{assignment}`; expected name=value")
+            })?;
+            let name = name.trim();
+            let raw = raw.trim();
+            if name.is_empty() {
+                return Err(format!(
+                    "invalid parameter assignment `{assignment}`; parameter name is empty"
+                ));
+            }
+            if overrides.get(name).is_some() {
+                return Err(format!("parameter `{name}` was specified more than once"));
+            }
+            let entry = self.entry(name)?;
+            let value =
+                match (&entry.range, &entry.default) {
+                    (ParamRange::Int { .. }, _) | (ParamRange::Fixed, ParamValue::Int(_)) => {
+                        ParamValue::Int(raw.parse::<i64>().map_err(|_| {
+                            format!("parameter `{name}` expects an integer, got `{raw}`")
+                        })?)
+                    }
+                    (ParamRange::Float { .. }, _) | (ParamRange::Fixed, ParamValue::Float(_)) => {
+                        ParamValue::Float(raw.parse::<f64>().map_err(|_| {
+                            format!("parameter `{name}` expects a number, got `{raw}`")
+                        })?)
+                    }
+                    (ParamRange::Choice(_), _) | (ParamRange::Fixed, ParamValue::Str(_)) => {
+                        ParamValue::Str(raw.to_string())
+                    }
+                };
+            overrides.set(name, value);
+        }
+        self.validate(&overrides)?;
+        Ok(overrides)
+    }
+
+    /// Validate overrides and return a complete parameter map with defaults filled in.
+    pub fn resolve(&self, overrides: &Params) -> Result<Params, String> {
+        self.validate(overrides)?;
+        Ok(self.defaults().merged_with(overrides))
+    }
+
+    /// Check every override against this spec, including names, types, numeric ranges/steps, and
+    /// choice membership. Returns a human-readable error instead of silently using a default.
     pub fn validate(&self, overrides: &Params) -> Result<(), String> {
         for (key, value) in &overrides.0 {
-            let Some(entry) = self.entries.iter().find(|e| &e.name == key) else {
-                let mut known: Vec<&str> = self.entries.iter().map(|e| e.name.as_str()).collect();
-                known.sort_unstable();
-                return Err(format!(
-                    "unknown parameter `{key}`; declared parameters: {}",
-                    known.join(", ")
-                ));
-            };
-            if let ParamRange::Choice(options) = &entry.range {
-                let Some(chosen) = value.as_str() else {
+            let entry = self.entry(key)?;
+            match (&entry.range, value, &entry.default) {
+                (ParamRange::Int { min, max, step }, ParamValue::Int(v), _) => {
+                    if v < min || v > max {
+                        return Err(format!("parameter `{key}`={v} is outside [{min}, {max}]"));
+                    }
+                    if *step > 0 && (v - min) % step != 0 {
+                        return Err(format!(
+                            "parameter `{key}`={v} does not align to step {step} from {min}"
+                        ));
+                    }
+                }
+                (ParamRange::Int { .. }, _, _) => {
+                    return Err(format!("parameter `{key}` must be an integer"));
+                }
+                (ParamRange::Float { min, max, .. }, ParamValue::Float(v), _) => {
+                    let v = *v;
+                    if !v.is_finite() || v < *min || v > *max {
+                        return Err(format!("parameter `{key}`={v} is outside [{min}, {max}]"));
+                    }
+                }
+                (ParamRange::Float { min, max, .. }, ParamValue::Int(v), _) => {
+                    let v = *v as f64;
+                    if !v.is_finite() || v < *min || v > *max {
+                        return Err(format!("parameter `{key}`={v} is outside [{min}, {max}]"));
+                    }
+                }
+                (ParamRange::Float { .. }, _, _) => {
+                    return Err(format!("parameter `{key}` must be a number"));
+                }
+                (ParamRange::Choice(options), ParamValue::Str(chosen), _) => {
+                    if !options.iter().any(|option| option == chosen) {
+                        return Err(format!(
+                            "parameter `{key}` has invalid value `{chosen}`; valid options: {}",
+                            options.join(", ")
+                        ));
+                    }
+                }
+                (ParamRange::Choice(options), _, _) => {
                     return Err(format!(
                         "parameter `{key}` is a choice and must be a string (one of: {})",
                         options.join(", ")
                     ));
-                };
-                if !options.iter().any(|o| o == chosen) {
-                    return Err(format!(
-                        "parameter `{key}` has invalid value `{chosen}`; valid options: {}",
-                        options.join(", ")
-                    ));
+                }
+                (ParamRange::Fixed, ParamValue::Int(_), ParamValue::Int(_))
+                | (ParamRange::Fixed, ParamValue::Str(_), ParamValue::Str(_)) => {}
+                (ParamRange::Fixed, ParamValue::Float(v), ParamValue::Float(_)) => {
+                    if !v.is_finite() {
+                        return Err(format!("parameter `{key}` must be finite"));
+                    }
+                }
+                (ParamRange::Fixed, _, expected) => {
+                    let expected = match expected {
+                        ParamValue::Int(_) => "an integer",
+                        ParamValue::Float(_) => "a number",
+                        ParamValue::Str(_) => "a string",
+                    };
+                    return Err(format!("parameter `{key}` must be {expected}"));
                 }
             }
         }
         Ok(())
+    }
+
+    fn entry(&self, name: &str) -> Result<&ParamEntry, String> {
+        self.entries
+            .iter()
+            .find(|entry| entry.name == name)
+            .ok_or_else(|| {
+                let mut known: Vec<&str> = self
+                    .entries
+                    .iter()
+                    .map(|entry| entry.name.as_str())
+                    .collect();
+                known.sort_unstable();
+                format!(
+                    "unknown parameter `{name}`; declared parameters: {}",
+                    known.join(", ")
+                )
+            })
     }
 }
 
@@ -249,10 +354,41 @@ pub trait Configurable: Sized {
     /// failure mode a backtest framework can have, so misconfiguration fails loudly here.
     fn build(overrides: &Params) -> Self {
         let spec = Self::param_spec();
-        if let Err(err) = spec.validate(overrides) {
-            panic!("invalid params: {err}");
-        }
-        let resolved = spec.defaults().merged_with(overrides);
+        let resolved = spec
+            .resolve(overrides)
+            .unwrap_or_else(|err| panic!("invalid params: {err}"));
         Self::from_params(&resolved)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn spec() -> ParamSpec {
+        ParamSpec::new()
+            .int("window", 20, 5, 50, 5)
+            .float("threshold", 1.5, 0.0, 3.0)
+            .choice("side", "both", &["both", "long"])
+            .fixed_float("tick", 0.25)
+    }
+
+    #[test]
+    fn framework_parses_validates_and_resolves_assignments() {
+        let assignments = vec!["window=30".to_string(), "side=long".to_string()];
+        let overrides = spec().parse_assignments(&assignments).unwrap();
+        let resolved = spec().resolve(&overrides).unwrap();
+
+        assert_eq!(resolved.int("window", 0), 30);
+        assert_eq!(resolved.str("side", ""), "long");
+        assert_eq!(resolved.float("threshold", 0.0), 1.5);
+        assert_eq!(resolved.float("tick", 0.0), 0.25);
+    }
+
+    #[test]
+    fn framework_rejects_invalid_types_ranges_and_steps() {
+        for assignment in ["window=31", "threshold=text", "side=short"] {
+            assert!(spec().parse_assignments(&[assignment.to_string()]).is_err());
+        }
     }
 }

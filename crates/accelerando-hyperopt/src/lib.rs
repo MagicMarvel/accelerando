@@ -35,8 +35,15 @@ impl SearchSpace {
 
     /// Add every tunable entry of `spec`, prefixing each key with `namespace.`.
     pub fn add_spec(&mut self, namespace: &str, spec: &ParamSpec) {
+        self.add_spec_excluding(namespace, spec, &[]);
+    }
+
+    /// Like [`SearchSpace::add_spec`], but skips entries named in `exclude`. Callers use this to
+    /// pin parameters to explicit values: a pinned dimension is removed from the search entirely
+    /// instead of being enumerated, and the pinned value is merged into every candidate afterward.
+    pub fn add_spec_excluding(&mut self, namespace: &str, spec: &ParamSpec, exclude: &[&str]) {
         for e in &spec.entries {
-            if matches!(e.range, ParamRange::Fixed) {
+            if matches!(e.range, ParamRange::Fixed) || exclude.contains(&e.name.as_str()) {
                 continue;
             }
             self.dims.push(Dim {
@@ -131,15 +138,7 @@ pub fn search<E: BatchEvaluator>(
     seed: u64,
     evaluator: &E,
 ) -> SearchReport {
-    let candidates = match algo {
-        Algo::Random => {
-            let mut rng = XorShift::new(seed);
-            (0..evals)
-                .map(|_| space.sample(&mut rng))
-                .collect::<Vec<_>>()
-        }
-        Algo::Grid => grid(space, evals),
-    };
+    let candidates = generate_candidates(space, algo, evals, seed);
 
     let scores = evaluator.evaluate(&candidates);
     let trials: Vec<Trial> = candidates
@@ -156,6 +155,29 @@ pub fn search<E: BatchEvaluator>(
         .unwrap_or_else(|| trials.first().cloned().expect("at least one trial"));
 
     SearchReport { best, trials }
+}
+
+/// Generate concrete candidates without evaluating them.
+///
+/// Framework facade APIs use this when an embedding application wants parameter sets and owns the
+/// backtest scheduling itself. Keeping generation here prevents consumers from reimplementing grid
+/// enumeration or abusing a dummy evaluator merely to obtain candidates.
+pub fn generate_candidates(
+    space: &SearchSpace,
+    algo: Algo,
+    evals: usize,
+    seed: u64,
+) -> Vec<Params> {
+    let evals = evals.max(1);
+    match algo {
+        Algo::Random => {
+            let mut rng = XorShift::new(seed);
+            (0..evals)
+                .map(|_| space.sample(&mut rng))
+                .collect::<Vec<_>>()
+        }
+        Algo::Grid => grid(space, evals),
+    }
 }
 
 /// Enumerate a (truncated) cartesian grid over the dimensions.

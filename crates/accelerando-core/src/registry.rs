@@ -119,6 +119,37 @@ impl Registry {
         self.strategies.get(name).map(|e| (e.spec)())
     }
 
+    /// Resolve strategy overrides into a complete, validated parameter map.
+    pub fn resolve_strategy_params(
+        &self,
+        name: &str,
+        overrides: &Params,
+    ) -> Result<Params, String> {
+        let spec = self.strategy_spec(name).ok_or_else(|| {
+            format!(
+                "unknown strategy `{name}`; registered strategies: {}",
+                self.strategy_names().join(", ")
+            )
+        })?;
+        spec.resolve(overrides)
+    }
+
+    /// Parse `name=value` assignments and resolve them against a strategy's defaults.
+    pub fn parse_strategy_params(
+        &self,
+        name: &str,
+        assignments: &[String],
+    ) -> Result<Params, String> {
+        let spec = self.strategy_spec(name).ok_or_else(|| {
+            format!(
+                "unknown strategy `{name}`; registered strategies: {}",
+                self.strategy_names().join(", ")
+            )
+        })?;
+        let overrides = spec.parse_assignments(assignments)?;
+        spec.resolve(&overrides)
+    }
+
     pub fn source_names(&self) -> Vec<&str> {
         self.sources.keys().map(String::as_str).collect()
     }
