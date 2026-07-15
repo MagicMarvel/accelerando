@@ -50,6 +50,22 @@ pub enum Plot {
         #[serde(default)]
         group: Option<String>,
     },
+    /// A marker at a price, drawn `bars_back` footprints to the left of the one that pushed it.
+    /// Use this instead of `Marker` when the event being plotted (e.g. a confirmed ZigZag pivot)
+    /// happened on an earlier bar than the one currently being processed.
+    MarkerAt {
+        bars_back: usize,
+        price: f64,
+        shape: String,
+        color: String,
+        text: String,
+        #[serde(default)]
+        text_dx: Option<f64>,
+        #[serde(default)]
+        text_dy: Option<f64>,
+        #[serde(default)]
+        group: Option<String>,
+    },
     /// ATAS-style volume profile histogram. Left side = delta, right side = total volume.
     /// `id` groups bars into one profile; the web viewer renders only the last occurrence per id.
     /// `span` = how many bars back this profile covers (for background shading).

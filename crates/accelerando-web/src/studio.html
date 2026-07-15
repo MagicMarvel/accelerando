@@ -587,7 +587,7 @@ function overlayCategories(){
   let hasBands=false; const markerGroups=new Set();
   for(const b of fps){ for(const p of (b.plots||[])){
     if(p.kind==="BackgroundBand")hasBands=true;
-    else if(p.kind==="Marker")markerGroups.add(markerCat(p));
+    else if(p.kind==="Marker"||p.kind==="MarkerAt")markerGroups.add(markerCat(p));
     else if(p.kind==="Line")markerGroups.add(lineCat(p));
     else if(p.kind==="VolumeProfile")markerGroups.add(volumeProfileCat(p));
     else if(p.kind==="PriceBox")markerGroups.add(priceBoxCat(p));
@@ -1014,10 +1014,16 @@ function drawPlotMarkers(ctx,vis,L,T,pw,ph,xStep,y,labelLayout){
   const bubbleMin=clamp(xStep*0.12,2.5,5);
   const bubbleMax=clamp(Math.max(xStep*0.55,ph*0.05),16,40);
   for(let i=0;i<vis.length;i++){
-    const b=vis[i], x=L+i*xStep+xStep/2;
+    const b=vis[i];
     for(const p of (b.plots||[])){
-      if(p.kind!=="Marker"||p.price==null)continue;
+      if((p.kind!=="Marker"&&p.kind!=="MarkerAt")||p.price==null)continue;
       if(!overlayOn(markerCat(p)))continue;
+      // MarkerAt plots an event that happened `bars_back` footprints before the one that
+      // pushed it (e.g. a ZigZag pivot confirmed only after price reverses); place it on the
+      // bar it actually belongs to instead of the confirming bar, or the chart looks skewed.
+      const idx=p.kind==="MarkerAt"?i-(p.bars_back||0):i;
+      if(idx<0||idx>=vis.length)continue;
+      const x=L+idx*xStep+xStep/2;
       const yy=y(p.price); if(yy<T-30||yy>T+ph+30)continue;
       const color=p.color||"#111827", cat=markerCat(p);
       if(cat==="ff_high_events")continue;
@@ -1041,6 +1047,8 @@ function drawPlotMarkers(ctx,vis,L,T,pw,ph,xStep,y,labelLayout){
         ctx.moveTo(x,yy-8);ctx.lineTo(x-6,yy+5);ctx.lineTo(x+6,yy+5);ctx.closePath();
       }else if(p.shape==="triangle_down"){
         ctx.moveTo(x,yy+8);ctx.lineTo(x-6,yy-5);ctx.lineTo(x+6,yy-5);ctx.closePath();
+      }else if(p.shape==="diamond"){
+        ctx.moveTo(x,yy-7);ctx.lineTo(x+7,yy);ctx.lineTo(x,yy+7);ctx.lineTo(x-7,yy);ctx.closePath();
       }else{
         ctx.arc(x,yy,5,0,Math.PI*2);
       }
