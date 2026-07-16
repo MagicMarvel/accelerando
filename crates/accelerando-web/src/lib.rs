@@ -250,12 +250,48 @@ fn serve_studio(studio: Studio, port: u16) -> std::io::Result<()> {
             (Method::Get, "/api/experiment") => json_response(&summary_json),
             (Method::Get, "/api/result" | "/result.json") => {
                 let run_id = query_param(&raw_url, "id")
+                    .filter(|id| !id.is_empty())
                     .or_else(|| summaries.first().map(|run| run.id.clone()))
                     .unwrap_or_default();
                 match load_result(&run_id) {
-                    Some(result) => json_response(
-                        &serde_json::to_string(&result).expect("serialize selected result"),
-                    ),
+                    // `from` present → windowed page of footprints/equity (large results
+                    // exceed the browser's ~512MB JSON string cap when sent whole).
+                    // The first page (from == 0) additionally carries `meta` with every
+                    // non-paged field. `from` absent keeps the legacy full payload.
+                    Some(result) => match query_usize(&raw_url, "from") {
+                        Some(from) => {
+                            let count =
+                                query_usize(&raw_url, "count").unwrap_or(20_000).clamp(1, 100_000);
+                            let fp_from = from.min(result.footprints.len());
+                            let fp_to = fp_from.saturating_add(count).min(result.footprints.len());
+                            let eq_from = query_usize(&raw_url, "eq_from")
+                                .unwrap_or(0)
+                                .min(result.equity.len());
+                            let eq_to = eq_from.saturating_add(count).min(result.equity.len());
+                            let mut page = serde_json::json!({
+                                "total_fps": result.footprints.len(),
+                                "total_eq": result.equity.len(),
+                                "footprints_from": fp_from,
+                                "footprints": &result.footprints[fp_from..fp_to],
+                                "equity_from": eq_from,
+                                "equity": &result.equity[eq_from..eq_to],
+                            });
+                            if fp_from == 0 {
+                                page["meta"] = serde_json::json!({
+                                    "metrics": result.metrics,
+                                    "trades": result.trades,
+                                    "series": result.series,
+                                    "liquidity_heatmap": result.liquidity_heatmap,
+                                    "tick_size": result.tick_size,
+                                    "multiplier": result.multiplier,
+                                });
+                            }
+                            json_response(&page.to_string())
+                        }
+                        None => json_response(
+                            &serde_json::to_string(&result).expect("serialize selected result"),
+                        ),
+                    },
                     None => Response::from_string("run not found").with_status_code(404),
                 }
             }
@@ -502,15 +538,13 @@ fn studio_html_for_run(
     let summary_json = summary
         .map(|run| serde_json::to_string(run).expect("serialize run summary"))
         .unwrap_or_else(|| "null".to_string());
+    // loadResult() reads globalThis.RUN_ID directly (empty id falls back to the first
+    // run server-side), so injecting RUN_ID is all the per-run wiring the page needs.
     STUDIO_HTML.replace(
         "const price=$(\"price\"), pctx=price.getContext(\"2d\");",
         &format!(
             "globalThis.RUN_ID={escaped};\nglobalThis.RUN_STRATEGY={escaped_strategy};\nglobalThis.RUN_SUMMARY={summary_json};\nglobalThis.ANNOTATION_CONFIG={annotation_json};\nconst price=$(\"price\"), pctx=price.getContext(\"2d\");"
         ),
-    )
-    .replace(
-        "fetch(\"/api/result\")",
-        "fetch(\"/api/result?id=\"+encodeURIComponent(globalThis.RUN_ID||\"\"))",
     )
 }
 

@@ -1442,6 +1442,8 @@ pub(crate) fn replay_html(session_id: &str, annotation_json: &str) -> String {
     let escaped = crate::json_string(session_id);
     let escaped_strategy = crate::json_string("manual_replay");
     let summary_json = serde_json::to_string(&summary).expect("serialize replay summary");
+    // REPLAY_JS appends its own `loadResult` after the studio script; the later function
+    // declaration in the same scope shadows the studio one, so no fetch rewiring is needed.
     replace_script_tail(
         crate::studio_html()
             .replace("</style>", &format!("{}\n</style>", REPLAY_CSS))
@@ -1450,10 +1452,6 @@ pub(crate) fn replay_html(session_id: &str, annotation_json: &str) -> String {
                 &format!(
                     "globalThis.RUN_ID={escaped};\nglobalThis.RUN_STRATEGY={escaped_strategy};\nglobalThis.RUN_SUMMARY={summary_json};\nglobalThis.ANNOTATION_CONFIG={annotation_json};\nconst price=$(\"price\"), pctx=price.getContext(\"2d\");"
                 ),
-            )
-            .replace(
-                "fetch(\"/api/result\")",
-                "fetch(\"/api/replay/state?id=\"+encodeURIComponent(globalThis.RUN_ID||\"\"))",
             ),
         &replay_script_tail(),
     )

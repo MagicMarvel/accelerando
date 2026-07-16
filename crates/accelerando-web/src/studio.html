@@ -528,10 +528,30 @@ async function checkProgress(){
   }
 }
 async function loadResult(){
-  const r=await fetch("/api/result");
-  if(!r.ok) throw new Error(`/api/result: ${r.status}`);
-  const data=await r.json();
-  if(data&&data.error) throw new Error(data.error);
+  // Large results are fetched in windows: a full-run JSON can exceed the browser's
+  // ~512MB string cap (V8 max string length), so page footprints/equity by cursor
+  // and assemble the result client-side before rendering. The first page carries
+  // `meta` (metrics/trades/series/etc.); `from` absent on the server keeps the
+  // legacy single-payload behavior for /result.json consumers.
+  const id=typeof globalThis.RUN_ID==="string"?globalThis.RUN_ID:"";
+  const base="/api/result?id="+encodeURIComponent(id);
+  const CHUNK=20000;
+  const st=$("status"), prevStatus=st?st.textContent:"";
+  let data=null;
+  for(;;){
+    const fpFrom=data?data.footprints.length:0, eqFrom=data?data.equity.length:0;
+    const r=await fetch(`${base}&from=${fpFrom}&eq_from=${eqFrom}&count=${CHUNK}`);
+    if(!r.ok) throw new Error(`/api/result: ${r.status}`);
+    const page=await r.json();
+    if(page&&page.error) throw new Error(page.error);
+    if(!data){ data=Object.assign({},page.meta||{}); data.footprints=[]; data.equity=[]; }
+    for(const fp of page.footprints||[]) data.footprints.push(fp);
+    for(const eq of page.equity||[]) data.equity.push(eq);
+    if(st) st.textContent=`loading result ${data.footprints.length}/${page.total_fps} bars`;
+    if(data.footprints.length>=page.total_fps&&data.equity.length>=page.total_eq) break;
+    if(!(page.footprints||[]).length&&!(page.equity||[]).length) break;
+  }
+  if(st) st.textContent=prevStatus;
   renderResult(data);
   await loadAnnotations();
 }
