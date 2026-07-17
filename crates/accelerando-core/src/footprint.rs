@@ -35,6 +35,23 @@ pub enum Plot {
         value: f64,
         color: String,
     },
+    /// A line segment whose endpoints are anchored to earlier footprints relative to the
+    /// footprint that emitted it. This is useful for causal overlays such as ZigZag: a pivot is
+    /// only known on a later confirmation bar, but the segment belongs between the historical
+    /// pivot bars.
+    LineSegment {
+        from_bars_back: usize,
+        from_price: f64,
+        to_bars_back: usize,
+        to_price: f64,
+        color: String,
+        #[serde(default)]
+        dashed: bool,
+        #[serde(default)]
+        text: String,
+        #[serde(default)]
+        group: Option<String>,
+    },
     /// A marker at a price (shape is a free string the front-end understands, e.g. "triangle").
     Marker {
         price: f64,

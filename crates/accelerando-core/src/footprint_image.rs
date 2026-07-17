@@ -365,6 +365,35 @@ fn render_window(win: &RenderWindow<'_>, font: &FontArc, options: &TradeImageOpt
     }
 
     for (bar, fp) in win.bars.iter().enumerate() {
+        for plot in &fp.plots {
+            if let Plot::LineSegment {
+                from_bars_back,
+                from_price,
+                to_bars_back,
+                to_price,
+                color,
+                ..
+            } = plot
+            {
+                let from_bar = bar.saturating_sub(*from_bars_back);
+                let to_bar = bar.saturating_sub(*to_bars_back);
+                draw_line_segment_mut(
+                    &mut img,
+                    (
+                        layout.x_of(from_bar) + layout.col_w * 0.5,
+                        layout.y_of(*from_price),
+                    ),
+                    (
+                        layout.x_of(to_bar) + layout.col_w * 0.5,
+                        layout.y_of(*to_price),
+                    ),
+                    parse_color(color, rgb(124, 58, 237)),
+                );
+            }
+        }
+    }
+
+    for (bar, fp) in win.bars.iter().enumerate() {
         let x0 = layout.x_of(bar);
         draw_line_segment_mut(
             &mut img,
@@ -394,11 +423,30 @@ fn render_window(win: &RenderWindow<'_>, font: &FontArc, options: &TradeImageOpt
 
     for (bar, fp) in win.bars.iter().enumerate() {
         for plot in &fp.plots {
-            if let Plot::Marker {
-                price, color, text, ..
-            } = plot
-            {
-                marker(&mut img, &layout, font, bar, *price, color, text);
+            match plot {
+                Plot::Marker {
+                    price, color, text, ..
+                } => {
+                    marker(&mut img, &layout, font, bar, *price, color, text);
+                }
+                Plot::MarkerAt {
+                    bars_back,
+                    price,
+                    color,
+                    text,
+                    ..
+                } => {
+                    marker(
+                        &mut img,
+                        &layout,
+                        font,
+                        bar.saturating_sub(*bars_back),
+                        *price,
+                        color,
+                        text,
+                    );
+                }
+                _ => {}
             }
         }
     }
@@ -432,6 +480,15 @@ fn layout(win: &RenderWindow<'_>, options: &TradeImageOptions) -> Layout {
             if let Plot::PriceBox { low, high, .. } = plot {
                 grow(*low);
                 grow(*high);
+            }
+            if let Plot::LineSegment {
+                from_price,
+                to_price,
+                ..
+            } = plot
+            {
+                grow(*from_price);
+                grow(*to_price);
             }
         }
     }

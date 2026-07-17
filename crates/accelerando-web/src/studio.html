@@ -256,6 +256,7 @@ const overlayOn=cat=>overlayState[cat]!==false;
 const markerCat=p=>p.group||"markers";
 // Line plots group into one overlay toggle per id prefix ("vwap_up" -> "vwap").
 const lineCat=p=>String(p.id||"lines").split("_")[0]||"lines";
+const segmentCat=p=>p.group||"line_segments";
 const volumeProfileCat=p=>(p.id||"").startsWith("entry_vp_")?"entry_vp":"volume_profiles";
 const priceBoxCat=p=>p.group||"price_boxes";
 let yZoom={price:{manual:false,lo:null,hi:null},equity:{manual:false,lo:null,hi:null}};
@@ -617,6 +618,7 @@ function overlayCategories(){
     if(p.kind==="BackgroundBand")hasBands=true;
     else if(p.kind==="Marker"||p.kind==="MarkerAt")markerGroups.add(markerCat(p));
     else if(p.kind==="Line")markerGroups.add(lineCat(p));
+    else if(p.kind==="LineSegment")markerGroups.add(segmentCat(p));
     else if(p.kind==="VolumeProfile")markerGroups.add(volumeProfileCat(p));
     else if(p.kind==="PriceBox")markerGroups.add(priceBoxCat(p));
   } }
@@ -1028,6 +1030,31 @@ function drawPlotLines(ctx,vis,L,T,ph,xStep,y){
   }
   ctx.restore();
 }
+// Historical anchored segments are emitted on the later confirmation bar, but both endpoints
+// refer to earlier bars. Scan the complete result so a segment remains visible while its
+// confirmation bar is outside the current viewport.
+function drawLineSegments(ctx,L,T,pw,ph,xStep,y,s,e,labelLayout){
+  ctx.save(); ctx.lineWidth=1.8; ctx.lineJoin="round";
+  for(let i=0;i<fps.length;i++){
+    for(const p of (fps[i].plots||[])){
+      if(p.kind!=="LineSegment"||!overlayOn(segmentCat(p)))continue;
+      const a=i-(p.from_bars_back||0), b=i-(p.to_bars_back||0);
+      if(Math.max(a,b)<s||Math.min(a,b)>=e)continue;
+      if(!isFinite(p.from_price)||!isFinite(p.to_price))continue;
+      const x0=L+(a-s)*xStep+xStep/2, y0=y(p.from_price);
+      const x1=L+(b-s)*xStep+xStep/2, y1=y(p.to_price);
+      const color=p.color||"#7c3aed";
+      ctx.strokeStyle=colorAlpha(color,0.9);
+      ctx.setLineDash(p.dashed?[5,4]:[]);
+      ctx.beginPath(); ctx.moveTo(x0,y0); ctx.lineTo(x1,y1); ctx.stroke();
+      ctx.setLineDash([]);
+      if(p.text&&xStep>=7){
+        drawLabel(ctx,p.text,(x0+x1)/2,(y0+y1)/2,color,labelLayout,{align:"center"});
+      }
+    }
+  }
+  ctx.restore();
+}
 function drawPlotMarkers(ctx,vis,L,T,pw,ph,xStep,y,labelLayout){
   ctx.save(); ctx.font="10px Segoe UI, Arial"; ctx.textBaseline="middle";
   let maxBigTradeSize=0, minBigTradeSize=Infinity;
@@ -1377,6 +1404,7 @@ function drawPrice(){
   drawVpProfiles(pctx,L,T,pw,ph,xStep,y,tick,s,e,labelLayout);
   drawRunSeries(pctx,L,T,ph,xStep,y,s,e);
   drawPlotLines(pctx,vis,L,T,ph,xStep,y);
+  drawLineSegments(pctx,L,T,pw,ph,xStep,y,s,e,labelLayout);
   drawPlotMarkers(pctx,vis,L,T,pw,ph,xStep,y,labelLayout);
   if(overlayOn("trades")) drawTradePositions(pctx,trades,s,e,L,T,ph,xStep,y,labelLayout);
   pctx.restore();
