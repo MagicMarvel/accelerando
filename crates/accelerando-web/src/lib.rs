@@ -10,8 +10,8 @@ use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use accelerando_core::{
-    result::{ExperimentResult, ExperimentRunSummary},
-    BacktestResult, Level, VpLevel,
+    result::{EquityPoint, ExperimentResult, ExperimentRunSummary, LiquidityHeatmap, Series, Trade},
+    BacktestResult, Footprint, Level, Metrics, VpLevel,
 };
 use serde::Serialize;
 use serde_json::Value;
@@ -258,35 +258,37 @@ fn serve_studio(studio: Studio, port: u16) -> std::io::Result<()> {
                     // exceed the browser's ~512MB JSON string cap when sent whole).
                     // The first page (from == 0) additionally carries `meta` with every
                     // non-paged field. `from` absent keeps the legacy full payload.
+                    // Pages serialize borrowed slices straight to a string — no
+                    // serde_json::Value intermediate, which doubles per-page latency.
                     Some(result) => match query_usize(&raw_url, "from") {
                         Some(from) => {
                             let count =
-                                query_usize(&raw_url, "count").unwrap_or(20_000).clamp(1, 100_000);
+                                query_usize(&raw_url, "count").unwrap_or(60_000).clamp(1, 200_000);
                             let fp_from = from.min(result.footprints.len());
                             let fp_to = fp_from.saturating_add(count).min(result.footprints.len());
                             let eq_from = query_usize(&raw_url, "eq_from")
                                 .unwrap_or(0)
                                 .min(result.equity.len());
                             let eq_to = eq_from.saturating_add(count).min(result.equity.len());
-                            let mut page = serde_json::json!({
-                                "total_fps": result.footprints.len(),
-                                "total_eq": result.equity.len(),
-                                "footprints_from": fp_from,
-                                "footprints": &result.footprints[fp_from..fp_to],
-                                "equity_from": eq_from,
-                                "equity": &result.equity[eq_from..eq_to],
-                            });
-                            if fp_from == 0 {
-                                page["meta"] = serde_json::json!({
-                                    "metrics": result.metrics,
-                                    "trades": result.trades,
-                                    "series": result.series,
-                                    "liquidity_heatmap": result.liquidity_heatmap,
-                                    "tick_size": result.tick_size,
-                                    "multiplier": result.multiplier,
-                                });
-                            }
-                            json_response(&page.to_string())
+                            let page = ResultPage {
+                                total_fps: result.footprints.len(),
+                                total_eq: result.equity.len(),
+                                footprints_from: fp_from,
+                                footprints: &result.footprints[fp_from..fp_to],
+                                equity_from: eq_from,
+                                equity: &result.equity[eq_from..eq_to],
+                                meta: (fp_from == 0).then(|| ResultMeta {
+                                    metrics: &result.metrics,
+                                    trades: &result.trades,
+                                    series: &result.series,
+                                    liquidity_heatmap: &result.liquidity_heatmap,
+                                    tick_size: result.tick_size,
+                                    multiplier: result.multiplier,
+                                }),
+                            };
+                            json_response(
+                                &serde_json::to_string(&page).expect("serialize result page"),
+                            )
                         }
                         None => json_response(
                             &serde_json::to_string(&result).expect("serialize selected result"),
@@ -524,6 +526,31 @@ fn serve_studio(studio: Studio, port: u16) -> std::io::Result<()> {
         let _ = request.respond(response);
     }
     Ok(())
+}
+
+/// One window of a paged `/api/result` response. Borrows straight from the cached
+/// `BacktestResult` so serialization is a single pass to the output string.
+#[derive(Serialize)]
+struct ResultPage<'a> {
+    total_fps: usize,
+    total_eq: usize,
+    footprints_from: usize,
+    footprints: &'a [Footprint],
+    equity_from: usize,
+    equity: &'a [EquityPoint],
+    /// Every non-paged field of the result; present only on the first page.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    meta: Option<ResultMeta<'a>>,
+}
+
+#[derive(Serialize)]
+struct ResultMeta<'a> {
+    metrics: &'a Metrics,
+    trades: &'a [Trade],
+    series: &'a [Series],
+    liquidity_heatmap: &'a LiquidityHeatmap,
+    tick_size: f64,
+    multiplier: f64,
 }
 
 fn studio_html_for_run(
