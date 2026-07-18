@@ -38,13 +38,13 @@ pub fn in_session(sessions: &[(u32, u32)], minute: u32) -> bool {
 }
 
 /// US-Eastern civil day (days since epoch) and minute-of-day for a UTC timestamp, using the
-/// post-2007 DST rule (second Sunday of March to first Sunday of November). Transition-day
-/// precision is date-level, which is fine for session filtering.
+/// post-2007 DST rule (second Sunday of March to first Sunday of November). The UTC transition
+/// instants are exact: 07:00 UTC in March and 06:00 UTC in November.
 pub fn eastern_day_minute(ts_ns: i64) -> (i64, u32) {
     let utc_s = ts_ns.div_euclid(NS_PER_SEC);
-    let est_days = (utc_s - 5 * 3600).div_euclid(86_400);
-    let (year, month, day) = civil_from_days(est_days);
-    let offset_s = if in_us_dst(year, month, day) {
+    let utc_days = utc_s.div_euclid(86_400);
+    let (year, _, _) = civil_from_days(utc_days);
+    let offset_s = if in_us_dst_at_utc_second(year, utc_s) {
         4 * 3600
     } else {
         5 * 3600
@@ -70,6 +70,17 @@ pub fn in_us_dst(year: i32, month: i32, day: i32) -> bool {
         let first_sunday = 1 + (7 - dow_first(11)) % 7;
         day < first_sunday
     }
+}
+
+fn in_us_dst_at_utc_second(year: i32, utc_s: i64) -> bool {
+    let dow_first = |month: i32| {
+        ((days_from_civil(year, month, 1) + 4).rem_euclid(7)) as i32 // 0 = Sunday
+    };
+    let second_sunday_march = 1 + (7 - dow_first(3)) % 7 + 7;
+    let first_sunday_november = 1 + (7 - dow_first(11)) % 7;
+    let starts_utc = days_from_civil(year, 3, second_sunday_march) * 86_400 + 7 * 3600;
+    let ends_utc = days_from_civil(year, 11, first_sunday_november) * 86_400 + 6 * 3600;
+    utc_s >= starts_utc && utc_s < ends_utc
 }
 
 pub fn days_from_civil(year: i32, month: i32, day: i32) -> i64 {
@@ -130,5 +141,20 @@ mod tests {
         let ts = (days_from_civil(2026, 6, 4) * 86_400 + 14 * 3600) * NS_PER_SEC;
         let (_, minute) = eastern_day_minute(ts);
         assert_eq!(minute, 10 * 60);
+    }
+
+    #[test]
+    fn eastern_minute_is_exact_at_dst_transitions() {
+        // Spring forward: 01:59 EST is followed by 03:00 EDT.
+        let before = (days_from_civil(2026, 3, 8) * 86_400 + 6 * 3600 + 59 * 60) * NS_PER_SEC;
+        let at = (days_from_civil(2026, 3, 8) * 86_400 + 7 * 3600) * NS_PER_SEC;
+        assert_eq!(eastern_day_minute(before).1, 1 * 60 + 59);
+        assert_eq!(eastern_day_minute(at).1, 3 * 60);
+
+        // Fall back: 01:59 EDT is followed by the repeated 01:00 EST hour.
+        let before = (days_from_civil(2026, 11, 1) * 86_400 + 5 * 3600 + 59 * 60) * NS_PER_SEC;
+        let at = (days_from_civil(2026, 11, 1) * 86_400 + 6 * 3600) * NS_PER_SEC;
+        assert_eq!(eastern_day_minute(before).1, 1 * 60 + 59);
+        assert_eq!(eastern_day_minute(at).1, 1 * 60);
     }
 }

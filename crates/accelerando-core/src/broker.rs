@@ -39,6 +39,8 @@ struct EntryOrder {
     entry_min: Option<f64>,
     entry_max: Option<f64>,
     entry_limit: Option<f64>,
+    /// Optional wall-clock validity from the signal footprint close to the fill footprint open.
+    max_fill_delay_ns: Option<i64>,
     /// Free-form setup tag carried onto the resulting [`Trade`] for later analysis.
     label: Option<String>,
 }
@@ -58,11 +60,16 @@ enum PendingKind {
 struct PendingIntent {
     kind: PendingKind,
     age: usize,
+    submitted_ts_ns: Option<i64>,
 }
 
 impl PendingIntent {
-    fn new(kind: PendingKind) -> Self {
-        Self { kind, age: 0 }
+    fn new(kind: PendingKind, submitted_ts_ns: Option<i64>) -> Self {
+        Self {
+            kind,
+            age: 0,
+            submitted_ts_ns,
+        }
     }
 }
 
@@ -165,6 +172,7 @@ pub struct EntryIntent {
     pub execution: EntryExecution,
     pub bracket: BracketSpec,
     pub tag: Option<String>,
+    pub max_fill_delay_ns: Option<i64>,
 }
 
 impl EntryIntent {
@@ -178,6 +186,7 @@ impl EntryIntent {
                 target: 0.0,
             },
             tag: None,
+            max_fill_delay_ns: None,
         }
     }
 
@@ -218,6 +227,12 @@ impl EntryIntent {
         self
     }
 
+    /// Expire this entry instead of filling it after a weekend, holiday, or other stale data gap.
+    pub fn expire_after_ns(mut self, max_fill_delay_ns: i64) -> Self {
+        self.max_fill_delay_ns = Some(max_fill_delay_ns.max(0));
+        self
+    }
+
     fn into_order(self) -> EntryOrder {
         let (entry_limit, entry_min, entry_max) = match self.execution {
             EntryExecution::Market => (None, None, None),
@@ -241,6 +256,7 @@ impl EntryIntent {
             entry_min,
             entry_max,
             entry_limit,
+            max_fill_delay_ns: self.max_fill_delay_ns,
             label: self.tag,
         }
     }
@@ -348,6 +364,7 @@ pub struct Broker {
     peak_equity: f64,
     positions: Vec<Position>,
     pending: Vec<PendingIntent>,
+    last_footprint_ts_ns: Option<i64>,
     pub trades: Vec<Trade>,
     pub equity: Vec<EquityPoint>,
 }
@@ -362,6 +379,7 @@ impl Broker {
             peak_equity: cfg.starting_equity,
             positions: Vec::new(),
             pending: Vec::new(),
+            last_footprint_ts_ns: None,
             trades: Vec::new(),
             equity: Vec::new(),
         }
@@ -467,7 +485,7 @@ impl Broker {
         let pending = std::mem::take(&mut self.pending);
         let mut still_pending = Vec::new();
         for mut intent in pending {
-            if self.transition(intent.kind.clone(), intent.age, fp) {
+            if self.transition(intent.kind.clone(), intent.age, intent.submitted_ts_ns, fp) {
                 intent.age += 1;
                 still_pending.push(intent);
             }
@@ -487,9 +505,16 @@ impl Broker {
             equity: eq,
             drawdown: eq - self.peak_equity,
         });
+        self.last_footprint_ts_ns = Some(fp.ts_last_ns);
     }
 
-    fn transition(&mut self, kind: PendingKind, age: usize, fp: &Footprint) -> bool {
+    fn transition(
+        &mut self,
+        kind: PendingKind,
+        age: usize,
+        submitted_ts_ns: Option<i64>,
+        fp: &Footprint,
+    ) -> bool {
         let open = fp.open;
         let ts = fp.ts_first_ns;
         let (replace_existing, order) = match kind {
@@ -505,6 +530,11 @@ impl Broker {
             }
             PendingKind::Add(order) => (false, order),
         };
+        if let (Some(max_delay), Some(submitted)) = (order.max_fill_delay_ns, submitted_ts_ns) {
+            if fp.ts_first_ns.saturating_sub(submitted) > max_delay {
+                return false;
+            }
+        }
         let Some(fill_px) = next_bar_entry_fill(fp, order.dir, order.entry_limit) else {
             return order.entry_limit.is_some() && age < LIMIT_ORDER_TTL_BARS;
         };
@@ -610,12 +640,15 @@ impl Broker {
 
     fn set_single_pending(&mut self, kind: PendingKind) {
         self.pending.clear();
-        self.pending.push(PendingIntent::new(kind));
+        self.pending
+            .push(PendingIntent::new(kind, self.last_footprint_ts_ns));
     }
 
     fn add_pending(&mut self, order: EntryOrder) {
-        self.pending
-            .push(PendingIntent::new(PendingKind::Add(order)));
+        self.pending.push(PendingIntent::new(
+            PendingKind::Add(order),
+            self.last_footprint_ts_ns,
+        ));
     }
 
     /// Snapshot of the open position (lots in the current net direction), if any.
@@ -794,6 +827,42 @@ mod tests {
         let mut broker = Broker::new(BrokerConfig::default());
         broker.set_contract(1.0, 1.0);
         broker
+    }
+
+    #[test]
+    fn expiring_market_entry_does_not_fill_after_a_stale_time_gap() {
+        let mut broker = broker();
+        broker.on_new_footprint(&fp(100.0, 100.0, 100.0, 100.0, 100));
+
+        let mut output = StrategyOutput::new(false);
+        output.orders.replace(
+            EntryIntent::market(TradeSide::Long, 1.0)
+                .expire_after_ns(100)
+                .tick_bracket(10.0, 2.0),
+        );
+        broker.apply_strategy_output(output);
+        broker.on_new_footprint(&fp(101.0, 101.0, 101.0, 101.0, 1_000));
+
+        assert_eq!(broker.position_count(), 0);
+        assert_eq!(broker.pending_count(), 0);
+    }
+
+    #[test]
+    fn expiring_market_entry_still_fills_the_timely_next_bar() {
+        let mut broker = broker();
+        broker.on_new_footprint(&fp(100.0, 100.0, 100.0, 100.0, 100));
+
+        let mut output = StrategyOutput::new(false);
+        output.orders.replace(
+            EntryIntent::market(TradeSide::Long, 1.0)
+                .expire_after_ns(100)
+                .tick_bracket(10.0, 2.0),
+        );
+        broker.apply_strategy_output(output);
+        broker.on_new_footprint(&fp(101.0, 101.0, 101.0, 101.0, 150));
+
+        assert_eq!(broker.position_count(), 1);
+        assert_eq!(broker.pending_count(), 0);
     }
 
     #[test]
