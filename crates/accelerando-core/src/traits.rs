@@ -63,15 +63,14 @@ pub trait Indicator {
 pub trait Strategy {
     /// Event classes this strategy consumes through [`Strategy::on_event`].
     ///
-    /// Built-in engines require this to remain [`EventInterest::NONE`] so strategy decisions are
-    /// based on completed footprints rather than raw events.
+    /// Footprint engines require NONE; run_prepared_event_backtest dispatches raw events.
     fn event_interest(&self) -> EventInterest {
         EventInterest::NONE
     }
 
     /// Called once for every normalized order-flow event.
     ///
-    /// This hook is reserved for custom engines. The built-in backtest runners do not call it.
+    /// Called by run_prepared_event_backtest. Footprint-only runners do not call it.
     fn on_event(
         &mut self,
         _ev: &OrderFlowEvent,
@@ -94,4 +93,12 @@ pub trait Strategy {
     /// resolve before the strategy sees the bar), right before [`Strategy::on_footprint`].
     /// Lets strategies react to their own exits without re-deriving them from position flips.
     fn on_trade_closed(&mut self, _trade: &Trade) {}
+
+    /// Event runner lifecycle hook; cancel signal timers at EOF. No orders are executed afterward.
+    fn on_end_of_data(&mut self) {}
+
+    /// Optional causal diagnostics drained by the event runner into a JSONL sink.
+    fn take_diagnostics(&mut self) -> Vec<serde_json::Value> {
+        Vec::new()
+    }
 }

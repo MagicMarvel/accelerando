@@ -43,6 +43,7 @@ struct EntryOrder {
     max_fill_delay_ns: Option<i64>,
     /// Free-form setup tag carried onto the resulting [`Trade`] for later analysis.
     label: Option<String>,
+    reward_risk: Option<f64>,
 }
 
 /// The position change a strategy wants after the next fill.
@@ -154,6 +155,11 @@ pub enum EntryExecution {
 /// Stop/target specification attached atomically to an entry intent.
 #[derive(Clone, Debug, PartialEq)]
 pub enum BracketSpec {
+    /// Absolute structural stop; target is computed from the slipped fill and rounded outward.
+    RiskReward {
+        stop: f64,
+        reward_risk: f64,
+    },
     Ticks {
         stop: f64,
         target: f64,
@@ -222,6 +228,11 @@ impl EntryIntent {
         self
     }
 
+    pub fn risk_reward_bracket(mut self, stop: f64, reward_risk: f64) -> Self {
+        self.bracket = BracketSpec::RiskReward { stop, reward_risk };
+        self
+    }
+
     pub fn tagged(mut self, tag: impl Into<String>) -> Self {
         self.tag = Some(tag.into());
         self
@@ -242,7 +253,12 @@ impl EntryIntent {
                 fill_max,
             } => (Some(price), fill_min, fill_max),
         };
+        let reward_risk = match self.bracket {
+            BracketSpec::RiskReward { reward_risk, .. } => Some(reward_risk),
+            _ => None,
+        };
         let (stop_ticks, target_ticks, stop_px, target_px) = match self.bracket {
+            BracketSpec::RiskReward { stop, .. } => (0.0, 0.0, Some(stop), None),
             BracketSpec::Ticks { stop, target } => (stop, target, None, None),
             BracketSpec::Prices { stop, target } => (0.0, 0.0, stop, target),
         };
@@ -258,6 +274,7 @@ impl EntryIntent {
             entry_limit,
             max_fill_delay_ns: self.max_fill_delay_ns,
             label: self.tag,
+            reward_risk,
         }
     }
 }
@@ -447,6 +464,29 @@ impl Broker {
         if order.qty <= 0.0 {
             return;
         }
+        let risk_target = if let Some(rr) = order.reward_risk {
+            let Some(stop) = order.stop_px else {
+                return;
+            };
+            let risk = (px - stop) * order.dir as f64;
+            if !risk.is_finite()
+                || risk + self.tick_size * 1e-9 < self.tick_size
+                || !rr.is_finite()
+                || rr <= 0.0
+            {
+                return;
+            }
+            let raw = (px + order.dir as f64 * rr * risk) / self.tick_size;
+            Some(
+                if order.dir > 0 {
+                    (raw - 1e-9).ceil()
+                } else {
+                    (raw + 1e-9).floor()
+                } * self.tick_size,
+            )
+        } else {
+            None
+        };
         self.realized -= self.commission(order.qty); // entry-side commission
         let dir = order.dir;
         let stop = order.stop_px.or(if order.stop_ticks > 0.0 {
@@ -454,11 +494,13 @@ impl Broker {
         } else {
             None
         });
-        let target = order.target_px.or(if order.target_ticks > 0.0 {
-            Some(px + dir as f64 * order.target_ticks * self.tick_size)
-        } else {
-            None
-        });
+        let target = risk_target
+            .or(order.target_px)
+            .or(if order.target_ticks > 0.0 {
+                Some(px + dir as f64 * order.target_ticks * self.tick_size)
+            } else {
+                None
+            });
         self.positions.push(Position {
             dir,
             qty: order.qty,
@@ -756,6 +798,74 @@ impl Broker {
                 drawdown: eq - self.peak_equity,
             });
         }
+    }
+
+    /// Check only positions that existed before this print. Do not call on_new_footprint
+    /// for these same prints: that would fill orders twice and use future OHLC extremes.
+    pub fn on_trade_event(&mut self, ts: i64, price: f64) {
+        let fp = Footprint::seed(ts, price);
+        self.update_adverse_excursion(&fp);
+        for idx in (0..self.positions.len()).rev() {
+            let pos = &self.positions[idx];
+            let dir = pos.dir;
+            let exit = if pos.stop.is_some_and(|s| (price - s) * dir as f64 <= 0.0) {
+                Some((self.slip(price, -dir), TradeReason::StopLoss))
+            } else if pos.target.is_some_and(|t| (price - t) * dir as f64 >= 0.0) {
+                Some((pos.target.unwrap(), TradeReason::TakeProfit))
+            } else {
+                None
+            };
+            if let Some((px, reason)) = exit {
+                self.close_position_at(idx, px, ts, reason);
+            }
+        }
+        self.last_footprint_ts_ns = Some(ts);
+    }
+
+    /// Apply market-only commands after an event callback at the current print plus slippage.
+    /// Strategies own signal delays; exits for a new fill are first checked on the next event.
+    pub fn apply_event_output(
+        &mut self,
+        output: StrategyOutput,
+        ts: i64,
+        price: f64,
+    ) -> Result<(Vec<Plot>, Vec<(String, f64, Option<String>)>), String> {
+        let (actions, plots, series) = output.into_parts();
+        for action in actions {
+            match action {
+                OrderAction::Replace(intent) | OrderAction::Add(intent) => {
+                    if intent.execution != EntryExecution::Market {
+                        return Err("event execution currently supports market entries only".into());
+                    }
+                    if !self.positions.is_empty() {
+                        return Err("event execution supports one position at a time".into());
+                    }
+                    if !intent.qty.is_finite() || intent.qty <= 0.0 {
+                        return Err("invalid event entry quantity".into());
+                    }
+                    let order = intent.into_order();
+                    let before = self.positions.len();
+                    self.open_position(&order, self.slip(price, order.dir), ts, false);
+                    if self.positions.len() == before {
+                        return Err("invalid event entry bracket".into());
+                    }
+                }
+                OrderAction::CancelPending => self.clear_pending(),
+                OrderAction::ExitPosition => self.close_all_at_open(price, ts, TradeReason::Signal),
+            }
+        }
+        Ok((plots, series))
+    }
+
+    /// Sample event-engine account equity at a completed display bar.
+    pub fn sample_event_equity(&mut self, ts: i64, price: f64) {
+        let equity = self.mark_to_market(price);
+        self.peak_equity = self.peak_equity.max(equity);
+        self.equity.push(EquityPoint {
+            ts_ns: ts,
+            equity,
+            drawdown: equity - self.peak_equity,
+        });
     }
 
     pub fn starting_equity(&self) -> f64 {

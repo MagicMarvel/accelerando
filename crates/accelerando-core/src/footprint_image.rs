@@ -348,18 +348,41 @@ fn render_window(win: &RenderWindow<'_>, font: &FontArc, options: &TradeImageOpt
 
     for (bar, fp) in win.bars.iter().enumerate() {
         for plot in &fp.plots {
-            if let Plot::PriceBox {
-                low,
-                high,
-                span,
-                color,
-                text,
-                ..
-            } = plot
-            {
-                price_box(
-                    &mut img, &layout, font, bar, *low, *high, *span, color, text,
-                );
+            match plot {
+                Plot::PriceBox {
+                    low,
+                    high,
+                    span,
+                    color,
+                    text,
+                    ..
+                } => {
+                    price_box(
+                        &mut img, &layout, font, bar, *low, *high, *span, color, text,
+                    );
+                }
+                Plot::PriceBoxAt {
+                    bars_back,
+                    low,
+                    high,
+                    span,
+                    color,
+                    text,
+                    ..
+                } => {
+                    price_box(
+                        &mut img,
+                        &layout,
+                        font,
+                        bar.saturating_sub(*bars_back),
+                        *low,
+                        *high,
+                        *span,
+                        color,
+                        text,
+                    );
+                }
+                _ => {}
             }
         }
     }
@@ -477,9 +500,13 @@ fn layout(win: &RenderWindow<'_>, options: &TradeImageOptions) -> Layout {
             grow(lv.price);
         }
         for plot in &fp.plots {
-            if let Plot::PriceBox { low, high, .. } = plot {
-                grow(*low);
-                grow(*high);
+            match plot {
+                Plot::PriceBox { low, high, .. }
+                | Plot::PriceBoxAt { low, high, .. } => {
+                    grow(*low);
+                    grow(*high);
+                }
+                _ => {}
             }
             if let Plot::LineSegment {
                 from_price,

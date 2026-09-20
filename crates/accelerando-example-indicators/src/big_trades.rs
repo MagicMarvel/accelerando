@@ -271,6 +271,7 @@ impl BigTrades {
                 level.buy += size;
                 self.total_buy += size;
             }
+            Side::Unknown => return,
             Side::Sell => {
                 level.sell += size;
                 self.total_sell += size;

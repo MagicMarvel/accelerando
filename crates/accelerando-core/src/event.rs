@@ -7,6 +7,8 @@ use serde::{Deserialize, Serialize};
 pub enum Side {
     Buy,
     Sell,
+    /// Trade aggressor is unavailable; contributes no signed volume.
+    Unknown,
 }
 
 impl Side {
@@ -14,6 +16,7 @@ impl Side {
         match self {
             Side::Buy => 1.0,
             Side::Sell => -1.0,
+            Side::Unknown => 0.0,
         }
     }
 }

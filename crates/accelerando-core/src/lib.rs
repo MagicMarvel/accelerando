@@ -10,6 +10,7 @@
 pub mod broker;
 pub mod engine;
 pub mod event;
+pub mod event_engine;
 pub mod footprint;
 #[cfg(feature = "footprint-image")]
 pub mod footprint_image;
@@ -31,6 +32,7 @@ pub use engine::{
     PreparedBacktestData,
 };
 pub use event::{EventInterest, OrderFlowEvent, Side};
+pub use event_engine::{prepare_event_data, run_event_backtest, run_prepared_event_backtest, PreparedEventData};
 pub use footprint::{Footprint, Level, Plot, VpLevel};
 #[cfg(feature = "footprint-image")]
 pub use footprint_image::{

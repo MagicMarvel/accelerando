@@ -116,12 +116,11 @@ impl CsvIter {
         let mut f = line.split(',');
         let kind = f.next()?;
         match kind {
-            "T" => {
-                self.event_interest
-                    .contains(EventInterest::TRADE)
-                    .then(|| self.parse_trade_fast(line))
-                    .flatten()
-            }
+            "T" => self
+                .event_interest
+                .contains(EventInterest::TRADE)
+                .then(|| self.parse_trade_fast(line))
+                .flatten(),
             "A" | "AddLimit" => {
                 if self.event_interest.contains(EventInterest::L2) {
                     self.parse_l2(f, true)
@@ -178,8 +177,10 @@ impl CsvIter {
         let side_code = parse_i64_field(bytes, &mut pos).unwrap_or(0);
         let aggressor = if side_code == self.buy_aggressor_code {
             Side::Buy
-        } else {
+        } else if side_code == 1 || side_code == 2 {
             Side::Sell
+        } else {
+            Side::Unknown
         };
         Some(OrderFlowEvent::Trade {
             ts_ns,
@@ -327,4 +328,54 @@ fn parse_f64_field(bytes: &[u8], pos: &mut usize) -> Option<Option<f64>> {
         *pos += 1;
     }
     Some(Some(value * sign))
+}
+
+#[cfg(test)]
+mod event_tests {
+    use super::*;
+    #[test]
+    fn csv_preserves_unknown_aggressor_instead_of_inventing_sell_volume() {
+        let path = std::env::temp_dir().join(format!(
+            "accel-side-{}-{}.csv",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::write(
+            &path,
+            "c,0,0,CME,ES,FUTURE,0.25,50,1\nT,1,0,100,2,1,0\nT,2,0,100,3,2,0\nT,3,0,101,4,0,0\n",
+        )
+        .unwrap();
+        let mut p = Params::default();
+        p.set(
+            "path",
+            accelerando_core::ParamValue::Str(path.to_string_lossy().into()),
+        );
+        p.set("buy_aggressor_code", accelerando_core::ParamValue::Int(1));
+        let rows: Vec<_> = Box::new(CsvSource::from_params(&p)).events().collect();
+        std::fs::remove_file(path).unwrap();
+        assert!(matches!(
+            rows[1],
+            OrderFlowEvent::Trade {
+                aggressor: Side::Buy,
+                ..
+            }
+        ));
+        assert!(matches!(
+            rows[2],
+            OrderFlowEvent::Trade {
+                aggressor: Side::Sell,
+                ..
+            }
+        ));
+        assert!(matches!(
+            rows[3],
+            OrderFlowEvent::Trade {
+                aggressor: Side::Unknown,
+                ..
+            }
+        ));
+    }
 }

@@ -53,7 +53,11 @@ impl FootprintAggregator for RangeAggregator {
                 let target = self.range_ticks as f64 * self.tick_size.max(f64::EPSILON);
                 let buy = matches!(aggressor, Side::Buy);
                 let fp = self.current.as_mut().unwrap();
-                fp.add_trade(ts_ns, price, size, buy, self.tick_size);
+                if aggressor == Side::Unknown {
+                    fp.add_unknown_trade(ts_ns, price, size);
+                } else {
+                    fp.add_trade(ts_ns, price, size, buy, self.tick_size);
+                }
 
                 if fp.high - fp.low >= target {
                     let mut completed = self.current.take().unwrap();

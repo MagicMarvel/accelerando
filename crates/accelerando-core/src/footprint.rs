@@ -102,6 +102,20 @@ pub enum Plot {
         #[serde(default)]
         group: Option<String>,
     },
+    /// A price-range box drawn `bars_back` footprints to the left of the footprint that
+    /// emitted it. This is the range equivalent of `MarkerAt`: the information remains
+    /// causally available on the emitting bar while the visual is anchored to its source bar.
+    PriceBoxAt {
+        bars_back: usize,
+        id: String,
+        low: f64,
+        high: f64,
+        span: usize,
+        color: String,
+        text: String,
+        #[serde(default)]
+        group: Option<String>,
+    },
 }
 
 /// One aggregated bar flowing through the pipeline.
@@ -148,6 +162,16 @@ impl Footprint {
             tags: BTreeMap::new(),
             plots: Vec::new(),
         }
+    }
+
+    /// Unclassified volume updates the price path and total volume, but not bid/ask delta.
+    pub fn add_unknown_trade(&mut self, ts_ns: i64, price: f64, size: f64) {
+        self.high = self.high.max(price);
+        self.low = self.low.min(price);
+        self.close = price;
+        self.ts_last_ns = ts_ns;
+        self.volume += size;
+        self.trades += 1;
     }
 
     /// Fold a trade print into this footprint, updating OHLC, ladder and delta.

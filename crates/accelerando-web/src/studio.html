@@ -620,7 +620,7 @@ function overlayCategories(){
     else if(p.kind==="Line")markerGroups.add(lineCat(p));
     else if(p.kind==="LineSegment")markerGroups.add(segmentCat(p));
     else if(p.kind==="VolumeProfile")markerGroups.add(volumeProfileCat(p));
-    else if(p.kind==="PriceBox")markerGroups.add(priceBoxCat(p));
+    else if(p.kind==="PriceBox"||p.kind==="PriceBoxAt")markerGroups.add(priceBoxCat(p));
   } }
   for(const s of runSeries)markerGroups.add(lineCat(s));
   const cats=[];
@@ -972,11 +972,35 @@ function drawImbalanceLine(ctx,p,vis,i,x,yy,L,pw,xStep){
 }
 // Per-run line series (BacktestResult.series): each is [(footprint index, value)] sorted by
 // index. Rendered like Line plots but stored once per run instead of once per bar.
+// Series prefixed with oscillator. use a separate zero-centered scale, never price coordinates.
+function drawOscillators(ctx,L,T,pw,ph,xStep,s,e){
+  const lines=runSeries.filter(sr=>(sr.id||"").startsWith("oscillator.")&&overlayOn(lineCat(sr)));
+  const visible=lines.map(sr=>({...sr,points:(sr.points||[]).filter(([i,v])=>i>=s&&i<e&&isFinite(v))}));
+  let extent=1;
+  for(const sr of visible)for(const [,v] of sr.points)extent=Math.max(extent,Math.abs(v));
+  const y=v=>T+20+(extent-v)/(2*extent)*Math.max(1,ph-30);
+  ctx.save();ctx.fillStyle="#f8fafc";ctx.fillRect(L,T,pw,ph);
+  ctx.strokeStyle="#cbd5e1";ctx.strokeRect(L,T,pw,ph);
+  ctx.font="10px Segoe UI, Arial";ctx.fillStyle="#475569";
+  ctx.fillText("Delta force / rolling quantile (minute-close samples)",L+6,T+12);
+  ctx.fillText(extent.toFixed(1),L+pw+4,T+24);ctx.fillText((-extent).toFixed(1),L+pw+4,T+ph-5);
+  ctx.beginPath();ctx.moveTo(L,y(0));ctx.lineTo(L+pw,y(0));ctx.stroke();
+  ctx.beginPath();ctx.rect(L,T+17,pw,ph-17);ctx.clip();
+  for(const sr of visible){
+    ctx.strokeStyle=sr.color||"#a78bfa";ctx.lineWidth=1.5;
+    ctx.setLineDash(sr.id.endsWith("upper")||sr.id.endsWith("lower")?[4,3]:[]);
+    ctx.beginPath();let previous=-2;
+    for(const [i,v] of sr.points){const x=L+(i-s+.5)*xStep;if(i===previous+1)ctx.lineTo(x,y(v));else ctx.moveTo(x,y(v));previous=i;}
+    ctx.stroke();
+  }
+  ctx.restore();
+}
 function drawRunSeries(ctx,L,T,ph,xStep,y,s,e){
   if(!runSeries.length)return;
   ctx.save();
   ctx.lineWidth=1.5; ctx.lineJoin="round";
   for(const sr of runSeries){
+    if((sr.id||"").startsWith("oscillator."))continue;
     if(!overlayOn(lineCat(sr)))continue;
     const pts=sr.points||[];
     // Binary-search the first visible point (points are sorted by footprint index).
@@ -1205,19 +1229,21 @@ function drawPriceBoxes(ctx,vis,L,T,pw,ph,xStep,y,labelLayout){
   const lastById=new Map();
   for(let i=0;i<vis.length;i++){
     for(const p of (vis[i].plots||[])){
-      if(p.kind==="PriceBox")lastById.set(p.id||`__box_${i}`,i);
+      if(p.kind==="PriceBox"||p.kind==="PriceBoxAt")lastById.set(p.id||`__box_${i}`,i);
     }
   }
   for(let i=0;i<vis.length;i++){
     const b=vis[i];
     for(const p of (b.plots||[])){
-      if(p.kind!=="PriceBox"||p.low==null||p.high==null)continue;
+      if((p.kind!=="PriceBox"&&p.kind!=="PriceBoxAt")||p.low==null||p.high==null)continue;
       if(priceBoxCat(p)==="imbalance")continue;
       if(lastById.get(p.id||`__box_${i}`)!==i)continue;
       if(!overlayOn(priceBoxCat(p)))continue;
+      const idx=p.kind==="PriceBoxAt"?i-(p.bars_back||0):i;
+      if(idx<0||idx>=vis.length)continue;
       const span=Math.max(1,Math.round(p.span||1));
-      const x0=clamp(L+(i-span+1)*xStep,L,L+pw);
-      const x1=clamp(L+(i+1)*xStep,L,L+pw);
+      const x0=clamp(L+(idx-span+1)*xStep,L,L+pw);
+      const x1=clamp(L+(idx+1)*xStep,L,L+pw);
       const top=y(Math.max(p.low,p.high)), bot=y(Math.min(p.low,p.high));
       const yy=Math.min(top,bot), hh=Math.max(1,Math.abs(bot-top));
       if(yy>T+ph||yy+hh<T||x1<=L||x0>=L+pw)continue;
@@ -1383,7 +1409,7 @@ function drawPrice(){
   const W=price.clientWidth,H=price.clientHeight; pctx.clearRect(0,0,W,H); pctx.fillStyle="#fbfcfe"; pctx.fillRect(0,0,W,H);
   if(!fps.length){ pctx.fillStyle="#94a3b8"; pctx.font="14px Segoe UI"; pctx.fillText("Run a backtest to view results", 20, H/2); return; }
   if(chartMode==="heatmap"){ drawHeatmap(pctx,price,"price"); const [s,e]=viewRange(); $("range").textContent=`bars ${s+1}-${e} / ${fps.length}`; return; }
-  const [s,e]=viewRange(); const vis=fps.slice(s,e); const L=PADL,R=AXIS_W,T=14,B=34,pw=Math.max(1,W-L-R),totalPh=Math.max(1,H-T-B),cvdH=cvdVisible?Math.max(90,Math.min(155,totalPh*.2)):0,paneGap=cvdVisible?6:0,ph=Math.max(80,totalPh-cvdH-paneGap),cvdT=T+ph+paneGap;
+  const [s,e]=viewRange(); const vis=fps.slice(s,e); const L=PADL,R=AXIS_W,T=14,B=34,pw=Math.max(1,W-L-R),totalPh=Math.max(1,H-T-B),oscH=runSeries.some(sr=>(sr.id||"").startsWith("oscillator."))?Math.min(120,totalPh*.22):0,cvdH=cvdVisible?Math.max(90,Math.min(155,totalPh*.2)):0,paneGap=cvdVisible?6:0,ph=Math.max(80,totalPh-cvdH-paneGap-oscH),cvdT=T+ph+paneGap;
   let lo=Infinity,hi=-Infinity; for(const b of vis){lo=Math.min(lo,b.low);hi=Math.max(hi,b.high);}
   const pad=Math.max(0.25,(hi-lo)*0.06); lo-=pad;hi+=pad; [lo,hi]=applyYZoom("price",lo,hi); yZoom.price.lo=lo; yZoom.price.hi=hi; const y=p=>T+(hi-p)/(hi-lo)*ph; const xStep=pw/Math.max(1,barsPerView); priceScale={s,e,L,T,pw,ph,lo,hi,xStep}; const cw=candleWidth(xStep); const tick=tickSizeFor(vis);
   if(xStep>=FOOTPRINT_MIN_XSTEP)ensureVisibleLadders(s,e);
@@ -1411,6 +1437,7 @@ function drawPrice(){
   drawEconomicEvents(pctx,s,e,L,T,pw,ph,xStep);
   pctx.strokeStyle="#9aa4b2"; pctx.strokeRect(L,T,pw,ph);
   const cvdPlot=cvdVisible?drawFootprintCvd(pctx,vis,L,cvdT,pw,cvdH,W,R,xStep):null;
+  if(oscH)drawOscillators(pctx,L,T+totalPh-oscH,pw,oscH,xStep,s,e);
   drawTimeAxis(pctx,vis,L,T,pw,totalPh,W,R,"ts_last_ns",xStep);
   // Current price: dashed line + right-axis tag at the latest bar's close (TradingView-style).
   const lastB=fps[fps.length-1];
