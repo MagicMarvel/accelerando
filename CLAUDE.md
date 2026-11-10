@@ -9,8 +9,8 @@ order-flow feed into footprints, runs causal indicators and strategies over them
 reports metrics, and exposes library primitives for parameter search, factor mining and web result
 viewing.
 
-There is intentionally no official CLI crate. Downstream users should create their own small runner
-application so custom strategies, indicators and data sources are compiled in normally.
+Downstream users create their own small runner binary so custom strategies, indicators and data
+sources are compiled in normally; `accelerando-app` provides a ready-made `App` for that binary.
 
 ## Commands
 
@@ -53,6 +53,23 @@ Pipeline assembly lives in the embedding application:
 - Use `accelerando-hyperopt` by supplying an evaluator closure that builds and runs a pipeline.
   `SearchSpace` describes dims, `search` drives trials through a `BatchEvaluator`;
   `CpuEvaluator` runs them on rayon (a GPU impl can satisfy the same trait later).
+
+### Strategy-authoring layer
+
+- `accelerando-derive` — `#[derive(Configurable)]` (re-exported as `accelerando_core::Configurable`).
+  Generated code uses `::accelerando_core::` paths; core has `extern crate self as accelerando_core`
+  so the derive also works inside core. Also implements `ParamGroup` for `#[param(flatten)]`.
+- `accelerando-core/src/ta/` — causal incremental tools (EMA/SMA/ATR, RollingStats, RollingExtrema,
+  Lookback, SessionVwap, VolumeProfile, ZigZag, Cross). The ZigZag detector moved here from
+  `accelerando-example-indicators` (re-exported there).
+- `accelerando-core/src/session.rs` — `SessionClock`, `SessionFilter`, `TradeDiscipline`.
+- `Strategy::requirements()` / `StrategyRequirements` / `IndicatorRequest` in `traits.rs`;
+  `PreparedBacktestData::check_values` validates declared value keys.
+- `accelerando-core/src/testkit.rs` — synthetic bars + `drive` for strategy unit tests.
+- `accelerando-app` — `App` runner (CLI, cache, rayon grid, `--validate` in `validate.rs`).
+  `cargo run --release -p accelerando-app --example quickstart -- --help`.
+- `Trade.pnl` includes entry + exit commission (equity already did). Capped hyperopt grids are
+  sampled evenly over the full cartesian product (`grid_size` reports the full size).
 
 ### Web viewing (`accelerando-web`)
 

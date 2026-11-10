@@ -36,10 +36,13 @@ BacktestResult <- Broker <- Strategy <- Indicator 逐层增强
 | `accelerando-example-aggregators` | 示例聚合器：`range`、`time` |
 | `accelerando-example-indicators` | 示例指标：`technical`、`regime`、`stacked_imbalance`、`adaptive_imbalance`、`big_trades`、`economic_calendar` |
 | `accelerando-example-strategy` | 示例策略：`indicator_cross` |
+| `accelerando-derive` | `#[derive(Configurable)]`：在结构体上一次性声明组件参数 |
+| `accelerando-app` | 开箱即用的 runner：命令行、预处理缓存、并行网格、`--validate` 验证报告、Web 查看 |
 | `accelerando-hyperopt` | 纯库形式的参数搜索原语 |
 | `accelerando-ml` | 因子挖掘：PerpetualBooster（GBM）训练、Spearman IC、因子有效性报告 |
 
-刻意不提供官方 CLI crate：请写一个小的 runner 二进制，让自定义代码正常参与编译。
+仍然需要写一个自己的小 runner 二进制，让自定义代码正常参与编译；但它可以只有一行：
+`accelerando_app::App::new().strategy::<MyStrategy>("my_strategy").run_cli()`（见下文“写一个策略”）。
 
 ## 快速上手
 
@@ -93,6 +96,80 @@ fn main() {
 大批量搜索只需要 metrics/trades/equity 时，把 `keep_footprints` 设为 `false`
 （`keep_liquidity_heatmap` 保持 `false`）以省内存。
 
+## 写一个策略（推荐路径）
+
+从想法到经过验证的回测，最短路径用到框架的四个部件。完整可运行版本见
+`crates/accelerando-app/examples/quickstart.rs`。
+
+```rust
+use accelerando_core::ta::{Cross, CrossDir, Ema, SessionVwap};
+use accelerando_core::{Configurable, EntryIntent, Footprint, PortfolioSnapshot, SessionClock,
+    SessionFilter, Strategy, StrategyOutput, StrategyRequirements, TradeDiscipline, TradeSide};
+
+#[derive(Configurable)]                     // 1
+#[configurable(init = Self::init)]
+pub struct MyStrategy {
+    #[param(default = 20, min = 5, max = 60, step = 5)] fast: usize,
+    #[param(default = 8, min = 4, max = 24)]            stop_ticks: u32,
+    #[param(default = true)]                            exit_on_cross: bool,
+    #[param(default = "both", choice = ["both", "long", "short"])] side: String,
+    #[param(flatten)] session: SessionFilter,
+    #[param(flatten)] discipline: TradeDiscipline,
+    clock: SessionClock,                    // no #[param] -> Default::default()
+    vwap: SessionVwap,
+    ema: Ema,
+    cross: Cross,
+}
+impl MyStrategy { fn init(&mut self) { self.ema = Ema::new(self.fast); } }
+
+impl Strategy for MyStrategy {
+    fn requirements(&self) -> StrategyRequirements {   // 3
+        StrategyRequirements::new().bars("time:60")    // .indicator(..) / .values(&[..])
+    }
+    fn on_footprint(&mut self, fp: &Footprint, pf: &PortfolioSnapshot, out: &mut StrategyOutput) {
+        let now = self.clock.update(fp.ts_last_ns);    // 2
+        self.discipline.on_bar(now.day);
+        let vwap = self.vwap.update_bar(now.day, fp);
+        let fast = self.ema.update(fp.close);
+        let crossed = self.cross.update(fp.close, fast);
+        // ... out.orders.replace(EntryIntent::market(..).tick_bracket(..))
+    }
+}
+
+fn main() {                                            // 4
+    accelerando_app::App::new().strategy::<MyStrategy>("my_strategy").run_cli();
+}
+```
+
+```text
+cargo run --release -- data.csv --strategy my_strategy --param stop_ticks=12 --serve
+cargo run --release -- data.csv --strategy my_strategy --grid --max-evals 200 --validate
+cargo run --release -- --list
+```
+
+1. **`#[derive(Configurable)]`**：由字段属性生成 `param_spec()` 与 `from_params()`。整数 -> `int`
+   （`min`/`max`，可选 `step`）；浮点 -> `float`（可选 `step`）；`bool` -> 开关（命令行接受
+   `true/false`）；`String` 或实现 `FromStr` 的类型配 `choice = [...]`；`fixed` 表示不参与搜索；
+   `name = "..."` 保留旧参数名；`#[param(flatten)]` 嵌入参数组。没有 `#[param]` 的字段以
+   `Default::default()` 初始化，可选的 `init` 钩子在构造后执行。
+2. **`accelerando_core::ta`**：经过测试的因果增量组件——`Ema`、`Sma`、`Atr`、`RollingStats`
+   （对*之前*的窗口做 z-score）、`RollingExtrema`、`Lookback`、`SessionVwap`（含 σ 带）、
+   `VolumeProfile`（按 tick 计、POC、价值区、支持滚动移除）、`ZigZag`、`Cross`。
+   **`accelerando_core::session`**：`SessionClock`（ET 日期/分钟/换日）、`SessionFilter`、
+   `TradeDiscipline`。
+3. **`Strategy::requirements()`**：声明要运行的指标（`IndicatorRequest::new("big_trades").param("k", v)`）、
+   会读取的 `Footprint::values` 键（若某个键从未发布，runner 直接报错并列出已发布的键）、
+   以及策略设计时的 K 线类型。`fp.value(key)` / `fp.tag(key)` / `fp.eastern_day_minute()` 是便捷读取。
+4. **`accelerando-app`**：`App` 负责 数据 -> 缓存的 footprints -> 并行回测 -> 汇总表 -> Web 查看 /
+   JSON 导出。`--validate` 额外输出：样本内/样本外切分（样本内最优者的样本外结果、IS->OOS 秩相关）、
+   配合 `--grid` 的 walk-forward 选参、滑点敏感性，以及按交易笔数/持仓时长/时段分钟匹配的随机入场基线。
+
+单元测试：`accelerando_core::testkit` 构造合成 bar（`bar(ts).ohlc(..).value(k, v)`、
+`bars_from_closes`、`eastern_ts`），并按引擎相同顺序驱动策略（`drive`、`drive_with`、`backtest`）。
+
+记账说明：`Trade.pnl` 是完整往返净值（开仓**和**平仓手续费都已扣除），交易日志之和等于权益变化。
+网格超过 `max_evals` 上限时，改为在整个网格上均匀抽样，而不是截断（截断会让后面的维度永远停在最小值）。
+
 ## 多策略复用预处理数据
 
 解析和聚合大文件是最贵的一步。多策略 / 多参数批量回测时，先把 footprint 序列准备一次，
@@ -141,8 +218,10 @@ let strategy = registry.build_strategy("my_strategy", &Params::default()).unwrap
 - **撤单与平仓分离**：`output.orders.cancel_pending()` 只撤待成交入场单；
   `output.orders.exit_position()` 才请求下一根 bar 平仓。
 - **成交模型**：第 `i` 根 bar 设定的意图在第 `i+1` 根开盘成交；止损止盈按该 bar 高低价盘中
-  检查。同一根 bar 内先止损后止盈（保守假设）；开盘直接跳过止损价时按**开盘价**成交
-  （gap-through），不会出现"在市场没到过的价格成交"。
+  检查。同一根 bar 内先止损后止盈（保守假设）；开盘直接跳过止损价时按**开盘价**触发
+  （gap-through），不会出现"在市场没到过的价格成交"。滑点（`slippage_ticks`）对所有主动成交收取：
+  市价入场/平仓，以及**被触发的止损**（止损触发后即市价单）；止盈是挂单限价，按止盈价原价成交。
+  tick 止损止盈以实际（含滑点）入场成交价为锚，与 ATM 下单一致。
 - **线型输出用 series**：`output.visuals.series("vwap", v)` / `series_colored` 每 run 存一份
   `BacktestResult.series`，studio 自动连线渲染（legend 按 id 前缀分组开关），别再每根 bar
   push `Plot::Line`。

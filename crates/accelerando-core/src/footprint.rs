@@ -91,6 +91,21 @@ pub enum Plot {
         levels: Vec<VpLevel>,
         span: usize,
     },
+    /// Same as `VolumeProfile`, but its right edge is drawn `bars_back` footprints to the left of
+    /// the emitting footprint. Use it when a profile's bar range is only confirmed later (e.g. a
+    /// balance area confirmed by a subsequent departure).
+    /// Several emissions may share an `id` (a profile that keeps growing); the viewer draws only
+    /// the last one. `text` labels the profile box and `color` tints its border.
+    VolumeProfileAt {
+        bars_back: usize,
+        id: String,
+        levels: Vec<VpLevel>,
+        span: usize,
+        #[serde(default)]
+        text: String,
+        #[serde(default)]
+        color: Option<String>,
+    },
     /// A price-range box ending on this footprint and extending `span` bars to the left.
     PriceBox {
         id: String,
@@ -144,6 +159,22 @@ pub struct Footprint {
 }
 
 impl Footprint {
+    /// Indicator value published under `key` (`None` while warming up or if never published).
+    pub fn value(&self, key: &str) -> Option<f64> {
+        self.values.get(key).copied()
+    }
+
+    /// Categorical indicator tag published under `key`.
+    pub fn tag(&self, key: &str) -> Option<&str> {
+        self.tags.get(key).map(String::as_str)
+    }
+
+    /// `(eastern_day, eastern_minute)` of the bar close. See [`crate::session::SessionClock`]
+    /// when you also need new-day detection.
+    pub fn eastern_day_minute(&self) -> (i64, u32) {
+        crate::market_time::eastern_day_minute(self.ts_last_ns)
+    }
+
     /// Create an empty footprint seeded with the first print's price/time.
     pub fn seed(ts_ns: i64, price: f64) -> Self {
         Footprint {

@@ -42,6 +42,42 @@ impl ParamValue {
     }
 }
 
+impl From<i64> for ParamValue {
+    fn from(v: i64) -> Self {
+        ParamValue::Int(v)
+    }
+}
+impl From<i32> for ParamValue {
+    fn from(v: i32) -> Self {
+        ParamValue::Int(v.into())
+    }
+}
+impl From<usize> for ParamValue {
+    fn from(v: usize) -> Self {
+        ParamValue::Int(v as i64)
+    }
+}
+impl From<bool> for ParamValue {
+    fn from(v: bool) -> Self {
+        ParamValue::Int(v.into())
+    }
+}
+impl From<f64> for ParamValue {
+    fn from(v: f64) -> Self {
+        ParamValue::Float(v)
+    }
+}
+impl From<&str> for ParamValue {
+    fn from(v: &str) -> Self {
+        ParamValue::Str(v.to_string())
+    }
+}
+impl From<String> for ParamValue {
+    fn from(v: String) -> Self {
+        ParamValue::Str(v)
+    }
+}
+
 /// The tunable domain of a single parameter, consumed by the hyperopt samplers.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum ParamRange {
@@ -101,6 +137,27 @@ impl ParamSpec {
             default: ParamValue::Float(default),
         });
         self
+    }
+
+    /// A float searched on a fixed grid (`min, min+step, ...`).
+    pub fn float_step(mut self, name: &str, default: f64, min: f64, max: f64, step: f64) -> Self {
+        self.entries.push(ParamEntry {
+            name: name.to_string(),
+            range: ParamRange::Float {
+                min,
+                max,
+                step: Some(step),
+            },
+            default: ParamValue::Float(default),
+        });
+        self
+    }
+
+    /// An on/off switch. Stored and searched as an integer in `[0, 1]` so grids and hyperopt
+    /// treat it like any other dimension; read it back with [`Params::bool`]. On the CLI
+    /// (`parse_assignments`) it also accepts `true/false/on/off/yes/no`.
+    pub fn bool(self, name: &str, default: bool) -> Self {
+        self.int(name, i64::from(default), 0, 1, 1)
     }
 
     /// A fixed, non-tunable parameter (e.g. a file path) with a string default.
@@ -176,9 +233,12 @@ impl ParamSpec {
             let value =
                 match (&entry.range, &entry.default) {
                     (ParamRange::Int { .. }, _) | (ParamRange::Fixed, ParamValue::Int(_)) => {
-                        ParamValue::Int(raw.parse::<i64>().map_err(|_| {
-                            format!("parameter `{name}` expects an integer, got `{raw}`")
-                        })?)
+                        ParamValue::Int(match parse_bool_word(raw) {
+                            Some(b) => i64::from(b),
+                            None => raw.parse::<i64>().map_err(|_| {
+                                format!("parameter `{name}` expects an integer, got `{raw}`")
+                            })?,
+                        })
                     }
                     (ParamRange::Float { .. }, _) | (ParamRange::Fixed, ParamValue::Float(_)) => {
                         ParamValue::Float(raw.parse::<f64>().map_err(|_| {
@@ -288,6 +348,14 @@ impl ParamSpec {
     }
 }
 
+fn parse_bool_word(raw: &str) -> Option<bool> {
+    match raw.to_ascii_lowercase().as_str() {
+        "true" | "on" | "yes" => Some(true),
+        "false" | "off" | "no" => Some(false),
+        _ => None,
+    }
+}
+
 /// A concrete map of parameter values. Keys are local to a component (e.g. `window`); the
 /// hyperopt layer namespaces them across stages (e.g. `indicator.technical.rsi_period`).
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -300,6 +368,12 @@ impl Params {
 
     pub fn set(&mut self, key: &str, value: ParamValue) {
         self.0.insert(key.to_string(), value);
+    }
+
+    /// Builder-style `set`: `Params::default().with("stop_ticks", 8).with("side", "long")`.
+    pub fn with(mut self, key: &str, value: impl Into<ParamValue>) -> Self {
+        self.0.insert(key.to_string(), value.into());
+        self
     }
 
     pub fn int(&self, key: &str, default: i64) -> i64 {
@@ -320,6 +394,11 @@ impl Params {
             .unwrap_or(default)
     }
 
+    /// Read a switch declared with [`ParamSpec::bool`] (any non-zero integer is `true`).
+    pub fn bool(&self, key: &str, default: bool) -> bool {
+        self.int(key, i64::from(default)) != 0
+    }
+
     pub fn str(&self, key: &str, default: &str) -> String {
         self.0
             .get(key)
@@ -336,6 +415,16 @@ impl Params {
         }
         out
     }
+}
+
+/// A reusable bundle of parameters that can be embedded in several components (session windows,
+/// trade discipline, ...). `#[derive(Configurable)]` implements it for every struct it touches, and
+/// `#[param(flatten)]` embeds one group inside another component.
+pub trait ParamGroup: Sized {
+    /// Append this group's parameters to `spec`.
+    fn declare_params(spec: ParamSpec) -> ParamSpec;
+    /// Build the group from a resolved parameter map.
+    fn read_params(params: &Params) -> Self;
 }
 
 /// A component that can be described as a search space and built from concrete parameters.

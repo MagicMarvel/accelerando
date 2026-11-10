@@ -7,6 +7,9 @@
 //! Every pluggable stage is built from a data-driven [`Params`] map and advertises a
 //! [`ParamSpec`], so the same definitions feed both a single backtest and the hyperopt search.
 
+// Lets `#[derive(Configurable)]` (which emits `::accelerando_core::...` paths) work inside this crate.
+extern crate self as accelerando_core;
+
 pub mod broker;
 pub mod engine;
 pub mod event;
@@ -21,6 +24,9 @@ pub mod params;
 pub mod progress;
 pub mod registry;
 pub mod result;
+pub mod session;
+pub mod ta;
+pub mod testkit;
 pub mod traits;
 
 pub use broker::{
@@ -45,11 +51,15 @@ pub use heatmap::{
     HeatmapWindow, HiresHeatmap, SharedHeatmap, DEFAULT_HEATMAP_CACHE_DIR,
 };
 pub use metrics::Metrics;
-pub use params::{Configurable, ParamRange, ParamSpec, ParamValue, Params};
+pub use accelerando_derive::Configurable;
+pub use params::{Configurable, ParamGroup, ParamRange, ParamSpec, ParamValue, Params};
 pub use progress::{ProgressHandle, ProgressSnapshot};
 pub use registry::Registry;
 pub use result::{
     BacktestResult, ExperimentResult, ExperimentRun, ExperimentRunSummary, LiquidityHeatmap,
     LiquidityLevel, LiquiditySnapshot, Series, Trade, TradeReason,
 };
-pub use traits::{DataSource, FootprintAggregator, Indicator, Strategy};
+pub use session::{SessionClock, SessionFilter, SessionTick, TradeDiscipline};
+pub use traits::{
+    DataSource, FootprintAggregator, Indicator, IndicatorRequest, Strategy, StrategyRequirements,
+};

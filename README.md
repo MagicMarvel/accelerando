@@ -40,11 +40,14 @@ wire the pipeline directly in code.
 | `accelerando-example-indicators` | example indicators: `technical`, `regime`, `stacked_imbalance`, `adaptive_imbalance`, `big_trades`, `economic_calendar` |
 | `accelerando-example-strategy` | example strategy: `indicator_cross` |
 | `accelerando-orderflow-features` | `trade_flow_features` indicator (causal per-bar order-flow features: delta/volume/trade-rate z-scores, delta efficiency, CVD, VWAP/range/session location, diagonal imbalances) + the shared `FeatureExtractor`, forward labels and CSV export for ML datasets |
+| `accelerando-derive` | `#[derive(Configurable)]`: declare a component's parameters once on the struct |
+| `accelerando-app` | batteries-included runner: CLI, prepared-data cache, parallel grids, `--validate` reports, web viewer |
 | `accelerando-hyperopt` | library-only parameter search primitives |
 | `accelerando-ml` | factor mining: PerpetualBooster (GBM) training, Spearman IC, factor-effectiveness reports |
 
-There is intentionally no official CLI crate: build your own small runner binary so your custom
-code compiles in normally.
+You still write your own small runner binary so custom code compiles in normally, but it can be a
+single line: `accelerando_app::App::new().strategy::<MyStrategy>("my_strategy").run_cli()` (see
+"Writing a strategy" below).
 
 ## Quick start
 
@@ -98,6 +101,85 @@ fn main() {
 Set `keep_footprints = false` (and leave `keep_liquidity_heatmap = false`) for large search jobs
 where you only need metrics/trades/equity.
 
+## Writing a strategy (recommended path)
+
+The shortest path from idea to validated backtest uses four framework pieces. The full runnable
+version is `crates/accelerando-app/examples/quickstart.rs`.
+
+```rust
+use accelerando_core::ta::{Cross, CrossDir, Ema, SessionVwap};
+use accelerando_core::{Configurable, EntryIntent, Footprint, PortfolioSnapshot, SessionClock,
+    SessionFilter, Strategy, StrategyOutput, StrategyRequirements, TradeDiscipline, TradeSide};
+
+#[derive(Configurable)]                     // 1
+#[configurable(init = Self::init)]
+pub struct MyStrategy {
+    #[param(default = 20, min = 5, max = 60, step = 5)] fast: usize,
+    #[param(default = 8, min = 4, max = 24)]            stop_ticks: u32,
+    #[param(default = true)]                            exit_on_cross: bool,
+    #[param(default = "both", choice = ["both", "long", "short"])] side: String,
+    #[param(flatten)] session: SessionFilter,
+    #[param(flatten)] discipline: TradeDiscipline,
+    clock: SessionClock,                    // no #[param] -> Default::default()
+    vwap: SessionVwap,
+    ema: Ema,
+    cross: Cross,
+}
+impl MyStrategy { fn init(&mut self) { self.ema = Ema::new(self.fast); } }
+
+impl Strategy for MyStrategy {
+    fn requirements(&self) -> StrategyRequirements {   // 3
+        StrategyRequirements::new().bars("time:60")    // .indicator(..) / .values(&[..])
+    }
+    fn on_footprint(&mut self, fp: &Footprint, pf: &PortfolioSnapshot, out: &mut StrategyOutput) {
+        let now = self.clock.update(fp.ts_last_ns);    // 2
+        self.discipline.on_bar(now.day);
+        let vwap = self.vwap.update_bar(now.day, fp);
+        let fast = self.ema.update(fp.close);
+        let crossed = self.cross.update(fp.close, fast);
+        // ... out.orders.replace(EntryIntent::market(..).tick_bracket(..))
+    }
+}
+
+fn main() {                                            // 4
+    accelerando_app::App::new().strategy::<MyStrategy>("my_strategy").run_cli();
+}
+```
+
+```text
+cargo run --release -- data.csv --strategy my_strategy --param stop_ticks=12 --serve
+cargo run --release -- data.csv --strategy my_strategy --grid --max-evals 200 --validate
+cargo run --release -- --list
+```
+
+1. **`#[derive(Configurable)]`** generates `param_spec()` + `from_params()` from field attributes:
+   integers -> `int` (`min`/`max`, optional `step`), floats -> `float` (optional `step`), `bool` ->
+   on/off switch (CLI accepts `true/false`), `String`/`FromStr` types with `choice = [...]`,
+   `fixed` for non-searched values, `name = "..."` to keep an old parameter name,
+   `#[param(flatten)]` to embed a parameter group. Fields without `#[param]` start at
+   `Default::default()`; the optional `init` hook runs after construction.
+2. **`accelerando_core::ta`** - tested, causal incremental tools: `Ema`, `Sma`, `Atr`,
+   `RollingStats` (z-score against the *prior* window), `RollingExtrema`, `Lookback`,
+   `SessionVwap` (sigma bands), `VolumeProfile` (tick-keyed, POC, value area, rolling removal),
+   `ZigZag`, `Cross`. **`accelerando_core::session`** - `SessionClock` (ET day/minute/new-day),
+   `SessionFilter`, `TradeDiscipline`.
+3. **`Strategy::requirements()`** - indicators to run (`IndicatorRequest::new("big_trades")
+   .param("k", v)`), the `Footprint::values` keys read (the runner fails fast if a key is never
+   published and lists the keys that are), and the bar type it was designed for.
+   `fp.value(key)` / `fp.tag(key)` / `fp.eastern_day_minute()` are shorthand accessors.
+4. **`accelerando-app`** - `App` handles data -> cached footprints -> parallel runs -> table ->
+   web viewer / JSON dumps. `--validate` adds an IS/OOS split (the IS winner's OOS result and the
+   IS->OOS rank correlation), walk-forward selection with `--grid`, slippage sensitivity, and a
+   random-entry baseline matched on trade count / holding time / session minutes.
+
+Unit tests: `accelerando_core::testkit` builds synthetic bars (`bar(ts).ohlc(..).value(k, v)`,
+`bars_from_closes`, `eastern_ts`) and steps a strategy exactly like the engine (`drive`,
+`drive_with`, `backtest`).
+
+Accounting note: `Trade.pnl` is the full round-trip net (entry **and** exit commission), so the
+trade log sums to the equity change. Capped grids (`max_evals` below the full grid size) are
+sampled evenly across the whole grid instead of truncated.
+
 ## Reusing prepared data across strategies
 
 Parsing and aggregating a big feed is the expensive part. For multi-strategy or multi-parameter
@@ -147,8 +229,11 @@ Parameter validation is strict: `build` panics on unknown param names or illegal
   orders; `output.orders.exit_position()` requests a next-bar position exit.
 - **Fill model**: intent set on bar `i` fills at bar `i+1`'s open; stops/targets are checked
   intrabar against high/low. Within one bar the stop is assumed to hit before the target
-  (conservative). If the open gaps through the stop, the fill is at the **open price** — never at
-  a price the market did not trade.
+  (conservative). If the open gaps through the stop, the stop triggers at the **open price** —
+  never at a price the market did not trade. Slippage (`slippage_ticks`) is charged on every taker
+  fill: market entries/exits **and triggered stops** (a stop becomes a market order). Targets are
+  resting limits and fill exactly at the target. Tick brackets are anchored on the actual
+  (slipped) entry fill, like an ATM bracket.
 - **Line outputs use series**: `output.visuals.series("vwap", v)` / `series_colored` store one series per run
   in `BacktestResult.series`; the studio renders them as polylines with a legend grouped by id
   prefix. Do not push a `Plot::Line` per bar.

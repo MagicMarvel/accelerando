@@ -1,0 +1,14 @@
+[package]
+name = "accelerando-derive"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Derive macro for Accelerando's Configurable trait: one struct declares the ParamSpec and the constructor."
+
+[lib]
+proc-macro = true
+
+[dependencies]
+proc-macro2 = "1"
+quote = "1"
+syn = { version = "2", features = ["full"] }

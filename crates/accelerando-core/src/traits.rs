@@ -4,6 +4,7 @@
 use crate::broker::{PortfolioSnapshot, StrategyOutput};
 use crate::event::{EventInterest, OrderFlowEvent};
 use crate::footprint::Footprint;
+use crate::params::{ParamValue, Params};
 use crate::progress::ProgressHandle;
 use crate::result::Trade;
 
@@ -59,8 +60,69 @@ pub trait Indicator {
     fn name(&self) -> &str;
 }
 
+/// One indicator a strategy needs, by registry name plus parameter overrides.
+#[derive(Clone, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct IndicatorRequest {
+    pub name: String,
+    pub params: Params,
+}
+
+impl IndicatorRequest {
+    pub fn new(name: &str) -> Self {
+        Self {
+            name: name.to_string(),
+            params: Params::default(),
+        }
+    }
+
+    pub fn param(mut self, key: &str, value: impl Into<ParamValue>) -> Self {
+        self.params.set(key, value.into());
+        self
+    }
+}
+
+/// What a strategy needs from the pipeline. Runners (e.g. `accelerando-app`) use this to build the
+/// indicator list automatically and to fail fast instead of silently never trading.
+#[derive(Clone, Debug, Default)]
+pub struct StrategyRequirements {
+    /// Indicators to run during data preparation.
+    pub indicators: Vec<IndicatorRequest>,
+    /// `Footprint::values` keys the strategy reads. A runner checks that each key is published
+    /// on at least one footprint, which catches typos and missing indicators.
+    pub values: Vec<String>,
+    /// The bar type the strategy was designed for, as an aggregator spec such as `"time:60"` or
+    /// `"range:30"`. Runners warn when a different one is used.
+    pub bars: Option<String>,
+}
+
+impl StrategyRequirements {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn indicator(mut self, request: IndicatorRequest) -> Self {
+        self.indicators.push(request);
+        self
+    }
+
+    pub fn values(mut self, keys: &[&str]) -> Self {
+        self.values.extend(keys.iter().map(|k| k.to_string()));
+        self
+    }
+
+    pub fn bars(mut self, spec: &str) -> Self {
+        self.bars = Some(spec.to_string());
+        self
+    }
+}
+
 /// Decides position changes from enriched footprints.
 pub trait Strategy {
+    /// Indicators, published value keys and bar type this strategy depends on.
+    fn requirements(&self) -> StrategyRequirements {
+        StrategyRequirements::default()
+    }
+
     /// Event classes this strategy consumes through [`Strategy::on_event`].
     ///
     /// Footprint engines require NONE; run_prepared_event_backtest dispatches raw events.

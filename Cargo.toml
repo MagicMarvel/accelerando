@@ -2,6 +2,7 @@
 resolver = "2"
 members = [
     "crates/accelerando-core",
+    "crates/accelerando-derive",
     "crates/accelerando-example-sources",
     "crates/accelerando-example-aggregators",
     "crates/accelerando-example-indicators",
@@ -11,6 +12,7 @@ members = [
     "crates/accelerando-ml",
     "crates/accelerando-web",
     "crates/accelerando",
+    "crates/accelerando-app",
 ]
 
 [workspace.package]
@@ -22,6 +24,7 @@ description = "Accelerando — high-speed, pluggable footprint backtesting frame
 
 [workspace.dependencies]
 accelerando-core = { path = "crates/accelerando-core" }
+accelerando-derive = { path = "crates/accelerando-derive" }
 accelerando-example-sources = { path = "crates/accelerando-example-sources" }
 accelerando-example-aggregators = { path = "crates/accelerando-example-aggregators" }
 accelerando-example-indicators = { path = "crates/accelerando-example-indicators" }
@@ -31,6 +34,7 @@ accelerando-hyperopt = { path = "crates/accelerando-hyperopt" }
 accelerando-ml = { path = "crates/accelerando-ml" }
 accelerando-web = { path = "crates/accelerando-web" }
 accelerando = { path = "crates/accelerando" }
+accelerando-app = { path = "crates/accelerando-app" }
 
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

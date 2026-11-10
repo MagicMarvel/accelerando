@@ -7,7 +7,7 @@ pub use accelerando_core::Registry;
 pub use accelerando_core::{ParamSpec, ParamValue, Params};
 
 use accelerando_core::Registry as CoreRegistry;
-use accelerando_hyperopt::{generate_candidates, Algo, SearchSpace};
+use accelerando_hyperopt::{generate_candidates, grid_size, Algo, SearchSpace};
 
 use accelerando_example_aggregators::register_all as register_aggregators;
 use accelerando_example_indicators::register_all as register_indicators;
@@ -85,6 +85,23 @@ pub fn strategy_param_grid(
             spec.resolve(&overrides)
         })
         .collect()
+}
+
+/// Size of the full (uncapped) grid `strategy_param_grid` would sample from, after pins.
+/// When it exceeds `max_evals`, the grid is sampled evenly rather than enumerated.
+pub fn strategy_grid_size(
+    registry: &CoreRegistry,
+    strategy: &str,
+    assignments: &[String],
+) -> Result<u128, String> {
+    let spec = registry
+        .strategy_spec(strategy)
+        .ok_or_else(|| format!("unknown strategy `{strategy}`"))?;
+    let pins = spec.parse_assignments(assignments)?;
+    let pinned: Vec<&str> = pins.0.keys().map(String::as_str).collect();
+    let mut space = SearchSpace::new();
+    space.add_spec_excluding("strategy", &spec, &pinned);
+    Ok(grid_size(&space))
 }
 
 #[cfg(test)]

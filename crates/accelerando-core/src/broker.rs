@@ -430,9 +430,12 @@ impl Broker {
 
     fn record_close(&mut self, pos: Position, px: f64, ts: i64, reason: TradeReason) {
         let gross = (px - pos.entry_px) * pos.dir as f64 * pos.qty * self.multiplier;
-        let fees = self.commission(pos.qty); // exit-side commission
-        let pnl = gross - fees;
-        self.realized += pnl;
+        let exit_fee = self.commission(pos.qty);
+        // Entry commission already hit `realized` when the lot opened; the trade record still
+        // reports the full round-trip net so per-trade stats (win rate, PF, avg) match equity.
+        let entry_fee = self.commission(pos.qty);
+        self.realized += gross - exit_fee;
+        let pnl = gross - exit_fee - entry_fee;
         self.trades.push(Trade {
             entry_ts_ns: pos.entry_ts,
             exit_ts_ns: ts,
@@ -603,13 +606,15 @@ impl Broker {
             let on_entry_bar = pos.entry_ts == fp.ts_first_ns;
             let target_eligible = !(on_entry_bar && pos.entered_intrabar);
             // Conservative ordering: assume the stop is touched before the target within a bar.
-            // A bar that OPENS through the stop fills at that open (gap-through) — a resting
-            // stop cannot fill at a price the market never traded. Targets stay at the target
-            // price, which is the conservative side for a resting limit.
+            // A bar that OPENS through the stop triggers at that open (gap-through) — a resting
+            // stop cannot fill at a price the market never traded. A triggered stop becomes a
+            // market order, so it pays `slippage_ticks` against the position (same as the
+            // event-driven path and every other taker fill). Targets are resting limits: they fill
+            // at the target price with no slippage.
             let exit = if pos.dir > 0 {
                 if let Some(stop) = pos.stop {
                     if fp.low <= stop {
-                        Some((fp.open.min(stop), TradeReason::StopLoss))
+                        Some((self.slip(fp.open.min(stop), -1), TradeReason::StopLoss))
                     } else {
                         None
                     }
@@ -628,7 +633,7 @@ impl Broker {
             } else {
                 if let Some(stop) = pos.stop {
                     if fp.high >= stop {
-                        Some((fp.open.max(stop), TradeReason::StopLoss))
+                        Some((self.slip(fp.open.max(stop), 1), TradeReason::StopLoss))
                     } else {
                         None
                     }
@@ -832,12 +837,13 @@ impl Broker {
     ) -> Result<(Vec<Plot>, Vec<(String, f64, Option<String>)>), String> {
         let (actions, plots, series) = output.into_parts();
         for action in actions {
+            let independent_add = matches!(&action, OrderAction::Add(_));
             match action {
                 OrderAction::Replace(intent) | OrderAction::Add(intent) => {
                     if intent.execution != EntryExecution::Market {
                         return Err("event execution currently supports market entries only".into());
                     }
-                    if !self.positions.is_empty() {
+                    if !independent_add && !self.positions.is_empty() {
                         return Err("event execution supports one position at a time".into());
                     }
                     if !intent.qty.is_finite() || intent.qty <= 0.0 {
@@ -910,6 +916,46 @@ fn price_in_band(px: f64, min: Option<f64>, max: Option<f64>) -> bool {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn event_adds_open_independent_lots_in_both_directions_and_exit_separately() {
+        let mut b = Broker::new(BrokerConfig {
+            slippage_ticks: 0.0,
+            commission_per_contract: 2.0,
+            ..BrokerConfig::default()
+        });
+        b.set_contract(1.0, 10.0);
+        let mut output = StrategyOutput::new(false);
+        output.orders.add(EntryIntent::market(TradeSide::Long, 1.0).risk_reward_bracket(98.0, 1.0).tagged("A"));
+        output.orders.add(EntryIntent::market(TradeSide::Long, 2.0).risk_reward_bracket(99.0, 1.0).tagged("B"));
+        output.orders.add(EntryIntent::market(TradeSide::Short, 1.0).risk_reward_bracket(104.0, 1.0).tagged("C"));
+        b.apply_event_output(output, 10, 100.0).unwrap();
+        assert_eq!(b.portfolio_snapshot().position_count, 3);
+        assert!(b.trades.is_empty());
+        let mut replacement = StrategyOutput::new(false);
+        replacement.orders.replace(EntryIntent::market(TradeSide::Long, 1.0).risk_reward_bracket(98.0, 1.0));
+        assert!(b.apply_event_output(replacement, 10, 100.0).is_err());
+        assert_eq!(b.portfolio_snapshot().position_count, 3);
+        b.on_trade_event(11, 101.0);
+        assert_eq!(b.portfolio_snapshot().position_count, 2);
+        assert_eq!(b.trades[0].label.as_deref(), Some("B"));
+        assert_eq!(b.trades[0].pnl, 12.0);
+        b.on_trade_event(12, 102.0);
+        assert_eq!(b.portfolio_snapshot().position_count, 1);
+        assert_eq!(b.trades[1].label.as_deref(), Some("A"));
+        assert_eq!(b.trades[1].pnl, 16.0);
+        b.on_trade_event(13, 104.0);
+        assert_eq!(b.portfolio_snapshot().position_count, 0);
+        assert_eq!(b.trades[2].label.as_deref(), Some("C"));
+        assert_eq!(b.trades[2].pnl, -44.0);
+        assert_eq!(b.trades[2].reason, TradeReason::StopLoss);
+        assert!(b.trades.iter().all(|t| t.entry_ts_ns == 10));
+        // Entry fees hit account cash on entry; Trade.pnl carries both sides, so the trade log
+        // sums to the equity change.
+        assert_eq!(b.trades.iter().map(|t| t.pnl).sum::<f64>(), -16.0);
+        b.sample_event_equity(13, 104.0);
+        assert_eq!(b.equity.last().unwrap().equity, b.starting_equity() - 16.0);
+    }
+
     use super::*;
     use crate::footprint::Level;
     use std::collections::BTreeMap;
@@ -1021,6 +1067,48 @@ mod tests {
         broker.on_new_footprint(&fp(101.0, 101.0, 101.0, 101.0, 2));
         assert_eq!(broker.position_count(), 1);
         assert!(broker.trades.is_empty());
+    }
+
+    /// Enter 1 lot at the next open (with 1 tick slippage) and return the broker.
+    fn slipped_entry(side: TradeSide, stop: f64, target: f64) -> Broker {
+        let mut broker = Broker::new(BrokerConfig {
+            slippage_ticks: 1.0,
+            ..BrokerConfig::default()
+        });
+        broker.set_contract(1.0, 1.0);
+        let mut output = StrategyOutput::new(false);
+        output
+            .orders
+            .replace(EntryIntent::market(side, 1.0).tick_bracket(stop, target));
+        broker.apply_strategy_output(output);
+        broker.on_new_footprint(&fp(100.0, 100.0, 100.0, 100.0, 1));
+        broker
+    }
+
+    #[test]
+    fn triggered_stops_pay_slippage_but_targets_do_not() {
+        // Long fills at 101 (open 100 + 1 tick); bracket anchored on the fill: stop 97, target 105.
+        let mut b = slipped_entry(TradeSide::Long, 4.0, 4.0);
+        assert_eq!(b.portfolio_snapshot().open_position.unwrap().entry_px, 101.0);
+        b.on_new_footprint(&fp(99.0, 99.0, 96.0, 98.0, 2)); // touches the stop intrabar
+        assert_eq!(b.trades[0].reason, TradeReason::StopLoss);
+        assert_eq!(b.trades[0].exit_px, 96.0, "stop 97 minus 1 tick slippage");
+
+        // Gap through the stop: triggers at the open (95), then slips to 94.
+        let mut b = slipped_entry(TradeSide::Long, 4.0, 4.0);
+        b.on_new_footprint(&fp(95.0, 95.5, 94.5, 95.0, 2));
+        assert_eq!(b.trades[0].exit_px, 94.0);
+
+        // Short mirror: fills at 99, stop 103 -> exits at 104.
+        let mut b = slipped_entry(TradeSide::Short, 4.0, 4.0);
+        b.on_new_footprint(&fp(101.0, 103.5, 100.5, 101.0, 2));
+        assert_eq!(b.trades[0].exit_px, 104.0);
+
+        // Target is a resting limit: exact target price.
+        let mut b = slipped_entry(TradeSide::Long, 4.0, 4.0);
+        b.on_new_footprint(&fp(102.0, 105.0, 101.5, 104.0, 2));
+        assert_eq!(b.trades[0].reason, TradeReason::TakeProfit);
+        assert_eq!(b.trades[0].exit_px, 105.0);
     }
 
     #[test]

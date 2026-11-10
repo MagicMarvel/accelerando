@@ -29,6 +29,19 @@ dependencies = [
  "accelerando-example-strategy",
  "accelerando-hyperopt",
  "accelerando-orderflow-features",
+ "accelerando-web",
+]
+
+[[package]]
+name = "accelerando-app"
+version = "0.1.0"
+dependencies = [
+ "accelerando",
+ "accelerando-core",
+ "accelerando-web",
+ "rayon",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
@@ -36,10 +49,20 @@ name = "accelerando-core"
 version = "0.1.0"
 dependencies = [
  "ab_glyph",
+ "accelerando-derive",
  "image",
  "imageproc",
  "serde",
  "serde_json",
+]
+
+[[package]]
+name = "accelerando-derive"
+version = "0.1.0"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn",
 ]
 
 [[package]]
@@ -63,6 +86,8 @@ name = "accelerando-example-sources"
 version = "0.1.0"
 dependencies = [
  "accelerando-core",
+ "serde_json",
+ "ureq",
 ]
 
 [[package]]

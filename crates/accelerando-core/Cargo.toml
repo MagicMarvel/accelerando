@@ -10,6 +10,7 @@ default = []
 footprint-image = ["dep:ab_glyph", "dep:image", "dep:imageproc"]
 
 [dependencies]
+accelerando-derive = { workspace = true }
 ab_glyph = { version = "0.2", optional = true }
 image = { version = "0.25", default-features = false, features = ["jpeg"], optional = true }
 imageproc = { version = "0.25", optional = true }

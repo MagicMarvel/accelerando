@@ -7,3 +7,6 @@ description = "CSV data source adapters for Accelerando examples."
 
 [dependencies]
 accelerando-core = { workspace = true }
+serde_json = { workspace = true }
+ureq = "2"
+

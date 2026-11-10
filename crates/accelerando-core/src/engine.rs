@@ -180,6 +180,44 @@ pub struct PreparedBacktestData {
     pub multiplier: f64,
 }
 
+impl PreparedBacktestData {
+    /// Wrap already-built footprints (tests, synthetic data, re-slicing).
+    pub fn from_footprints(footprints: Vec<Footprint>, tick_size: f64, multiplier: f64) -> Self {
+        Self {
+            footprints,
+            liquidity_heatmap: LiquidityHeatmap::default(),
+            tick_size,
+            multiplier,
+        }
+    }
+
+    /// Check that every key in `keys` is published in `Footprint::values` on at least one bar.
+    ///
+    /// Strategies read indicator outputs by string key; a typo or a missing indicator otherwise
+    /// shows up only as "the strategy never trades". The error lists the keys that do exist.
+    pub fn check_values(&self, keys: &[String]) -> Result<(), String> {
+        let missing: Vec<&String> = keys
+            .iter()
+            .filter(|key| !self.footprints.iter().any(|fp| fp.values.contains_key(*key)))
+            .collect();
+        if missing.is_empty() {
+            return Ok(());
+        }
+        let mut available: Vec<&str> = self
+            .footprints
+            .iter()
+            .flat_map(|fp| fp.values.keys().map(String::as_str))
+            .collect();
+        available.sort_unstable();
+        available.dedup();
+        Err(format!(
+            "footprint value key(s) never published: {}. Is the indicator in the pipeline / the key spelled right? Published keys: {}",
+            missing.iter().map(|k| format!("`{k}`")).collect::<Vec<_>>().join(", "),
+            if available.is_empty() { "(none)".to_string() } else { available.join(", ") }
+        ))
+    }
+}
+
 /// Run a single backtest end to end (no progress reporting).
 pub fn run_backtest(pipeline: Pipeline) -> BacktestResult {
     run_backtest_progress(pipeline, None)

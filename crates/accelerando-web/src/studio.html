@@ -410,14 +410,46 @@ function zoomY(name,factor,frac){
 }
 function drawTimeAxis(ctx,vis,L,T,pw,ph,W,R,tsKey="ts_last_ns",xStep=pw/Math.max(1,vis.length)){
   if(!vis.length)return;
-  ctx.save(); ctx.strokeStyle=COLORS.grid; ctx.fillStyle=COLORS.axis; ctx.font="10px Segoe UI, Arial"; ctx.textAlign="center"; ctx.textBaseline="top";
-  const ticks=Math.min(5,vis.length);
-  for(let i=0;i<ticks;i++){
-    const idx=ticks===1?0:Math.round((vis.length-1)*i/(ticks-1));
-    const x=L+(idx+0.5)*xStep;
-    const ts=vis[idx][tsKey]??vis[idx].ts_last_ns??vis[idx].ts_ns;
-    ctx.beginPath();ctx.moveTo(x,T+ph);ctx.lineTo(x,T+ph+4);ctx.stroke();
-    ctx.fillText(fmtAxisTs(ts),x,T+ph+7);
+  ctx.save(); ctx.textBaseline="top"; ctx.textAlign="center";
+  const minPxPerTick = 65;
+  const maxTicks = Math.max(4, Math.floor(pw / minPxPerTick));
+  const barStep = Math.max(1, Math.ceil(vis.length / maxTicks));
+  const axisY = T + ph;
+  const pad = n => String(n).padStart(2, "0");
+  let prevDayKey = null;
+
+  for(let i=0; i<vis.length; i+=barStep){
+    const x = L + (i + 0.5) * xStep;
+    if(x < L - 20 || x > L + pw + 20) continue;
+    const ts = vis[i][tsKey] ?? vis[i].ts_last_ns ?? vis[i].ts_ns;
+    if(ts == null) continue;
+    const d = new Date(Number(ts) / 1e6);
+    const year = d.getFullYear();
+    const month = pad(d.getMonth() + 1);
+    const day = pad(d.getDate());
+    const hours = pad(d.getHours());
+    const mins = pad(d.getMinutes());
+
+    const dayKey = `${year}-${month}-${day}`;
+    const isNewDay = (prevDayKey !== null && prevDayKey !== dayKey) || (i === 0);
+    prevDayKey = dayKey;
+
+    ctx.strokeStyle = isNewDay ? "rgba(59, 130, 246, 0.25)" : "rgba(148, 163, 184, 0.12)";
+    ctx.lineWidth = isNewDay ? 1.2 : 1;
+    ctx.setLineDash(isNewDay ? [4, 4] : [2, 4]);
+    ctx.beginPath(); ctx.moveTo(x, T); ctx.lineTo(x, axisY); ctx.stroke();
+    ctx.setLineDash([]);
+
+    ctx.strokeStyle = isNewDay ? "#3b82f6" : COLORS.grid;
+    ctx.beginPath(); ctx.moveTo(x, axisY); ctx.lineTo(x, axisY + 4); ctx.stroke();
+
+    ctx.font = isNewDay ? "600 10px Segoe UI, Arial" : "10px Segoe UI, Arial";
+    ctx.fillStyle = isNewDay ? "#2563eb" : "#475569";
+    ctx.fillText(`${month}-${day}`, x, axisY + 4);
+
+    ctx.font = "10px Segoe UI, Arial";
+    ctx.fillStyle = isNewDay ? "#1e293b" : "#64748b";
+    ctx.fillText(`${hours}:${mins}`, x, axisY + 16);
   }
   ctx.restore();
 }
@@ -551,7 +583,13 @@ async function loadResult(){
     const speculative=request(nextFpFrom,nextEqFrom);
     const page=await r.json();
     if(page&&page.error) throw new Error(page.error);
+    if(page.total_fps===undefined&&page.footprints!==undefined){
+      data=page;
+      speculative.catch(()=>{});
+      break;
+    }
     if(!data){ data=Object.assign({},page.meta||{}); data.footprints=[]; data.equity=[]; }
+
     for(const fp of page.footprints||[]) data.footprints.push(fp);
     for(const eq of page.equity||[]) data.equity.push(eq);
     if(st) st.textContent=`loading result ${data.footprints.length}/${page.total_fps} bars`;
@@ -619,7 +657,7 @@ function overlayCategories(){
     else if(p.kind==="Marker"||p.kind==="MarkerAt")markerGroups.add(markerCat(p));
     else if(p.kind==="Line")markerGroups.add(lineCat(p));
     else if(p.kind==="LineSegment")markerGroups.add(segmentCat(p));
-    else if(p.kind==="VolumeProfile")markerGroups.add(volumeProfileCat(p));
+    else if(p.kind==="VolumeProfile"||p.kind==="VolumeProfileAt")markerGroups.add(volumeProfileCat(p));
     else if(p.kind==="PriceBox"||p.kind==="PriceBoxAt")markerGroups.add(priceBoxCat(p));
   } }
   for(const s of runSeries)markerGroups.add(lineCat(s));
@@ -976,15 +1014,17 @@ function drawImbalanceLine(ctx,p,vis,i,x,yy,L,pw,xStep){
 function drawOscillators(ctx,L,T,pw,ph,xStep,s,e){
   const lines=runSeries.filter(sr=>(sr.id||"").startsWith("oscillator.")&&overlayOn(lineCat(sr)));
   const visible=lines.map(sr=>({...sr,points:(sr.points||[]).filter(([i,v])=>i>=s&&i<e&&isFinite(v))}));
-  let extent=1;
-  for(const sr of visible)for(const [,v] of sr.points)extent=Math.max(extent,Math.abs(v));
-  const y=v=>T+20+(extent-v)/(2*extent)*Math.max(1,ph-30);
+  let extent=1,nonNeg=visible.length>0;
+  for(const sr of visible)for(const [,v] of sr.points){extent=Math.max(extent,Math.abs(v));if(v<0)nonNeg=false;}
+  // All-non-negative oscillators (e.g. efficiency ratio 0..1) use a [0, extent] scale.
+  const lo=nonNeg?0:-extent;
+  const y=v=>T+20+(extent-v)/(extent-lo)*Math.max(1,ph-30);
   ctx.save();ctx.fillStyle="#f8fafc";ctx.fillRect(L,T,pw,ph);
   ctx.strokeStyle="#cbd5e1";ctx.strokeRect(L,T,pw,ph);
   ctx.font="10px Segoe UI, Arial";ctx.fillStyle="#475569";
-  ctx.fillText("Delta force / rolling quantile (minute-close samples)",L+6,T+12);
-  ctx.fillText(extent.toFixed(1),L+pw+4,T+24);ctx.fillText((-extent).toFixed(1),L+pw+4,T+ph-5);
-  ctx.beginPath();ctx.moveTo(L,y(0));ctx.lineTo(L+pw,y(0));ctx.stroke();
+  ctx.fillText(nonNeg?visible.map(sr=>sr.id.slice("oscillator.".length)).join(" / "):"Delta force / rolling quantile (minute-close samples)",L+6,T+12);
+  ctx.fillText(extent.toFixed(1),L+pw+4,T+24);ctx.fillText(lo.toFixed(1),L+pw+4,T+ph-5);
+  if(!nonNeg){ctx.beginPath();ctx.moveTo(L,y(0));ctx.lineTo(L+pw,y(0));ctx.stroke();}
   ctx.beginPath();ctx.rect(L,T+17,pw,ph-17);ctx.clip();
   for(const sr of visible){
     ctx.strokeStyle=sr.color||"#a78bfa";ctx.lineWidth=1.5;
@@ -1137,24 +1177,32 @@ function drawPlotMarkers(ctx,vis,L,T,pw,ph,xStep,y,labelLayout){
   }
   ctx.restore();
 }
-function drawVolumeProfiles(ctx,vis,L,T,pw,ph,xStep,y,tick,labelLayout){
+// Strategy-emitted profiles. Scan the full result (like drawLineSegments) so a profile is drawn
+// whenever its bar range overlaps the viewport, even if the emitting bar is off-screen.
+// VolumeProfileAt shifts the right edge `bars_back` bars to the left of the emitting bar.
+function drawVolumeProfiles(ctx,vis,L,T,pw,ph,xStep,y,tick,labelLayout,s,e){
   if(!overlayOn("entry_vp")&&!overlayOn("volume_profiles"))return;
   ctx.save(); ctx.font="10px Segoe UI, Arial"; ctx.textBaseline="middle";
-  for(let i=0;i<vis.length;i++){
-    const b=vis[i], x=L+i*xStep+xStep/2;
-    for(const p of (b.plots||[])){
-      if(p.kind!=="VolumeProfile"||!(p.levels||[]).length)continue;
+  // A profile may be re-emitted under the same id while it grows; draw only its last version.
+  const lastVp=new Map();
+  for(let gi=0;gi<fps.length;gi++)for(const p of (fps[gi].plots||[]))if((p.kind==="VolumeProfile"||p.kind==="VolumeProfileAt")&&p.id)lastVp.set(p.id,gi);
+  for(let gi=0;gi<fps.length;gi++){
+    for(const p of (fps[gi].plots||[])){
+      if((p.kind!=="VolumeProfile"&&p.kind!=="VolumeProfileAt")||!(p.levels||[]).length)continue;
+      if(p.id&&lastVp.get(p.id)!==gi)continue;
       if(!overlayOn(volumeProfileCat(p)))continue;
-      let maxProfile=0,maxDelta=0;
+      const right=gi-(p.kind==="VolumeProfileAt"?(p.bars_back||0):0);
+      const span=Math.max(1,Math.round(p.span||1)), left=right-span+1;
+      if(right<s||left>=e)continue;
+      let maxProfile=0,maxDelta=0,pocLv=p.levels[0];
       for(const lv of p.levels){
         const buy=lv.buy_vol||0,sell=lv.sell_vol||0;
         maxProfile=Math.max(maxProfile,buy+sell);
         maxDelta=Math.max(maxDelta,Math.abs(buy-sell));
+        if(buy+sell>(pocLv.buy_vol||0)+(pocLv.sell_vol||0))pocLv=lv;
       }
       if(!(maxProfile>0))continue;
-      const span=Math.max(1,Math.round(p.span||1));
-      const x0=clamp(L+(i-span+1)*xStep,L,L+pw);
-      const x1=clamp(L+(i+1)*xStep,L,L+pw);
+      const x0=L+(left-s)*xStep, x1=L+(right-s+1)*xStep;
       const width=Math.max(18,x1-x0), half=width/2, mid=x0+width/2;
       let minY=Infinity,maxY=-Infinity;
       for(const lv of p.levels){
@@ -1168,13 +1216,15 @@ function drawVolumeProfiles(ctx,vis,L,T,pw,ph,xStep,y,tick,labelLayout){
         const deltaW=half*deltaN, profileW=half*profileN;
         ctx.fillStyle=delta>=0?COLORS.buy:COLORS.sell;
         ctx.fillRect(mid-deltaW,yy,Math.max(1,deltaW),hh);
-        ctx.fillStyle="#64748b";
+        ctx.fillStyle=lv===pocLv?"#f59e0b":"#64748b";
         ctx.fillRect(mid,yy,Math.max(1,profileW),hh);
       }
       if(isFinite(minY)&&isFinite(maxY)){
-        ctx.strokeStyle="rgba(17,24,39,0.55)"; ctx.setLineDash([3,2]);
-        ctx.strokeRect(mid-half,minY,width,Math.max(1,maxY-minY)); ctx.setLineDash([]);
-        if(xStep>=10){ drawLabel(ctx,"entry VP",mid,Math.max(T+10,minY-8),"#111827",labelLayout,{align:"center"}); }
+        const edge=p.color||"#111827";
+        ctx.strokeStyle=p.color?colorAlpha(p.color,0.9):"rgba(17,24,39,0.55)"; ctx.lineWidth=p.color?1.5:1; ctx.setLineDash([3,2]);
+        ctx.strokeRect(mid-half,minY,width,Math.max(1,maxY-minY)); ctx.setLineDash([]); ctx.lineWidth=1;
+        const vpLabel=p.text||(volumeProfileCat(p)==="entry_vp"?"entry VP":"VP");
+        if(xStep>=1&&width>=24){ drawLabel(ctx,vpLabel,mid,Math.max(T+10,minY-8),edge,labelLayout,{align:"center"}); }
       }
     }
   }
@@ -1353,11 +1403,28 @@ function drawFootprints(ctx,vis,L,T,ph,xStep,y,tick){
       ctx.fillRect(x0,T,barW,3);
       ctx.fillStyle=c; ctx.textAlign="center"; ctx.font=xStep>=46?"10px Segoe UI, Arial":"9px Segoe UI, Arial";
       const label=xStep>=46?`D ${fmt(totals.delta,0)}`:fmt(totals.delta,0);
-      ctx.fillText(label,x,Math.max(T+9,y(b.high)-10));
+
+      let maxLevelPx = b.high, minLevelPx = b.low;
+      if(b.ladder && b.ladder.length > 0){
+        for(const lv of b.ladder){
+          if(lv.price > maxLevelPx) maxLevelPx = lv.price;
+          if(lv.price < minLevelPx) minLevelPx = lv.price;
+        }
+      }
+      const topPixel = Math.min(y(b.high), y(maxLevelPx + tick/2));
+      const bottomPixel = Math.max(y(b.low), y(minLevelPx - tick/2));
+
+      ctx.textBaseline = "bottom";
+      const deltaY = Math.max(T + 12, topPixel - 10);
+      ctx.fillText(label, x, deltaY);
+
       if(xStep>=58){
         ctx.fillStyle="#64748b";
-        ctx.fillText(`${fmt(totals.sell,0)} / ${fmt(totals.buy,0)}`,x,Math.min(T+ph-8,y(b.low)+10));
+        ctx.textBaseline = "top";
+        const volumeY = Math.min(T + ph - 10, bottomPixel + 10);
+        ctx.fillText(`${fmt(totals.sell,0)} / ${fmt(totals.buy,0)}`, x, volumeY);
       }
+      ctx.textBaseline = "middle";
     }
   }
 }
@@ -1411,7 +1478,9 @@ function drawPrice(){
   if(chartMode==="heatmap"){ drawHeatmap(pctx,price,"price"); const [s,e]=viewRange(); $("range").textContent=`bars ${s+1}-${e} / ${fps.length}`; return; }
   const [s,e]=viewRange(); const vis=fps.slice(s,e); const L=PADL,R=AXIS_W,T=14,B=34,pw=Math.max(1,W-L-R),totalPh=Math.max(1,H-T-B),oscH=runSeries.some(sr=>(sr.id||"").startsWith("oscillator."))?Math.min(120,totalPh*.22):0,cvdH=cvdVisible?Math.max(90,Math.min(155,totalPh*.2)):0,paneGap=cvdVisible?6:0,ph=Math.max(80,totalPh-cvdH-paneGap-oscH),cvdT=T+ph+paneGap;
   let lo=Infinity,hi=-Infinity; for(const b of vis){lo=Math.min(lo,b.low);hi=Math.max(hi,b.high);}
-  const pad=Math.max(0.25,(hi-lo)*0.06); lo-=pad;hi+=pad; [lo,hi]=applyYZoom("price",lo,hi); yZoom.price.lo=lo; yZoom.price.hi=hi; const y=p=>T+(hi-p)/(hi-lo)*ph; const xStep=pw/Math.max(1,barsPerView); priceScale={s,e,L,T,pw,ph,lo,hi,xStep}; const cw=candleWidth(xStep); const tick=tickSizeFor(vis);
+  const xStep=pw/Math.max(1,barsPerView);
+  const padPercent=xStep>=FOOTPRINT_MIN_XSTEP?0.15:0.06;
+  const pad=Math.max(0.25,(hi-lo)*padPercent); lo-=pad;hi+=pad; [lo,hi]=applyYZoom("price",lo,hi); yZoom.price.lo=lo; yZoom.price.hi=hi; const y=p=>T+(hi-p)/(hi-lo)*ph; priceScale={s,e,L,T,pw,ph,lo,hi,xStep}; const cw=candleWidth(xStep); const tick=tickSizeFor(vis);
   if(xStep>=FOOTPRINT_MIN_XSTEP)ensureVisibleLadders(s,e);
   if(overlayOn("bands")){ let i=0; while(i<vis.length){ const band=(vis[i].plots||[]).find(p=>p.kind==="BackgroundBand"); const col=band?band.color:null; let j=i+1; const same=k=>{const bb=(vis[k].plots||[]).find(p=>p.kind==="BackgroundBand"); return (bb?bb.color:null)===col;}; while(j<vis.length&&same(j))j++; if(col){pctx.fillStyle=col; pctx.fillRect(L+i*xStep,T,(j-i)*xStep,ph);} i=j; } }
   pctx.strokeStyle=COLORS.grid; pctx.fillStyle=COLORS.axis; pctx.font="11px Segoe UI, Arial"; pctx.lineWidth=1;
@@ -1426,7 +1495,7 @@ function drawPrice(){
   drawImbalanceZones(pctx,L,T,pw,ph,xStep,y,s,e,labelLayout);
   drawAnnotations(pctx,L,T,pw,ph,xStep,y,s,e);
   drawDrawings(pctx,L,T,pw,ph,xStep,y,s,e);
-  drawVolumeProfiles(pctx,vis,L,T,pw,ph,xStep,y,tick,labelLayout);
+  drawVolumeProfiles(pctx,vis,L,T,pw,ph,xStep,y,tick,labelLayout,s,e);
   drawVpProfiles(pctx,L,T,pw,ph,xStep,y,tick,s,e,labelLayout);
   drawRunSeries(pctx,L,T,ph,xStep,y,s,e);
   drawPlotLines(pctx,vis,L,T,ph,xStep,y);

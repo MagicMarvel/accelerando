@@ -180,36 +180,58 @@ pub fn generate_candidates(
     }
 }
 
-/// Enumerate a (truncated) cartesian grid over the dimensions.
+/// Total number of points in the full cartesian grid (saturating).
+pub fn grid_size(space: &SearchSpace) -> u128 {
+    space
+        .dims
+        .iter()
+        .map(|d| axis_values(&d.range).len().max(1) as u128)
+        .fold(1u128, |acc, n| acc.saturating_mul(n))
+}
+
+/// Enumerate the cartesian grid over the dimensions.
+///
+/// When the full grid is larger than `cap`, `cap` points are taken at evenly spaced positions of
+/// the full enumeration (mixed-radix decoding), so *every* dimension still varies. (Plain
+/// truncation would only ever vary the first one or two dimensions and pin the rest at their
+/// minimum.)
 fn grid(space: &SearchSpace, cap: usize) -> Vec<Params> {
     let axes: Vec<(String, Vec<ParamValue>)> = space
         .dims
         .iter()
         .map(|d| (d.key.clone(), axis_values(&d.range)))
+        .filter(|(_, values)| !values.is_empty())
         .collect();
-
-    let mut out = vec![Params::default()];
-    for (key, values) in &axes {
-        let mut next = Vec::new();
-        for base in &out {
-            for v in values {
-                let mut p = base.clone();
-                p.0.insert(key.clone(), v.clone());
-                next.push(p);
-                if next.len() >= cap {
-                    break;
+    let total = axes
+        .iter()
+        .fold(1u128, |acc, (_, v)| acc.saturating_mul(v.len() as u128));
+    let cap = cap.max(1) as u128;
+    let count = total.min(cap);
+    let decode = |mut index: u128| {
+        let mut p = Params::default();
+        // Last axis varies fastest, matching the nested-loop order of a full enumeration.
+        for (key, values) in axes.iter().rev() {
+            let n = values.len() as u128;
+            p.0.insert(key.clone(), values[(index % n) as usize].clone());
+            index /= n;
+        }
+        p
+    };
+    (0..count)
+        .map(|k| {
+            let index = if total <= cap {
+                k
+            } else {
+                // Spread across the whole grid; include both corners when count > 1.
+                if count == 1 {
+                    0
+                } else {
+                    k.saturating_mul(total - 1) / (count - 1)
                 }
-            }
-            if next.len() >= cap {
-                break;
-            }
-        }
-        out = next;
-        if out.len() >= cap {
-            out.truncate(cap);
-        }
-    }
-    out
+            };
+            decode(index)
+        })
+        .collect()
 }
 
 fn axis_values(range: &ParamRange) -> Vec<ParamValue> {
@@ -236,5 +258,42 @@ fn axis_values(range: &ParamRange) -> Vec<ParamValue> {
         }
         ParamRange::Choice(opts) => opts.iter().cloned().map(ParamValue::Str).collect(),
         ParamRange::Fixed => Vec::new(),
+    }
+}
+
+#[cfg(test)]
+mod grid_sampling_tests {
+    use super::*;
+    use accelerando_core::ParamSpec;
+
+    #[test]
+    fn capped_grid_varies_every_dimension_and_full_grid_is_unchanged() {
+        let spec = ParamSpec::new()
+            .int("a", 0, 0, 99, 1)
+            .int("b", 0, 0, 9, 1)
+            .int("c", 0, 0, 9, 1);
+        let mut space = SearchSpace::new();
+        space.add_spec_excluding("s", &spec, &[]);
+        assert_eq!(grid_size(&space), 10_000);
+        let capped = generate_candidates(&space, Algo::Grid, 50, 0);
+        assert_eq!(capped.len(), 50);
+        for key in ["s.a", "s.b", "s.c"] {
+            let mut distinct: Vec<i64> = capped
+                .iter()
+                .map(|p| p.get(key).and_then(ParamValue::as_i64).unwrap())
+                .collect();
+            distinct.sort_unstable();
+            distinct.dedup();
+            assert!(distinct.len() > 3, "{key} barely varies: {distinct:?}");
+        }
+        let small = ParamSpec::new().int("x", 0, 0, 2, 1).int("y", 0, 0, 1, 1);
+        let mut space = SearchSpace::new();
+        space.add_spec_excluding("s", &small, &[]);
+        let full = generate_candidates(&space, Algo::Grid, 100, 0);
+        let pairs: Vec<(i64, i64)> = full
+            .iter()
+            .map(|p| (p.int("s.x", -1), p.int("s.y", -1)))
+            .collect();
+        assert_eq!(pairs, vec![(0, 0), (0, 1), (1, 0), (1, 1), (2, 0), (2, 1)]);
     }
 }
