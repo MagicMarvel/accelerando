@@ -7,7 +7,7 @@ use crate::footprint::Footprint;
 use crate::metrics::Metrics;
 use crate::progress::ProgressHandle;
 use crate::result::{BacktestResult, LiquidityHeatmap, LiquidityLevel, LiquiditySnapshot, Series};
-use crate::traits::{DataSource, FootprintAggregator, Indicator, Strategy};
+use crate::traits::{BarCtx, DataSource, FootprintAggregator, Indicator, Strategy};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
@@ -434,9 +434,12 @@ pub fn run_prepared_backtest(
             let trade = broker.trades[i].clone();
             strategy.on_trade_closed(&trade);
         }
-        let portfolio = broker.portfolio_snapshot();
+        let ctx = BarCtx {
+            bar: bar_index,
+            portfolio: broker.portfolio_snapshot(),
+        };
         let mut output = StrategyOutput::new(keep_footprints);
-        strategy.on_footprint(source_fp, &portfolio, &mut output);
+        strategy.on_footprint(source_fp, &ctx, &mut output);
         let (plots, points) = broker.apply_strategy_output(output);
         series.extend(bar_index, points);
         if keep_footprints {
@@ -531,9 +534,12 @@ pub fn run_backtest_progress(
         }
         // Strategy reacts and sets intent for the next bar.
         {
-            let portfolio = broker.portfolio_snapshot();
+            let ctx = BarCtx {
+                bar: history.len(),
+                portfolio: broker.portfolio_snapshot(),
+            };
             let mut output = StrategyOutput::new(keep_footprints);
-            strategy.on_footprint(&fp, &portfolio, &mut output);
+            strategy.on_footprint(&fp, &ctx, &mut output);
             let (plots, points) = broker.apply_strategy_output(output);
             series.extend(history.len(), points);
             fp.plots.extend(plots);

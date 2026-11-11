@@ -8,7 +8,7 @@
 
 use accelerando_core::ta::{Cross, CrossDir, Ema, RollingStats, SessionVwap};
 use accelerando_core::{
-    Configurable, EntryIntent, Footprint, PortfolioSnapshot, SessionClock, SessionFilter, Strategy,
+    BarCtx, Configurable, EntryIntent, Footprint, SessionClock, SessionFilter, Strategy,
     StrategyOutput, StrategyRequirements, TradeDiscipline, TradeSide,
 };
 
@@ -51,7 +51,7 @@ impl Strategy for VwapPullback {
         StrategyRequirements::new().bars("time:60")
     }
 
-    fn on_footprint(&mut self, fp: &Footprint, pf: &PortfolioSnapshot, out: &mut StrategyOutput) {
+    fn on_footprint(&mut self, fp: &Footprint, ctx: &BarCtx, out: &mut StrategyOutput) {
         let now = self.clock.update(fp.ts_last_ns);
         self.discipline.on_bar(now.day);
 
@@ -66,7 +66,7 @@ impl Strategy for VwapPullback {
         out.visuals.series("vwap", vwap);
         out.visuals.series_colored("ema_fast", fast, "#60a5fa");
 
-        if let Some(pos) = pf.open_position.as_ref() {
+        if let Some(pos) = ctx.open_position.as_ref() {
             if pos.bars_held >= self.max_hold_bars {
                 out.orders.exit_position();
             }
@@ -74,7 +74,7 @@ impl Strategy for VwapPullback {
         }
         let Some(vol_z) = vol_z else { return };
         if !self.session.allows(now.minute)
-            || !self.discipline.can_enter(pf.position, pf.pending_count)
+            || !self.discipline.can_enter(ctx.position, ctx.pending_count)
             || vol_z < self.min_volume_z
         {
             return;

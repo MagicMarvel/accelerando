@@ -103,7 +103,7 @@ fn main() {
 
 ```rust
 use accelerando_core::ta::{Cross, CrossDir, Ema, SessionVwap};
-use accelerando_core::{Configurable, EntryIntent, Footprint, PortfolioSnapshot, SessionClock,
+use accelerando_core::{BarCtx, Configurable, EntryIntent, Footprint, SessionClock,
     SessionFilter, Strategy, StrategyOutput, StrategyRequirements, TradeDiscipline, TradeSide};
 
 #[derive(Configurable)]                     // 1
@@ -126,7 +126,7 @@ impl Strategy for MyStrategy {
     fn requirements(&self) -> StrategyRequirements {   // 3
         StrategyRequirements::new().bars("time:60")    // .indicator(..) / .values(&[..])
     }
-    fn on_footprint(&mut self, fp: &Footprint, pf: &PortfolioSnapshot, out: &mut StrategyOutput) {
+    fn on_footprint(&mut self, fp: &Footprint, ctx: &BarCtx, out: &mut StrategyOutput) {
         let now = self.clock.update(fp.ts_last_ns);    // 2
         self.discipline.on_bar(now.day);
         let vwap = self.vwap.update_bar(now.day, fp);
@@ -210,7 +210,7 @@ let strategy = registry.build_strategy("my_strategy", &Params::default()).unwrap
 
 ## 写策略时值得知道的机制
 
-- **读写边界**：`Strategy::on_footprint` 接收只读 `PortfolioSnapshot` 和可写
+- **读写边界**：`Strategy::on_footprint` 接收只读 `BarCtx`（全局 K 线编号 `ctx.bar` + `PortfolioSnapshot`，可直接解引用）和可写
   `StrategyOutput`；账户状态从 `portfolio` 读取，订单写入 `output.orders`，纯绘图写入
   `output.visuals`。
 - **持仓可见**：`portfolio.open_position` 包含 `PositionInfo`（方向、均价、持有 bar 数、当前止损

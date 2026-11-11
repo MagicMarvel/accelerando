@@ -108,7 +108,7 @@ version is `crates/accelerando-app/examples/quickstart.rs`.
 
 ```rust
 use accelerando_core::ta::{Cross, CrossDir, Ema, SessionVwap};
-use accelerando_core::{Configurable, EntryIntent, Footprint, PortfolioSnapshot, SessionClock,
+use accelerando_core::{BarCtx, Configurable, EntryIntent, Footprint, SessionClock,
     SessionFilter, Strategy, StrategyOutput, StrategyRequirements, TradeDiscipline, TradeSide};
 
 #[derive(Configurable)]                     // 1
@@ -131,7 +131,7 @@ impl Strategy for MyStrategy {
     fn requirements(&self) -> StrategyRequirements {   // 3
         StrategyRequirements::new().bars("time:60")    // .indicator(..) / .values(&[..])
     }
-    fn on_footprint(&mut self, fp: &Footprint, pf: &PortfolioSnapshot, out: &mut StrategyOutput) {
+    fn on_footprint(&mut self, fp: &Footprint, ctx: &BarCtx, out: &mut StrategyOutput) {
         let now = self.clock.update(fp.ts_last_ns);    // 2
         self.discipline.on_bar(now.day);
         let vwap = self.vwap.update_bar(now.day, fp);
@@ -221,7 +221,7 @@ Parameter validation is strict: `build` panics on unknown param names or illegal
 
 ## Mechanics worth knowing when writing strategies
 
-- **Read/write boundary**: `Strategy::on_footprint` receives an immutable `PortfolioSnapshot` and a
+- **Read/write boundary**: `Strategy::on_footprint` receives an immutable `BarCtx` (global bar number `ctx.bar` + `PortfolioSnapshot`, which it derefs to) and a
   mutable `StrategyOutput`. Account state is read from `portfolio`; decisions are emitted through
   `output.orders` and chart-only data through `output.visuals`.
 - **Position visibility**: `portfolio.open_position` contains `PositionInfo` (direction, average price,

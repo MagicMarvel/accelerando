@@ -14,7 +14,7 @@
 use std::collections::HashMap;
 
 use accelerando_core::{
-    run_prepared_backtest, BacktestResult, BrokerConfig, EntryIntent, Footprint, PortfolioSnapshot,
+    run_prepared_backtest, BacktestResult, BarCtx, BrokerConfig, EntryIntent, Footprint,
     PreparedBacktestData, Strategy, StrategyOutput, Trade, TradeSide,
 };
 use rayon::prelude::*;
@@ -262,7 +262,6 @@ pub fn random_baseline(
             }
             let strat = RandomEntry {
                 schedule,
-                bar: 0,
                 hold: 0,
             };
             let result = run_prepared_backtest(data, Box::new(strat), cfg, false);
@@ -285,15 +284,13 @@ pub fn random_baseline(
 
 struct RandomEntry {
     schedule: HashMap<usize, (i32, usize)>,
-    bar: usize,
     hold: usize,
 }
 
 impl Strategy for RandomEntry {
-    fn on_footprint(&mut self, _fp: &Footprint, p: &PortfolioSnapshot, out: &mut StrategyOutput) {
-        let i = self.bar;
-        self.bar += 1;
-        if let Some(pos) = p.open_position.as_ref() {
+    fn on_footprint(&mut self, _fp: &Footprint, ctx: &BarCtx, out: &mut StrategyOutput) {
+        let i = ctx.bar;
+        if let Some(pos) = ctx.open_position.as_ref() {
             if pos.bars_held >= self.hold {
                 out.orders.exit_position();
             }

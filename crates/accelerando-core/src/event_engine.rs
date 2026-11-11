@@ -1,6 +1,6 @@
 //! Opt-in trade-event execution. The existing footprint engine remains unchanged.
 use crate::{
-    BacktestResult, Broker, BrokerConfig, DataSource, EventInterest, Footprint,
+    BacktestResult, BarCtx, Broker, BrokerConfig, DataSource, EventInterest, Footprint,
     FootprintAggregator, Indicator, LiquidityHeatmap, Metrics, OrderFlowEvent, Plot, Series,
     Strategy, StrategyOutput,
 };
@@ -260,7 +260,11 @@ fn run_event_iterator(
                         ind.on_footprint(&mut fp, &indicator_history);
                     }
                     let mut output = StrategyOutput::new(keep);
-                    strategy.on_footprint(&fp, &broker.portfolio_snapshot(), &mut output);
+                    let ctx = BarCtx {
+                        bar: display.index as usize,
+                        portfolio: broker.portfolio_snapshot(),
+                    };
+                    strategy.on_footprint(&fp, &ctx, &mut output);
                     if !indicators.is_empty() {
                         indicator_history.push(fp.clone());
                     }

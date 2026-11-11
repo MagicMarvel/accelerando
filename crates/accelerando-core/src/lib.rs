@@ -66,5 +66,5 @@ pub use result::{Counters, BacktestResult, ExperimentResult, ExperimentRun, Expe
 pub use session::{SessionClock, SessionFilter, SessionTick, TradeDiscipline};
 pub use market_time::{in_clock_window, TimeZone};
 pub use traits::{
-    DataSource, FootprintAggregator, Indicator, IndicatorRequest, Strategy, StrategyRequirements,
+    BarCtx, DataSource, FootprintAggregator, Indicator, IndicatorRequest, Strategy, StrategyRequirements,
 };

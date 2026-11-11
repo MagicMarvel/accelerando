@@ -5,8 +5,8 @@
 //! RSI exhaustion.
 
 use accelerando_core::{
-    Configurable, EntryIntent, Footprint, Plot, PortfolioSnapshot, Strategy,
-    StrategyOutput, TradeSide, VisualOutput,
+    BarCtx, Configurable, EntryIntent, Footprint, Plot, Strategy, StrategyOutput, TradeSide,
+    VisualOutput,
 };
 
 #[derive(Configurable)]
@@ -41,12 +41,7 @@ impl IndicatorCross {
 }
 
 impl Strategy for IndicatorCross {
-    fn on_footprint(
-        &mut self,
-        fp: &Footprint,
-        portfolio: &PortfolioSnapshot,
-        output: &mut StrategyOutput,
-    ) {
+    fn on_footprint(&mut self, fp: &Footprint, ctx: &BarCtx, output: &mut StrategyOutput) {
         let Some(fast) = fp.values.get("ema_fast").copied() else {
             return;
         };
@@ -69,7 +64,7 @@ impl Strategy for IndicatorCross {
             .map(|(pf, ps)| pf >= ps && fast < slow)
             .unwrap_or(false);
 
-        let pos = portfolio.position;
+        let pos = ctx.position;
         if pos > 0 && (crossed_below || rsi >= self.sell_rsi_min) {
             output.orders.exit_position();
             self.plot(fp, &mut output.visuals, "exit_long", "#f97316");

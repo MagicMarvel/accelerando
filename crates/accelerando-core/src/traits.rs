@@ -116,6 +116,25 @@ impl StrategyRequirements {
     }
 }
 
+/// What the engine hands a strategy together with each completed footprint.
+///
+/// Dereferences to the [`PortfolioSnapshot`], so `ctx.position_count` etc. work directly.
+#[derive(Clone, Debug)]
+pub struct BarCtx {
+    /// Global 0-based number of this footprint in the run: the same index the chart and the
+    /// series use. Use it for ages, TTLs and plot anchors instead of counting bars yourself.
+    pub bar: usize,
+    /// Broker state as of this footprint (fills for it already resolved).
+    pub portfolio: PortfolioSnapshot,
+}
+
+impl std::ops::Deref for BarCtx {
+    type Target = PortfolioSnapshot;
+    fn deref(&self) -> &PortfolioSnapshot {
+        &self.portfolio
+    }
+}
+
 /// Decides position changes from enriched footprints.
 pub trait Strategy {
     /// Indicators, published value keys and bar type this strategy depends on.
@@ -142,14 +161,9 @@ pub trait Strategy {
     }
 
     /// Called once per completed (and indicator-enriched) footprint. Market/account state is
-    /// immutable; orders and visuals are emitted into separate typed output channels.
-    fn on_footprint(
-        &mut self,
-        _fp: &Footprint,
-        _portfolio: &PortfolioSnapshot,
-        _output: &mut StrategyOutput,
-    ) {
-    }
+    /// immutable ([`BarCtx`]: global bar number + portfolio); orders and visuals are emitted
+    /// into separate typed output channels.
+    fn on_footprint(&mut self, _fp: &Footprint, _ctx: &BarCtx, _output: &mut StrategyOutput) {}
 
     /// Called once for each round-trip the broker recorded on the current footprint (fills
     /// resolve before the strategy sees the bar), right before [`Strategy::on_footprint`].

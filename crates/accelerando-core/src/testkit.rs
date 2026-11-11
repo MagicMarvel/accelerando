@@ -21,7 +21,7 @@ use crate::engine::{run_prepared_backtest, PreparedBacktestData};
 use crate::footprint::{Footprint, Plot};
 use crate::market_time::{days_from_civil, in_us_dst, NS_PER_SEC};
 use crate::result::{BacktestResult, Trade};
-use crate::traits::Strategy;
+use crate::traits::{BarCtx, Strategy};
 
 /// Default tick size used by the helpers (ES/NQ style).
 pub const TICK: f64 = 0.25;
@@ -174,16 +174,19 @@ pub fn drive_with<S: Strategy + ?Sized>(
     let mut broker = Broker::new(cfg);
     broker.set_contract(TICK, MULTIPLIER);
     let mut out = Driven::default();
-    for fp in bars {
+    for (bar, fp) in bars.iter().enumerate() {
         let before = broker.trades.len();
         broker.on_new_footprint(fp);
         for i in before..broker.trades.len() {
             let trade = broker.trades[i].clone();
             strategy.on_trade_closed(&trade);
         }
-        let portfolio = broker.portfolio_snapshot();
+        let ctx = BarCtx {
+            bar,
+            portfolio: broker.portfolio_snapshot(),
+        };
         let mut output = StrategyOutput::new(true);
-        strategy.on_footprint(fp, &portfolio, &mut output);
+        strategy.on_footprint(fp, &ctx, &mut output);
         let (plots, _) = broker.apply_strategy_output(output);
         out.plots.push(plots);
         out.positions.push(broker.portfolio_snapshot().position);
@@ -201,14 +204,15 @@ pub fn backtest(strategy: Box<dyn Strategy>, bars: Vec<Footprint>, cfg: BrokerCo
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::broker::{EntryIntent, PortfolioSnapshot, TradeSide};
+    use crate::broker::{EntryIntent, TradeSide};
+    use crate::BarCtx;
 
     struct BuyFirstBar {
         done: bool,
     }
 
     impl Strategy for BuyFirstBar {
-        fn on_footprint(&mut self, _fp: &Footprint, _p: &PortfolioSnapshot, out: &mut StrategyOutput) {
+        fn on_footprint(&mut self, _fp: &Footprint, _ctx: &BarCtx, out: &mut StrategyOutput) {
             if !self.done {
                 self.done = true;
                 out.orders
@@ -232,8 +236,9 @@ mod tests {
     struct CountBars(crate::Counters);
 
     impl Strategy for CountBars {
-        fn on_footprint(&mut self, fp: &Footprint, _p: &PortfolioSnapshot, _o: &mut StrategyOutput) {
+        fn on_footprint(&mut self, fp: &Footprint, ctx: &BarCtx, _o: &mut StrategyOutput) {
             self.0.inc("bars");
+            self.0.add("bar_numbers", ctx.bar as f64);
             self.0.add("closes", fp.close);
         }
         fn counters(&self) -> crate::Counters {
@@ -246,9 +251,19 @@ mod tests {
         let bars = bars_from_closes(eastern_ts(2026, 1, 5, 10, 0), 60, &[100.0, 101.0, 102.5]);
         let r = backtest(Box::new(CountBars(Default::default())), bars, BrokerConfig::default());
         assert_eq!((r.counters.get("bars"), r.counters.get("closes")), (3.0, 303.5));
-        assert_eq!(r.counters.summary(), "bars 3 | closes 303.50");
+        // Global bar numbers are 0, 1, 2 -- the same index the chart uses.
+        assert_eq!(r.counters.get("bar_numbers"), 3.0);
+        assert_eq!(r.counters.summary(), "bar_numbers 3 | bars 3 | closes 303.50");
         let json = serde_json::to_value(&r).unwrap();
         assert_eq!(json["counters"]["bars"], 3.0);
+    }
+
+    #[test]
+    fn drive_numbers_bars_like_the_engine() {
+        let bars = bars_from_closes(eastern_ts(2026, 1, 5, 10, 0), 60, &[100.0, 101.0, 102.5, 99.0]);
+        let mut s = CountBars(Default::default());
+        drive(&mut s, &bars);
+        assert_eq!(s.0.get("bar_numbers"), 6.0);
     }
 
     #[test]
