@@ -5,10 +5,12 @@
 mod range;
 mod reverse;
 mod time;
+mod volume;
 
 pub use range::RangeAggregator;
 pub use reverse::ReverseAggregator;
 pub use time::TimeAggregator;
+pub use volume::VolumeAggregator;
 
 use accelerando_core::Registry;
 
@@ -17,4 +19,5 @@ pub fn register_all(registry: &mut Registry) {
     registry.register_aggregator::<RangeAggregator>("range");
     registry.register_aggregator::<ReverseAggregator>("reverse");
     registry.register_aggregator::<TimeAggregator>("time");
+    registry.register_aggregator::<VolumeAggregator>("volume");
 }

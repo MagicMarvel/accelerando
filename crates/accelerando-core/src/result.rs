@@ -80,9 +80,16 @@ pub struct LiquiditySnapshot {
     pub levels: Vec<LiquidityLevel>,
 }
 
-/// Bookmap-style resting-liquidity history, sampled on footprint closes.
+/// Bookmap-style resting-liquidity history on a fixed time grid.
+///
+/// The engine snapshots the book once per `interval_ns` bucket in which it changed (1 second, see
+/// `engine::LIQUIDITY_HEATMAP_INTERVAL_NS`). Each snapshot is stamped with its bucket start and
+/// stays valid until the next snapshot; an empty snapshot marks a cleared book.
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct LiquidityHeatmap {
+    /// Sampling bucket width in nanoseconds (`0` in results written before fixed-grid sampling).
+    #[serde(default)]
+    pub interval_ns: i64,
     pub snapshots: Vec<LiquiditySnapshot>,
 }
 

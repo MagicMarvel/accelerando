@@ -20,8 +20,8 @@ cargo build --release            # optimized (LTO, codegen-units=1, panic=abort)
 cargo build -p accelerando-core  # one crate
 ```
 
-Unit tests exist where behavior is self-contained: `cargo test -p accelerando-web` (replay engine)
-and `cargo test -p accelerando-ml` (factor evaluation, incl. planted-signal end-to-end). For
+Unit tests exist where behavior is self-contained: `cargo test -p accelerando-web` (replay engine),
+`cargo test -p accelerando-gui` (time axis, 1s grid, smoothing, raster) and `cargo test -p accelerando-ml` (factor evaluation, incl. planted-signal end-to-end). For
 engine/indicator/strategy behavior, build a downstream runner that depends on these crates and
 exercises `run_backtest` with known data. `cargo run -p accelerando-web --example replay_smoke`
 serves a synthetic-data studio for manual checks.
@@ -81,6 +81,33 @@ Pipeline assembly lives in the embedding application:
   `.replay(ReplayManager)` for interactive manual bar replay at `/replay`; then `.serve(port)`.
   `Studio::experiment(exp)` is a convenience for a complete in-memory `ExperimentResult`.
 - The HTML is embedded (`studio.html`, `experiment.html`) — no node, no build step.
+
+### Native viewing (`accelerando-gui`)
+
+- `accelerando_gui::view(result, ViewerOptions { .. })` — native egui/eframe window for one
+  `BacktestResult` (blocks; call from the main thread). Price panel = 1-second liquidity heatmap,
+  smoothed best-bid / best-ask lines, bars (footprint cells once bars are >= 32 px apart, as in
+  the web studio), trades and overlays; optional equity panel. Everything else (equity toggle,
+  metrics, trade list, display options) sits behind the toolbar's Settings button.
+- Two x axes (`AxisMode`): `Bars` = one equal-width slot per footprint, pauses > 30 min become an
+  empty spacer (default without heatmap); `Time` = seconds with gaps cut (default with heatmap;
+  the heatmap and bid/ask lines only exist there). A pause *inside* one bar (e.g. a reverse bar
+  spanning the daily break) cannot be shown — only the aggregator could split that bar.
+- Chart bar type (toolbar button next to Settings): Time / Range / Reverse / Volume bars rebuilt
+  from raw trades via `ViewerOptions.rebar` (`accelerando_gui::aggregate(events, &BarSpec)`), on a
+  background thread. Display only — trades, equity and strategy overlays (anchored to the
+  strategy's own bars) are mapped by timestamp; the backtest is not rerun. `display_bars` opens
+  on a given type. `VolumeAggregator` ("volume", param `volume`) lives in
+  `accelerando-example-aggregators`.
+  It does not cover the experiment index, annotations or manual replay — those stay in
+  `accelerando-web`.
+- `data.rs` is egui-free and unit-tested: `TimeAxis` (closed-market gaps removed, x in seconds),
+  `BookGrid` (snapshots forward-filled to one cell per second, BBO derived from the levels),
+  `smooth` (zero-lag, i.e. centered — display only, never feed it to a strategy), `rasterize`.
+- `Pipeline.keep_liquidity_heatmap = true` now records one book snapshot per second in which the
+  book changed (`engine::LIQUIDITY_HEATMAP_INTERVAL_NS`), not one per footprint close.
+- `cargo run --release -p accelerando --bin serve_numcat` opens it on the NumCat sample
+  (`--span <secs>` initial zoom, `--web` for the old browser viewer).
 
 ### Factor mining (`accelerando-ml`)
 

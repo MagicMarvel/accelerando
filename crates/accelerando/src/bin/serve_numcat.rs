@@ -16,6 +16,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let mut path = "data/numcat_688184_2months_cached.json".to_string();
     let mut port = 8080u16;
+    // Default: native egui window. `--web` serves the browser viewer on `--port` instead.
+    let mut web = false;
+    // `--span <secs>` opens the window zoomed in on the last N seconds.
+    let mut span: Option<f64> = None;
 
     let mut i = 1;
     while i < args.len() {
@@ -29,6 +33,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             "--port" => {
                 if i + 1 < args.len() {
                     port = args[i + 1].parse().unwrap_or(8080);
+                    i += 1;
+                }
+            }
+            "--web" => web = true,
+            "--span" => {
+                if i + 1 < args.len() {
+                    span = args[i + 1].parse().ok();
                     i += 1;
                 }
             }
@@ -46,7 +57,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Configure NumCat L2 Source
     let mut src_params = Params::default();
-    src_params.set("path", accelerando_core::ParamValue::Str(path.into()));
+    src_params.set("path", accelerando_core::ParamValue::Str(path.clone().into()));
     src_params.set("tick_size", accelerando_core::ParamValue::Float(0.01));
     src_params.set("multiplier", accelerando_core::ParamValue::Float(100.0));
     src_params.set("infer_aggressor", accelerando_core::ParamValue::Int(1));
@@ -90,8 +101,25 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         result.trades.len()
     );
 
-    println!("Starting web UI server at http://localhost:{port} ...");
-    accelerando_web::serve(&result, port)?;
+    if web {
+        println!("Starting web UI server at http://localhost:{port} ...");
+        accelerando_web::serve(&result, port)?;
+    } else {
+        println!(
+            "Opening viewer window ({} one-second book snapshots)...",
+            result.liquidity_heatmap.snapshots.len()
+        );
+        accelerando_gui::view(
+            result,
+            accelerando_gui::ViewerOptions {
+                title: format!("Accelerando — {path}"),
+                utc_offset_hours: 8.0,
+                red_up: true,
+                initial_span_secs: span,
+                ..Default::default()
+            },
+        )?;
+    }
 
     Ok(())
 }

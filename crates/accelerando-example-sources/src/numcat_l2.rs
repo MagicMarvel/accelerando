@@ -191,6 +191,35 @@ impl NumCatL2Iter {
 
         // L2 Depth snapshot events
         if self.event_interest.contains(EventInterest::L2) {
+            // Each row is the full top-5 book, so a level from the previous row that is absent
+            // now is gone (or fell out of the visible depth). Clear it first; otherwise stale
+            // sizes pile up behind the market and corrupt the heatmap and the derived BBO.
+            if let Some(prev) = self.prev_item.as_ref() {
+                let half_tick = self.tick_size.abs().max(1e-9) * 0.5;
+                let gone = |levels: &[(f64, f64); 5], price: f64| {
+                    price > 0.0 && !levels.iter().any(|(p, _)| (p - price).abs() < half_tick)
+                };
+                for (price, _) in prev.bids {
+                    if gone(&curr.bids, price) {
+                        self.pending_events.push(OrderFlowEvent::SetLevel {
+                            ts_ns: curr.ts_ns,
+                            price,
+                            size: 0.0,
+                            side: Side::Buy,
+                        });
+                    }
+                }
+                for (price, _) in prev.asks {
+                    if gone(&curr.asks, price) {
+                        self.pending_events.push(OrderFlowEvent::SetLevel {
+                            ts_ns: curr.ts_ns,
+                            price,
+                            size: 0.0,
+                            side: Side::Sell,
+                        });
+                    }
+                }
+            }
             for (price, size) in curr.bids {
                 if price > 0.0 {
                     self.pending_events.push(OrderFlowEvent::SetLevel {
@@ -581,6 +610,18 @@ mod tests {
         } else {
             panic!("Expected Trade event");
         }
+
+        // The second row's book no longer lists bid 4.199 / ask 4.201, so both must be cleared
+        // before the new levels are set.
+        let cleared = |price: f64, side: Side| {
+            events.iter().any(|e| {
+                matches!(*e, OrderFlowEvent::SetLevel { price: p, size, side: s, .. }
+                    if (p - price).abs() < 1e-9 && size == 0.0 && s == side)
+            })
+        };
+        assert!(cleared(4.199, Side::Buy));
+        assert!(cleared(4.201, Side::Sell));
+        assert!(!cleared(4.200, Side::Buy));
     }
 
     #[test]

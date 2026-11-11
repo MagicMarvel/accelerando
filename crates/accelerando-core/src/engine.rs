@@ -121,7 +121,14 @@ impl BookDepth {
             return LiquiditySnapshot { ts_ns, levels };
         }
 
-        let center = self.price_key(mid_price);
+        let center = if mid_price.is_finite() && mid_price > 0.0 {
+            self.price_key(mid_price)
+        } else {
+            // No trade seen yet: center on the middle of the resting book.
+            let lo = *self.levels.keys().next().expect("non-empty book");
+            let hi = *self.levels.keys().next_back().expect("non-empty book");
+            lo + (hi - lo) / 2
+        };
         let half = (self.max_levels_per_snapshot / 2) as i64;
         let min_key = center.saturating_sub(half);
         let max_key = center.saturating_add(half);
@@ -154,6 +161,79 @@ impl BookDepth {
         }
     }
 }
+/// Sampling cadence of [`LiquidityHeatmap`]: the book is snapshotted once per second in which it
+/// changed. A snapshot stays valid until the next one, so renderers forward-fill between them.
+pub const LIQUIDITY_HEATMAP_INTERVAL_NS: i64 = 1_000_000_000;
+
+/// Turns the L2 event stream into a 1-second [`LiquidityHeatmap`].
+///
+/// Each snapshot is stamped with the start of its 1s bucket and holds the book state at the end
+/// of that bucket. Seconds in which the book did not change emit nothing.
+struct HeatmapSampler {
+    book: BookDepth,
+    dirty_bucket: Option<i64>,
+    last_px: f64,
+    out: LiquidityHeatmap,
+}
+
+impl HeatmapSampler {
+    fn new() -> Self {
+        Self {
+            book: BookDepth::new(),
+            dirty_bucket: None,
+            last_px: f64::NAN,
+            out: LiquidityHeatmap {
+                interval_ns: LIQUIDITY_HEATMAP_INTERVAL_NS,
+                snapshots: Vec::new(),
+            },
+        }
+    }
+
+    fn on_event(&mut self, ev: &OrderFlowEvent) {
+        let (ts_ns, trade_px) = match *ev {
+            OrderFlowEvent::Contract { .. } => {
+                self.book.on_event(ev);
+                return;
+            }
+            OrderFlowEvent::Trade { ts_ns, price, .. } => (ts_ns, Some(price)),
+            OrderFlowEvent::AddLimit { ts_ns, .. }
+            | OrderFlowEvent::ReduceLimit { ts_ns, .. }
+            | OrderFlowEvent::SetLevel { ts_ns, .. } => (ts_ns, None),
+        };
+        let bucket = ts_ns.div_euclid(LIQUIDITY_HEATMAP_INTERVAL_NS);
+        if self.dirty_bucket.is_some_and(|dirty| bucket > dirty) {
+            self.emit();
+        }
+        match trade_px {
+            Some(price) => self.last_px = price,
+            None => {
+                self.book.on_event(ev);
+                self.dirty_bucket = Some(self.dirty_bucket.map_or(bucket, |d| d.max(bucket)));
+            }
+        }
+    }
+
+    fn emit(&mut self) {
+        let Some(bucket) = self.dirty_bucket.take() else {
+            return;
+        };
+        let snapshot = self
+            .book
+            .snapshot(bucket * LIQUIDITY_HEATMAP_INTERVAL_NS, self.last_px);
+        // An empty snapshot ends the previous one (the book was cleared); a leading or repeated
+        // empty snapshot carries no information.
+        let prev_empty = self.out.snapshots.last().is_none_or(|s| s.levels.is_empty());
+        if !(snapshot.levels.is_empty() && prev_empty) {
+            self.out.snapshots.push(snapshot);
+        }
+    }
+
+    fn finish(mut self) -> LiquidityHeatmap {
+        self.emit();
+        self.out
+    }
+}
+
 /// A fully-assembled, ready-to-run pipeline.
 pub struct Pipeline {
     pub source: Box<dyn DataSource>,
@@ -163,7 +243,7 @@ pub struct Pipeline {
     pub broker_cfg: BrokerConfig,
     /// Keep enriched footprints in the result (set false in hyperopt for speed/memory).
     pub keep_footprints: bool,
-    /// Keep sampled L2 depth snapshots for heatmap rendering. Disable for metric-only runs.
+    /// Keep 1-second L2 depth snapshots for heatmap rendering. Disable for metric-only runs.
     pub keep_liquidity_heatmap: bool,
 }
 
@@ -232,8 +312,7 @@ pub fn prepare_backtest_data(
     progress: Option<ProgressHandle>,
 ) -> PreparedBacktestData {
     let mut history: Vec<Footprint> = Vec::new();
-    let mut liquidity_heatmap = LiquidityHeatmap::default();
-    let mut book_depth = keep_liquidity_heatmap.then(BookDepth::new);
+    let mut heatmap_sampler = keep_liquidity_heatmap.then(HeatmapSampler::new);
     let mut tick_size = 0.25;
     let mut multiplier = 1.0;
     let aggregator_interest = aggregator.event_interest();
@@ -254,18 +333,10 @@ pub fn prepare_backtest_data(
 
     let handle = |fp: Footprint,
                   history: &mut Vec<Footprint>,
-                  indicators: &mut Vec<Box<dyn Indicator>>,
-                  liquidity_heatmap: &mut LiquidityHeatmap,
-                  book_depth: Option<&BookDepth>| {
+                  indicators: &mut Vec<Box<dyn Indicator>>| {
         let mut fp = fp;
         for ind in indicators.iter_mut() {
             ind.on_footprint(&mut fp, history);
-        }
-        if let Some(book_depth) = book_depth {
-            let depth = book_depth.snapshot(fp.ts_last_ns, fp.close);
-            if !depth.levels.is_empty() {
-                liquidity_heatmap.snapshots.push(depth);
-            }
         }
         history.push(fp);
     };
@@ -290,8 +361,6 @@ pub fn prepare_backtest_data(
                     fp,
                     &mut history,
                     &mut indicators,
-                    &mut liquidity_heatmap,
-                    book_depth.as_ref(),
                 );
                 if let Some(h) = &progress {
                     h.inc_footprints();
@@ -304,8 +373,8 @@ pub fn prepare_backtest_data(
                 ind.on_event(&ev);
             }
         }
-        if let Some(book_depth) = book_depth.as_mut() {
-            book_depth.on_event(&ev);
+        if let Some(sampler) = heatmap_sampler.as_mut() {
+            sampler.on_event(&ev);
         }
     }
     if let Some(fp) = aggregator.flush() {
@@ -313,8 +382,6 @@ pub fn prepare_backtest_data(
             fp,
             &mut history,
             &mut indicators,
-            &mut liquidity_heatmap,
-            book_depth.as_ref(),
         );
         if let Some(h) = &progress {
             h.inc_footprints();
@@ -326,7 +393,9 @@ pub fn prepare_backtest_data(
 
     PreparedBacktestData {
         footprints: history,
-        liquidity_heatmap,
+        liquidity_heatmap: heatmap_sampler
+            .map(HeatmapSampler::finish)
+            .unwrap_or_default(),
         tick_size,
         multiplier,
     }
@@ -415,8 +484,7 @@ pub fn run_backtest_progress(
 
     let mut broker = Broker::new(broker_cfg);
     let mut history: Vec<Footprint> = Vec::new();
-    let mut liquidity_heatmap = LiquidityHeatmap::default();
-    let mut book_depth = keep_liquidity_heatmap.then(BookDepth::new);
+    let mut heatmap_sampler = keep_liquidity_heatmap.then(HeatmapSampler::new);
     let mut last_close = f64::NAN;
     let mut last_ts = 0i64;
     let aggregator_interest = aggregator.event_interest();
@@ -447,8 +515,6 @@ pub fn run_backtest_progress(
                   history: &mut Vec<Footprint>,
                   indicators: &mut Vec<Box<dyn Indicator>>,
                   strategy: &mut Box<dyn Strategy>,
-                  liquidity_heatmap: &mut LiquidityHeatmap,
-                  book_depth: Option<&BookDepth>,
                   series: &mut SeriesCollector| {
         let mut fp = fp;
         // Broker first: fill last bar's intent at this open, check stops, mark equity.
@@ -461,12 +527,6 @@ pub fn run_backtest_progress(
         // Indicators enrich the footprint causally.
         for ind in indicators.iter_mut() {
             ind.on_footprint(&mut fp, history);
-        }
-        if let Some(book_depth) = book_depth {
-            let depth = book_depth.snapshot(fp.ts_last_ns, fp.close);
-            if !depth.levels.is_empty() {
-                liquidity_heatmap.snapshots.push(depth);
-            }
         }
         // Strategy reacts and sets intent for the next bar.
         {
@@ -507,8 +567,6 @@ pub fn run_backtest_progress(
                             &mut history,
                             &mut indicators,
                             &mut strategy,
-                            &mut liquidity_heatmap,
-                            book_depth.as_ref(),
                             &mut series,
                         );
                         if let Some(h) = &progress {
@@ -526,8 +584,8 @@ pub fn run_backtest_progress(
                 ind.on_event(&ev);
             }
         }
-        if let Some(book_depth) = book_depth.as_mut() {
-            book_depth.on_event(&ev);
+        if let Some(sampler) = heatmap_sampler.as_mut() {
+            sampler.on_event(&ev);
         }
     }
     if let Some(fp) = aggregator.flush() {
@@ -539,8 +597,6 @@ pub fn run_backtest_progress(
             &mut history,
             &mut indicators,
             &mut strategy,
-            &mut liquidity_heatmap,
-            book_depth.as_ref(),
             &mut series,
         );
         if let Some(h) = &progress {
@@ -563,9 +619,52 @@ pub fn run_backtest_progress(
         trades: broker.trades,
         equity: broker.equity,
         footprints: if keep_footprints { history } else { Vec::new() },
-        liquidity_heatmap,
+        liquidity_heatmap: heatmap_sampler
+            .map(HeatmapSampler::finish)
+            .unwrap_or_default(),
         series: series.finish(),
         tick_size,
         multiplier,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::event::Side;
+
+    #[test]
+    fn heatmap_sampler_emits_one_snapshot_per_changed_second() {
+        const S: i64 = LIQUIDITY_HEATMAP_INTERVAL_NS;
+        let set = |ts_ns, price, size, side| OrderFlowEvent::SetLevel { ts_ns, price, size, side };
+        let mut sampler = HeatmapSampler::new();
+        sampler.on_event(&OrderFlowEvent::Contract { tick_size: 0.01, multiplier: 1.0 });
+        // Second 10: several updates collapse into one snapshot holding the last state.
+        sampler.on_event(&set(10 * S, 10.00, 5.0, Side::Buy));
+        sampler.on_event(&set(10 * S + S / 2, 10.00, 7.0, Side::Buy));
+        sampler.on_event(&set(10 * S + S / 2, 10.02, 3.0, Side::Sell));
+        // Seconds 11-12: a trade alone does not change the book, so nothing is emitted.
+        sampler.on_event(&OrderFlowEvent::Trade {
+            ts_ns: 12 * S,
+            price: 10.01,
+            size: 1.0,
+            aggressor: Side::Buy,
+        });
+        // Second 13: the book is cleared, which must end the previous snapshot.
+        sampler.on_event(&set(13 * S, 10.00, 0.0, Side::Buy));
+        sampler.on_event(&set(13 * S, 10.02, 0.0, Side::Sell));
+        sampler.on_event(&set(15 * S + 1, 10.01, 2.0, Side::Buy));
+
+        let heatmap = sampler.finish();
+        assert_eq!(heatmap.interval_ns, S);
+        let seconds: Vec<i64> = heatmap.snapshots.iter().map(|s| s.ts_ns / S).collect();
+        assert_eq!(seconds, vec![10, 13, 15]);
+        assert!(heatmap.snapshots.iter().all(|s| s.ts_ns % S == 0));
+        let first = &heatmap.snapshots[0].levels;
+        assert_eq!(first.len(), 2);
+        assert_eq!((first[0].bid_size, first[0].ask_size), (7.0, 0.0));
+        assert_eq!((first[1].bid_size, first[1].ask_size), (0.0, 3.0));
+        assert!(heatmap.snapshots[1].levels.is_empty());
+        assert_eq!(heatmap.snapshots[2].levels.len(), 1);
     }
 }

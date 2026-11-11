@@ -1,0 +1,12 @@
+[package]
+name = "accelerando-gui"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Native egui/eframe result viewer for Accelerando: 1s liquidity heatmap, smoothed bid/ask lines, bars, trades and equity."
+
+[dependencies]
+accelerando-core = { workspace = true }
+accelerando-example-aggregators = { workspace = true }
+serde_json = { workspace = true }
+eframe = "0.37"

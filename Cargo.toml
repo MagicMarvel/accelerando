@@ -11,6 +11,7 @@ members = [
     "crates/accelerando-hyperopt",
     "crates/accelerando-ml",
     "crates/accelerando-web",
+    "crates/accelerando-gui",
     "crates/accelerando",
     "crates/accelerando-app",
 ]
@@ -33,6 +34,7 @@ accelerando-orderflow-features = { path = "crates/accelerando-orderflow-features
 accelerando-hyperopt = { path = "crates/accelerando-hyperopt" }
 accelerando-ml = { path = "crates/accelerando-ml" }
 accelerando-web = { path = "crates/accelerando-web" }
+accelerando-gui = { path = "crates/accelerando-gui" }
 accelerando = { path = "crates/accelerando" }
 accelerando-app = { path = "crates/accelerando-app" }
 
