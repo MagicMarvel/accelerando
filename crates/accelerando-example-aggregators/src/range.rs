@@ -2,28 +2,24 @@
 //! `range_ticks` minimum price increments.
 
 use accelerando_core::{
-    Configurable, EventInterest, Footprint, FootprintAggregator, OrderFlowEvent, ParamSpec, Params,
+    Configurable, EventInterest, Footprint, FootprintAggregator, OrderFlowEvent,
     Side,
 };
 
 /// Aggregates trades into footprints bounded by price range rather than wall-clock time.
+#[derive(Configurable)]
+#[configurable(init = Self::init)]
 pub struct RangeAggregator {
+    #[param(default = 30, min = 1, max = 400)]
     range_ticks: i64,
     tick_size: f64,
     current: Option<Footprint>,
 }
 
-impl Configurable for RangeAggregator {
-    fn param_spec() -> ParamSpec {
-        ParamSpec::new().int("range_ticks", 30, 1, 400, 1)
-    }
-
-    fn from_params(params: &Params) -> Self {
-        Self {
-            range_ticks: params.int("range_ticks", 30).max(1),
-            tick_size: 0.25,
-            current: None,
-        }
+impl RangeAggregator {
+    fn init(&mut self) {
+        self.range_ticks = self.range_ticks.max(1);
+        self.tick_size = 0.25;
     }
 }
 
@@ -82,6 +78,7 @@ impl FootprintAggregator for RangeAggregator {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use accelerando_core::Params;
 
     fn trade(ts_ns: i64, price: f64) -> OrderFlowEvent {
         OrderFlowEvent::Trade {

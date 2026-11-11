@@ -462,6 +462,7 @@ pub fn run_prepared_backtest(
             LiquidityHeatmap::default()
         },
         series: series.finish(),
+        counters: strategy.counters(),
         tick_size: data.tick_size,
         multiplier: data.multiplier,
     }
@@ -623,6 +624,7 @@ pub fn run_backtest_progress(
             .map(HeatmapSampler::finish)
             .unwrap_or_default(),
         series: series.finish(),
+        counters: strategy.counters(),
         tick_size,
         multiplier,
     }

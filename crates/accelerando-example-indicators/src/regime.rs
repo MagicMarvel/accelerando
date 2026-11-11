@@ -1,4 +1,4 @@
-use accelerando_core::{Configurable, Footprint, Indicator, ParamSpec, Params, Plot};
+use accelerando_core::{Configurable, Footprint, Indicator, Plot};
 use std::collections::VecDeque;
 
 /// Kaufman efficiency ratio over the window: |net move| / sum(|bar-to-bar moves|), 0..1.
@@ -11,9 +11,14 @@ pub const CHOPPINESS: &str = "regime_choppiness";
 /// Trend-vs-range regime measures, published as continuous values so strategies can apply
 /// their own (sweepable) thresholds. Values appear only once the window is full, which lets
 /// consumers fail closed during warmup.
+#[derive(Configurable)]
+#[configurable(init = Self::init)]
 pub struct Regime {
+    #[param(default = 30, min = 5, max = 500)]
     window: usize,
+    #[param(default = false)]
     plot_bands: bool,
+    #[param(default = 61.8, min = 0.0, max = 100.0)]
     band_chop_min: f64,
     prev_close: Option<f64>,
     bars: VecDeque<(f64, f64, f64, f64)>, // (high, low, tr, |close delta|)
@@ -22,25 +27,9 @@ pub struct Regime {
     move_sum: f64,
 }
 
-impl Configurable for Regime {
-    fn param_spec() -> ParamSpec {
-        ParamSpec::new()
-            .int("window", 30, 5, 500, 1)
-            .int("plot_bands", 0, 0, 1, 1)
-            .float("band_chop_min", 61.8, 0.0, 100.0)
-    }
-
-    fn from_params(p: &Params) -> Self {
-        Self {
-            window: p.usize("window", 30).max(2),
-            plot_bands: p.int("plot_bands", 0) != 0,
-            band_chop_min: p.float("band_chop_min", 61.8),
-            prev_close: None,
-            bars: VecDeque::new(),
-            closes: VecDeque::new(),
-            tr_sum: 0.0,
-            move_sum: 0.0,
-        }
+impl Regime {
+    fn init(&mut self) {
+        self.window = self.window.max(2);
     }
 }
 
@@ -111,6 +100,7 @@ impl Indicator for Regime {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use accelerando_core::Params;
 
     fn fp(open: f64, high: f64, low: f64, close: f64) -> Footprint {
         Footprint {

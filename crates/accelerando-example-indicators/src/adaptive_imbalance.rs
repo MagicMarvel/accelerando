@@ -1,5 +1,5 @@
 use accelerando_core::{
-    Configurable, Footprint, Indicator, ParamSpec, Params, Plot,
+    Configurable, Footprint, Indicator, Plot,
 };
 
 pub const BUY_EDGE_PRICE: &str = "adaptive_imbalance_buy_edge_price";
@@ -30,53 +30,51 @@ struct EdgeNode {
 }
 
 /// Marks edge delta imbalances with either fixed or history-adaptive thresholds.
+#[derive(Configurable)]
+#[configurable(init = Self::init)]
 pub struct AdaptiveImbalance {
+    #[param(default = "adaptive", choice = ["adaptive", "fixed"])]
     mode: AdaptiveMode,
+    #[param(fixed, default = 0.25)]
     tick: f64,
+    #[param(int, default = 16, min = 1, max = 120)]
     edge_band_ticks: f64,
+    #[param(default = 20, min = 3, max = 200)]
     lookback_bars: usize,
+    #[param(default = 1.0, min = 0.0, max = 4.0)]
     sensitivity: f64,
+    #[param(default = 90.0, min = 1.0, max = 5000.0)]
     min_node_delta: f64,
+    #[param(default = 1200.0, min = 1.0, max = 10000.0)]
     max_node_delta: f64,
+    #[param(default = 100.0, min = 1.0, max = 8000.0)]
     min_bar_delta: f64,
+    #[param(default = 2000.0, min = 1.0, max = 16000.0)]
     max_bar_delta: f64,
+    #[param(default = true)]
     plot_markers: bool,
     prior: Vec<PriorStats>,
 }
 
-impl Configurable for AdaptiveImbalance {
-    fn param_spec() -> ParamSpec {
-        ParamSpec::new()
-            .choice("mode", "adaptive", &["adaptive", "fixed"])
-            .fixed_float("tick", 0.25)
-            .int("edge_band_ticks", 16, 1, 120, 1)
-            .int("lookback_bars", 20, 3, 200, 1)
-            .float("sensitivity", 1.0, 0.0, 4.0)
-            .float("min_node_delta", 90.0, 1.0, 5000.0)
-            .float("max_node_delta", 1200.0, 1.0, 10000.0)
-            .float("min_bar_delta", 100.0, 1.0, 8000.0)
-            .float("max_bar_delta", 2000.0, 1.0, 16000.0)
-            .int("plot_markers", 1, 0, 1, 1)
+impl AdaptiveImbalance {
+    fn init(&mut self) {
+        self.tick = self.tick.max(f64::EPSILON);
+        self.lookback_bars = self.lookback_bars.max(1);
+        self.sensitivity = self.sensitivity.max(0.0);
+        self.min_node_delta = self.min_node_delta.max(1.0);
+        self.max_node_delta = self.max_node_delta.max(self.min_node_delta);
+        self.min_bar_delta = self.min_bar_delta.max(1.0);
+        self.max_bar_delta = self.max_bar_delta.max(self.min_bar_delta);
     }
+}
 
-    fn from_params(p: &Params) -> Self {
-        let min_node_delta = p.float("min_node_delta", 90.0).max(1.0);
-        let min_bar_delta = p.float("min_bar_delta", 100.0).max(1.0);
-        Self {
-            mode: match p.str("mode", "adaptive").as_str() {
-                "fixed" => AdaptiveMode::Fixed,
-                _ => AdaptiveMode::Adaptive,
-            },
-            tick: p.float("tick", 0.25).max(f64::EPSILON),
-            edge_band_ticks: p.int("edge_band_ticks", 16) as f64,
-            lookback_bars: p.usize("lookback_bars", 20).max(1),
-            sensitivity: p.float("sensitivity", 1.0).max(0.0),
-            min_node_delta,
-            max_node_delta: p.float("max_node_delta", 1200.0).max(min_node_delta),
-            min_bar_delta,
-            max_bar_delta: p.float("max_bar_delta", 2000.0).max(min_bar_delta),
-            plot_markers: p.int("plot_markers", 1) != 0,
-            prior: Vec::new(),
+impl std::str::FromStr for AdaptiveMode {
+    type Err = String;
+    fn from_str(s: &str) -> Result<Self, String> {
+        match s {
+            "adaptive" => Ok(Self::Adaptive),
+            "fixed" => Ok(Self::Fixed),
+            other => Err(format!("unknown AdaptiveMode `{other}`")),
         }
     }
 }

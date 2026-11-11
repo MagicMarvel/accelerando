@@ -23,8 +23,17 @@
 //!   to 1)
 //! * `f32` / `f64` → `ParamSpec::float` (optional `step`)
 //! * `bool` → `ParamSpec::bool` (searched as 0/1; CLI accepts `true/false/1/0`)
+//! * `int` on a float field → an integer parameter stored as `f64` (`#[param(int, default = 40,
+//!   min = 4, max = 200, step = 2)] stop_ticks: f64`)
+//! * integers with `time` → a minute-of-day: `#[param(time, default = "18:00", step = 5)]`;
+//!   `min`/`max` default to `"00:00"`/`"24:00"` and are also written `"HH:MM"`. The field holds
+//!   minutes (`18:00` → `1080`); the CLI accepts `--param name=18:00` as well as `1080`.
 //! * `String` with `choice = [...]` → `ParamSpec::choice`; with `fixed` → `fixed_str`
 //! * any other type with `choice = [...]` → parsed through `FromStr` (handy for enums)
+//!
+//! This derive is the only way to implement `Configurable`: the trait is sealed, so every
+//! parameter is declared once, next to its field. Values that depend on several parameters (or
+//! clamps between them) belong in the `init` hook.
 //!
 //! `fixed` makes any scalar non-searchable. `name = "..."` overrides the parameter name (keeps
 //! old CLI names when renaming a field). `#[param(flatten)]` embeds another `#[derive(Configurable)]`
@@ -52,6 +61,8 @@ struct ParamAttr {
     present: bool,
     flatten: bool,
     fixed: bool,
+    time: bool,
+    int: bool,
     name: Option<String>,
     default: Option<Expr>,
     min: Option<Expr>,
@@ -78,6 +89,9 @@ fn type_name(ty: &Type) -> Option<String> {
 fn kind_of(ty: &Type, attr: &ParamAttr) -> syn::Result<Kind> {
     let name = type_name(ty).unwrap_or_default();
     Ok(match name.as_str() {
+        // A choice list on any non-String field: options are parsed with FromStr
+        // (e.g. `entry_ratio: f64` with `choice = ["0.5", "0.618"]`).
+        n if attr.choice.is_some() && n != "String" => Kind::Parsed,
         "i8" | "i16" | "i32" | "i64" | "isize" | "u8" | "u16" | "u32" | "u64" | "usize" => {
             Kind::Int
         }
@@ -111,6 +125,8 @@ fn parse_param_attr(field: &syn::Field) -> syn::Result<ParamAttr> {
             match key.as_str() {
                 "flatten" => out.flatten = true,
                 "fixed" => out.fixed = true,
+                "time" => out.time = true,
+                "int" => out.int = true,
                 "name" => out.name = Some(meta.value()?.parse::<LitStr>()?.value()),
                 "default" => out.default = Some(meta.value()?.parse()?),
                 "min" => out.min = Some(meta.value()?.parse()?),
@@ -123,7 +139,7 @@ fn parse_param_attr(field: &syn::Field) -> syn::Result<ParamAttr> {
                 other => {
                     return Err(meta.error(format!(
                         "unknown #[param] key `{other}`; expected one of: default, min, max, \
-                         step, choice, fixed, name, flatten"
+                         step, choice, fixed, time, int, name, flatten"
                     )))
                 }
             }
@@ -149,6 +165,26 @@ fn parse_container_init(input: &DeriveInput) -> syn::Result<Option<Path>> {
         })?;
     }
     Ok(init)
+}
+
+/// `"HH:MM"` (`"24:00"` allowed) → minutes, checked at compile time.
+fn time_minutes(expr: &Expr, what: &str) -> syn::Result<i64> {
+    let bad = || {
+        syn::Error::new(
+            expr.span(),
+            format!("`time` parameter `{what}` must be a string literal \"HH:MM\""),
+        )
+    };
+    let Expr::Lit(syn::ExprLit { lit: syn::Lit::Str(lit), .. }) = expr else {
+        return Err(bad());
+    };
+    let raw = lit.value();
+    let (h, m) = raw.split_once(':').ok_or_else(bad)?;
+    let (h, m): (i64, i64) = (h.trim().parse().map_err(|_| bad())?, m.trim().parse().map_err(|_| bad())?);
+    if !(0..=24).contains(&h) || !(0..60).contains(&m) || h * 60 + m > 1440 {
+        return Err(bad());
+    }
+    Ok(h * 60 + m)
 }
 
 fn require(expr: &Option<Expr>, what: &str, span: Span) -> syn::Result<Expr> {
@@ -191,8 +227,29 @@ fn expand(input: &DeriveInput) -> syn::Result<TokenStream2> {
         }
         let pname = attr.name.clone().unwrap_or_else(|| fident.to_string());
         let span = field.span();
-        let kind = kind_of(ty, &attr)?;
+        let mut kind = kind_of(ty, &attr)?;
+        if attr.int {
+            if !matches!(kind, Kind::Float) {
+                return Err(syn::Error::new(span, "`int` is for float fields that hold an integer parameter"));
+            }
+            kind = Kind::Int;
+        }
+        if attr.time && !matches!(kind, Kind::Int) {
+            return Err(syn::Error::new(span, "`time` needs an integer field (it holds minutes)"));
+        }
         let (declare, read) = match kind {
+            Kind::Int if attr.time => {
+                let d = time_minutes(&require(&attr.default, "default", span)?, "default")?;
+                let read = quote!(params.int(#pname, #d) as #ty);
+                if attr.fixed {
+                    (quote!(spec.fixed_int(#pname, #d)), read)
+                } else {
+                    let min = attr.min.as_ref().map(|e| time_minutes(e, "min")).transpose()?.unwrap_or(0);
+                    let max = attr.max.as_ref().map(|e| time_minutes(e, "max")).transpose()?.unwrap_or(1440);
+                    let step = attr.step.clone().map(|s| quote!(#s)).unwrap_or(quote!(1));
+                    (quote!(spec.time(#pname, #d, #min, #max, (#step) as i64)), read)
+                }
+            }
             Kind::Int => {
                 let d = require(&attr.default, "default", span)?;
                 let read = quote!(params.int(#pname, (#d) as i64) as #ty);
@@ -270,6 +327,7 @@ fn expand(input: &DeriveInput) -> syn::Result<TokenStream2> {
 
     let post_init = init.map(|path| quote!(#path(&mut value);));
     Ok(quote! {
+        impl #impl_generics #core::__private::Sealed for #ident #ty_generics #where_clause {}
         impl #impl_generics #core::ParamGroup for #ident #ty_generics #where_clause {
             fn declare_params(spec: #core::ParamSpec) -> #core::ParamSpec {
                 #(#declares)*
@@ -280,14 +338,6 @@ fn expand(input: &DeriveInput) -> syn::Result<TokenStream2> {
                 let mut value = Self { #(#reads),* };
                 #post_init
                 value
-            }
-        }
-        impl #impl_generics #core::Configurable for #ident #ty_generics #where_clause {
-            fn param_spec() -> #core::ParamSpec {
-                <Self as #core::ParamGroup>::declare_params(#core::ParamSpec::new())
-            }
-            fn from_params(params: &#core::Params) -> Self {
-                <Self as #core::ParamGroup>::read_params(params)
             }
         }
     })

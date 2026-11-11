@@ -152,8 +152,12 @@ cargo run --release -- data.csv --strategy my_strategy --grid --max-evals 200 --
 cargo run --release -- --list
 ```
 
-1. **`#[derive(Configurable)]`** generates `param_spec()` + `from_params()` from field attributes:
-   integers -> `int` (`min`/`max`, optional `step`), floats -> `float` (optional `step`), `bool` ->
+1. **`#[derive(Configurable)]`** generates `param_spec()` + `from_params()` from field attributes;
+   it is the only way to implement `Configurable` (the trait is sealed, so a parameter's name,
+   default and range are written once, on its field). Kinds:
+   integers -> `int` (`min`/`max`, optional `step`), floats -> `float` (optional `step`), `int` on
+   a float field -> integer parameter stored as `f64`, `time` on an integer field -> minute of day
+   written `"HH:MM"` (CLI accepts `18:00`), `bool` ->
    on/off switch (CLI accepts `true/false`), `String`/`FromStr` types with `choice = [...]`,
    `fixed` for non-searched values, `name = "..."` to keep an old parameter name,
    `#[param(flatten)]` to embed a parameter group. Fields without `#[param]` start at
@@ -202,7 +206,8 @@ for strategy in strategies {
 ## Custom adapters
 
 1. Implement the stage trait (`DataSource`, `FootprintAggregator`, `Indicator` or `Strategy`).
-2. Implement `Configurable` (`param_spec()` + `from_params()`).
+2. Add `#[derive(Configurable)]` and `#[param(...)]` on the parameter fields (hand-written
+   `impl Configurable` does not compile; derived state goes in `#[configurable(init = Self::init)]`).
 3. Register it and build it like any built-in:
 
 ```rust

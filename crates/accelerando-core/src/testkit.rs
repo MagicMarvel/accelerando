@@ -229,6 +229,28 @@ mod tests {
         assert_eq!(run.final_position(), 0);
     }
 
+    struct CountBars(crate::Counters);
+
+    impl Strategy for CountBars {
+        fn on_footprint(&mut self, fp: &Footprint, _p: &PortfolioSnapshot, _o: &mut StrategyOutput) {
+            self.0.inc("bars");
+            self.0.add("closes", fp.close);
+        }
+        fn counters(&self) -> crate::Counters {
+            self.0.clone()
+        }
+    }
+
+    #[test]
+    fn strategy_counters_reach_the_result() {
+        let bars = bars_from_closes(eastern_ts(2026, 1, 5, 10, 0), 60, &[100.0, 101.0, 102.5]);
+        let r = backtest(Box::new(CountBars(Default::default())), bars, BrokerConfig::default());
+        assert_eq!((r.counters.get("bars"), r.counters.get("closes")), (3.0, 303.5));
+        assert_eq!(r.counters.summary(), "bars 3 | closes 303.50");
+        let json = serde_json::to_value(&r).unwrap();
+        assert_eq!(json["counters"]["bars"], 3.0);
+    }
+
     #[test]
     fn eastern_ts_handles_dst() {
         // 2026-07-06 09:30 EDT == 13:30 UTC

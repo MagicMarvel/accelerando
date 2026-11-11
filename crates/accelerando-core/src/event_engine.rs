@@ -350,6 +350,7 @@ fn run_event_iterator(
         footprints: display.history,
         liquidity_heatmap: LiquidityHeatmap::default(),
         series: display.series.into_values().collect(),
+        counters: strategy.counters(),
         tick_size,
         multiplier,
     })

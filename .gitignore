@@ -7,3 +7,7 @@ result.json
 /runs
 /heatmap-cache
 .idea/
+
+/target-*/
+# local market data (read by numcat tests/bin when present)
+/data/

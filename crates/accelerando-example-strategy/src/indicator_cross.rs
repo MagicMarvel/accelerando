@@ -5,52 +5,38 @@
 //! RSI exhaustion.
 
 use accelerando_core::{
-    Configurable, EntryIntent, Footprint, ParamSpec, Params, Plot, PortfolioSnapshot, Strategy,
+    Configurable, EntryIntent, Footprint, Plot, PortfolioSnapshot, Strategy,
     StrategyOutput, TradeSide, VisualOutput,
 };
 
+#[derive(Configurable)]
+#[configurable(init = Self::init)]
 pub struct IndicatorCross {
+    #[param(fixed, default = 1.0)]
     qty: f64,
+    #[param(int, default = 40, min = 4, max = 200, step = 2)]
     stop_ticks: f64,
+    #[param(int, default = 80, min = 4, max = 400, step = 2)]
     target_ticks: f64,
+    #[param(default = 70.0, min = 40.0, max = 90.0)]
     buy_rsi_max: f64,
+    #[param(default = 75.0, min = 50.0, max = 95.0)]
     sell_rsi_min: f64,
+    #[param(default = 30.0, min = 10.0, max = 60.0)]
     short_rsi_min: f64,
+    #[param(default = 25.0, min = 5.0, max = 50.0)]
     cover_rsi_max: f64,
+    #[param(default = 0.0, min = 0.0, max = 3.0)]
     min_volume_ratio: f64,
+    #[param(default = "long_only", choice = ["long_only", "long_short"])]
     side: String,
     prev_fast: Option<f64>,
     prev_slow: Option<f64>,
 }
 
-impl Configurable for IndicatorCross {
-    fn param_spec() -> ParamSpec {
-        ParamSpec::new()
-            .fixed_float("qty", 1.0)
-            .int("stop_ticks", 40, 4, 200, 2)
-            .int("target_ticks", 80, 4, 400, 2)
-            .float("buy_rsi_max", 70.0, 40.0, 90.0)
-            .float("sell_rsi_min", 75.0, 50.0, 95.0)
-            .float("short_rsi_min", 30.0, 10.0, 60.0)
-            .float("cover_rsi_max", 25.0, 5.0, 50.0)
-            .float("min_volume_ratio", 0.0, 0.0, 3.0)
-            .choice("side", "long_only", &["long_only", "long_short"])
-    }
-
-    fn from_params(p: &Params) -> Self {
-        Self {
-            qty: p.float("qty", 1.0).max(1.0),
-            stop_ticks: p.int("stop_ticks", 40) as f64,
-            target_ticks: p.int("target_ticks", 80) as f64,
-            buy_rsi_max: p.float("buy_rsi_max", 70.0),
-            sell_rsi_min: p.float("sell_rsi_min", 75.0),
-            short_rsi_min: p.float("short_rsi_min", 30.0),
-            cover_rsi_max: p.float("cover_rsi_max", 25.0),
-            min_volume_ratio: p.float("min_volume_ratio", 0.0),
-            side: p.str("side", "long_only"),
-            prev_fast: None,
-            prev_slow: None,
-        }
+impl IndicatorCross {
+    fn init(&mut self) {
+        self.qty = self.qty.max(1.0);
     }
 }
 

@@ -1,5 +1,7 @@
 //! Serializable backtest output consumed by downstream apps, JSON artifacts and the web UI.
 
+use std::collections::BTreeMap;
+
 use serde::{Deserialize, Serialize};
 
 use crate::footprint::Footprint;
@@ -93,6 +95,65 @@ pub struct LiquidityHeatmap {
     pub snapshots: Vec<LiquiditySnapshot>,
 }
 
+/// Named diagnostic tallies a strategy keeps while it runs ("setups seen", "rejected: risk too
+/// wide", ...). Return them from `Strategy::counters`; runners print them under the result table
+/// and the viewers show them next to the metrics.
+///
+/// ```ignore
+/// self.counters.inc("departures");
+/// self.counters.add("risk_ticks_sum", risk);
+/// ```
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct Counters(pub BTreeMap<String, f64>);
+
+impl Counters {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Add one to `name`.
+    pub fn inc(&mut self, name: &str) {
+        self.add(name, 1.0);
+    }
+
+    /// Add `amount` to `name`.
+    pub fn add(&mut self, name: &str, amount: f64) {
+        *self.0.entry(name.to_string()).or_insert(0.0) += amount;
+    }
+
+    /// Overwrite `name` (gauges such as "max open setups").
+    pub fn set(&mut self, name: &str, value: f64) {
+        self.0.insert(name.to_string(), value);
+    }
+
+    pub fn get(&self, name: &str) -> f64 {
+        self.0.get(name).copied().unwrap_or(0.0)
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+
+    pub fn iter(&self) -> impl Iterator<Item = (&str, f64)> {
+        self.0.iter().map(|(k, v)| (k.as_str(), *v))
+    }
+
+    /// `name value | name value` on one line; integers print without decimals.
+    pub fn summary(&self) -> String {
+        self.iter()
+            .map(|(k, v)| {
+                if v.fract() == 0.0 && v.abs() < 1e15 {
+                    format!("{k} {}", v as i64)
+                } else {
+                    format!("{k} {v:.2}")
+                }
+            })
+            .collect::<Vec<_>>()
+            .join(" | ")
+    }
+}
+
 /// The full result of one backtest run.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct BacktestResult {
@@ -107,6 +168,9 @@ pub struct BacktestResult {
     /// Per-run line overlays collected via `VisualOutput::series`.
     #[serde(default)]
     pub series: Vec<Series>,
+    /// The strategy's own diagnostic tallies (`Strategy::counters`).
+    #[serde(default, skip_serializing_if = "Counters::is_empty")]
+    pub counters: Counters,
     pub tick_size: f64,
     pub multiplier: f64,
 }

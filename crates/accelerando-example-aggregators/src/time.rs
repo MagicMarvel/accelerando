@@ -1,28 +1,24 @@
 //! Fixed-time footprint aggregator: every `bar_secs` of wall-clock time closes one footprint.
 
 use accelerando_core::{
-    Configurable, EventInterest, Footprint, FootprintAggregator, OrderFlowEvent, ParamSpec, Params,
+    Configurable, EventInterest, Footprint, FootprintAggregator, OrderFlowEvent,
     Side,
 };
 
 /// Aggregates trades into fixed-duration footprints with a full bid/ask ladder.
+#[derive(Configurable)]
+#[configurable(init = Self::init)]
 pub struct TimeAggregator {
+    #[param(default = 300, min = 5, max = 3600, step = 5)]
     bar_secs: i64,
     tick_size: f64,
     current: Option<(i64, Footprint)>, // (bucket, footprint)
 }
 
-impl Configurable for TimeAggregator {
-    fn param_spec() -> ParamSpec {
-        ParamSpec::new().int("bar_secs", 300, 5, 3600, 5)
-    }
-
-    fn from_params(params: &Params) -> Self {
-        Self {
-            bar_secs: params.int("bar_secs", 300).max(1),
-            tick_size: 0.25,
-            current: None,
-        }
+impl TimeAggregator {
+    fn init(&mut self) {
+        self.bar_secs = self.bar_secs.max(1);
+        self.tick_size = 0.25;
     }
 }
 
@@ -84,6 +80,7 @@ impl FootprintAggregator for TimeAggregator {
 #[cfg(test)]
 mod event_tests {
     use super::*;
+    use accelerando_core::Params;
     #[test]
     fn boundary_print_and_unknown_volume_are_not_prior_minute_delta() {
         let mut p = Params::default();

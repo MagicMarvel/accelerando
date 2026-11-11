@@ -103,3 +103,49 @@ fn defaults_overrides_state_and_init() {
 fn bad_choice_still_fails_loudly() {
     Demo::build(&Params::default().with("side", "sideways"));
 }
+
+#[derive(Configurable)]
+struct Clock {
+    #[param(time, default = "18:00", step = 5)]
+    entry_start: u32,
+    #[param(time, default = "16:55", min = "09:00", max = "17:00", step = 5)]
+    entry_end: u32,
+    #[param(time, fixed, default = "06:00")]
+    session_start: i64,
+}
+
+#[test]
+fn time_params_are_minutes_written_as_hhmm() {
+    let c = Clock::build(&Params::default());
+    assert_eq!((c.entry_start, c.entry_end, c.session_start), (1080, 1015, 360));
+    let spec = Clock::param_spec();
+    let end = spec.entries.iter().find(|e| e.name == "entry_end").unwrap();
+    assert!(matches!(end.range, ParamRange::Int { min: 540, max: 1020, step: 5 }));
+    let p = spec
+        .parse_assignments(&["entry_start=09:35".to_string(), "entry_end=1000".to_string()])
+        .unwrap();
+    let c = Clock::build(&p);
+    assert_eq!((c.entry_start, c.entry_end), (575, 1000));
+    assert!(spec.parse_assignments(&["entry_end=08:00".to_string()]).is_err());
+}
+
+#[derive(Configurable)]
+struct Numbers {
+    /// A choice on a numeric field: the options are parsed with `FromStr`.
+    #[param(default = "0.5", choice = ["0.5", "0.618"])]
+    ratio: f64,
+    /// `int` keeps an integer parameter in a float field.
+    #[param(int, default = 8, min = 2, max = 40, step = 2)]
+    stop_ticks: f64,
+}
+
+#[test]
+fn numeric_choices_and_int_floats() {
+    let n = Numbers::build(&Params::default());
+    assert_eq!((n.ratio, n.stop_ticks), (0.5, 8.0));
+    let spec = Numbers::param_spec();
+    assert!(matches!(&spec.entries[0].range, ParamRange::Choice(o) if o == &["0.5", "0.618"]));
+    assert!(matches!(spec.entries[1].range, ParamRange::Int { min: 2, max: 40, step: 2 }));
+    let n = Numbers::build(&spec.parse_assignments(&["ratio=0.618".to_string()]).unwrap());
+    assert_eq!(n.ratio, 0.618);
+}

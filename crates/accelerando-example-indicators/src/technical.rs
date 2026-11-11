@@ -4,14 +4,22 @@
 //! `sma_fast`, `sma_slow`, `ema_fast`, `ema_slow`, `rsi`, `bb_lower`, `bb_mid`, `bb_upper`,
 //! `bb_width`, `volume_sma`, and `delta_sma`.
 
-use accelerando_core::{Configurable, Footprint, Indicator, ParamSpec, Params, Plot};
+use accelerando_core::{Configurable, Footprint, Indicator, Plot};
 
+#[derive(Configurable)]
+#[configurable(init = Self::init)]
 pub struct TechnicalIndicators {
+    #[param(default = 12, min = 2, max = 80)]
     fast_period: usize,
+    #[param(default = 26, min = 4, max = 200)]
     slow_period: usize,
+    #[param(default = 14, min = 2, max = 100)]
     rsi_period: usize,
+    #[param(default = 20, min = 4, max = 200)]
     bb_period: usize,
+    #[param(default = 2.0, min = 0.5, max = 4.0)]
     bb_stddev: f64,
+    #[param(default = 20, min = 2, max = 200)]
     volume_period: usize,
     closes: Vec<f64>,
     volumes: Vec<f64>,
@@ -20,33 +28,14 @@ pub struct TechnicalIndicators {
     ema_slow: Option<f64>,
 }
 
-impl Configurable for TechnicalIndicators {
-    fn param_spec() -> ParamSpec {
-        ParamSpec::new()
-            .int("fast_period", 12, 2, 80, 1)
-            .int("slow_period", 26, 4, 200, 1)
-            .int("rsi_period", 14, 2, 100, 1)
-            .int("bb_period", 20, 4, 200, 1)
-            .float("bb_stddev", 2.0, 0.5, 4.0)
-            .int("volume_period", 20, 2, 200, 1)
-    }
-
-    fn from_params(p: &Params) -> Self {
-        let fast_period = p.usize("fast_period", 12).max(2);
-        let slow_period = p.usize("slow_period", 26).max(fast_period + 1);
-        Self {
-            fast_period,
-            slow_period,
-            rsi_period: p.usize("rsi_period", 14).max(2),
-            bb_period: p.usize("bb_period", 20).max(2),
-            bb_stddev: p.float("bb_stddev", 2.0).max(0.1),
-            volume_period: p.usize("volume_period", 20).max(2),
-            closes: Vec::new(),
-            volumes: Vec::new(),
-            deltas: Vec::new(),
-            ema_fast: None,
-            ema_slow: None,
-        }
+impl TechnicalIndicators {
+    fn init(&mut self) {
+        self.fast_period = self.fast_period.max(2);
+        self.slow_period = self.slow_period.max(self.fast_period + 1);
+        self.rsi_period = self.rsi_period.max(2);
+        self.bb_period = self.bb_period.max(2);
+        self.bb_stddev = self.bb_stddev.max(0.1);
+        self.volume_period = self.volume_period.max(2);
     }
 }
 

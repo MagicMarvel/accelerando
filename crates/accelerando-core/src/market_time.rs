@@ -55,6 +55,73 @@ pub fn eastern_day_minute(ts_ns: i64) -> (i64, u32) {
     (days, minute)
 }
 
+/// Is `minute` inside the clock window `[start, end)`? `start > end` wraps past midnight
+/// (`18:00 → 16:55` covers the Globex night), `start == end` is empty.
+pub fn in_clock_window(minute: u32, start: u32, end: u32) -> bool {
+    if start <= end {
+        minute >= start && minute < end
+    } else {
+        minute >= start || minute < end
+    }
+}
+
+/// The clock a strategy keeps its calendar in.
+///
+/// Parses from `eastern` / `et` / `new_york` (US-Eastern, DST aware), `beijing` / `shanghai`
+/// (UTC+8), `utc`, and fixed offsets such as `utc+8`, `utc-5`, `utc+5:30`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum TimeZone {
+    /// US-Eastern civil time with the post-2007 DST rule (CME's calendar).
+    #[default]
+    Eastern,
+    /// A fixed offset from UTC, in minutes (Beijing = `+480`).
+    Fixed(i32),
+}
+
+impl TimeZone {
+    pub const BEIJING: TimeZone = TimeZone::Fixed(8 * 60);
+    pub const UTC: TimeZone = TimeZone::Fixed(0);
+
+    /// Local civil day (days since epoch) and minute-of-day of a UTC timestamp.
+    pub fn day_minute(self, ts_ns: i64) -> (i64, u32) {
+        match self {
+            TimeZone::Eastern => eastern_day_minute(ts_ns),
+            TimeZone::Fixed(offset_min) => {
+                let local_s = ts_ns.div_euclid(NS_PER_SEC) + offset_min as i64 * 60;
+                (local_s.div_euclid(86_400), (local_s.rem_euclid(86_400) / 60) as u32)
+            }
+        }
+    }
+}
+
+impl std::str::FromStr for TimeZone {
+    type Err = String;
+    fn from_str(raw: &str) -> Result<Self, String> {
+        let s = raw.trim().to_ascii_lowercase();
+        match s.as_str() {
+            "eastern" | "et" | "est" | "edt" | "new_york" | "america/new_york" => {
+                return Ok(TimeZone::Eastern)
+            }
+            "beijing" | "shanghai" | "asia/shanghai" => return Ok(TimeZone::BEIJING),
+            "utc" | "gmt" => return Ok(TimeZone::UTC),
+            _ => {}
+        }
+        let bad = || format!("unknown time zone `{raw}` (eastern | beijing | utc | utc+8 | utc-5:30)");
+        let rest = s.strip_prefix("utc").ok_or_else(bad)?;
+        let (sign, rest) = match rest.as_bytes().first() {
+            Some(b'+') => (1, &rest[1..]),
+            Some(b'-') => (-1, &rest[1..]),
+            _ => return Err(bad()),
+        };
+        let (h, m) = rest.split_once(':').unwrap_or((rest, "0"));
+        let (h, m): (i32, i32) = (h.parse().map_err(|_| bad())?, m.parse().map_err(|_| bad())?);
+        if h > 14 || !(0..60).contains(&m) {
+            return Err(bad());
+        }
+        Ok(TimeZone::Fixed(sign * (h * 60 + m)))
+    }
+}
+
 pub fn in_us_dst(year: i32, month: i32, day: i32) -> bool {
     if !(3..=11).contains(&month) {
         return false;

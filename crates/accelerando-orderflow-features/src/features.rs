@@ -12,7 +12,7 @@ use std::collections::VecDeque;
 
 use accelerando_core::market_time::eastern_day_minute;
 use accelerando_core::{
-    Configurable, EventInterest, Footprint, Indicator, OrderFlowEvent, ParamSpec, Params,
+    Configurable, EventInterest, Footprint, Indicator, OrderFlowEvent,
 };
 
 // ---- 2.1 base aggressive-trade features -------------------------------------------------------
@@ -77,6 +77,7 @@ const SIZE_HIST_BUCKETS: usize = 4096;
 
 /// Rolling z-score over the previous `window` observations, **excluding** the value being
 /// scored: the caller gets `z(x)` computed from prior data only, then `x` joins the window.
+#[derive(Default)]
 struct RollingZ {
     window: usize,
     min_history: usize,
@@ -145,17 +146,34 @@ struct SessionState {
     cvd_history: Vec<f64>,
 }
 
+#[derive(Configurable)]
+#[configurable(init = Self::init)]
 pub struct TradeFlowFeatures {
+    #[param(fixed, default = 0.25)]
     tick: f64,
+    #[param(default = 100, min = 10, max = 2000, step = 10)]
+    normalization_window: usize,
+    #[param(default = 30, min = 2, max = 500)]
+    minimum_history: usize,
+    #[param(default = 20, min = 2, max = 500)]
     recent_range_window: usize,
+    #[param(default = 20, min = 2, max = 200)]
     atr_period: usize,
+    #[param(default = 20, min = 2, max = 500)]
     realized_vol_window: usize,
-    large_trade_mode_fixed: bool,
+    #[param(default = "percentile", choice = ["percentile", "fixed"])]
+    large_trade_mode: String,
+    #[param(default = 10.0, min = 1.0, max = 5000.0)]
     large_trade_min_size: f64,
+    #[param(default = 0.95, min = 0.5, max = 0.999)]
     large_trade_percentile: f64,
+    #[param(default = 2000, min = 50, max = 100000, step = 50)]
     large_trade_window: usize,
+    #[param(default = 3.0, min = 1.1, max = 20.0)]
     imbalance_ratio: f64,
+    #[param(default = 5.0, min = 0.0, max = 5000.0)]
     imbalance_min_volume: f64,
+    large_trade_mode_fixed: bool,
 
     // Raw-trade capture for large-trade stats.
     pending_trades: VecDeque<PendingTrade>,
@@ -181,53 +199,30 @@ pub struct TradeFlowFeatures {
     session: SessionState,
 }
 
-impl Configurable for TradeFlowFeatures {
-    fn param_spec() -> ParamSpec {
-        ParamSpec::new()
-            .fixed_float("tick", 0.25)
-            .int("normalization_window", 100, 10, 2000, 10)
-            .int("minimum_history", 30, 2, 500, 1)
-            .int("recent_range_window", 20, 2, 500, 1)
-            .int("atr_period", 20, 2, 200, 1)
-            .int("realized_vol_window", 20, 2, 500, 1)
-            .choice("large_trade_mode", "percentile", &["percentile", "fixed"])
-            .float("large_trade_min_size", 10.0, 1.0, 5000.0)
-            .float("large_trade_percentile", 0.95, 0.5, 0.999)
-            .int("large_trade_window", 2000, 50, 100000, 50)
-            .float("imbalance_ratio", 3.0, 1.1, 20.0)
-            .float("imbalance_min_volume", 5.0, 0.0, 5000.0)
-    }
-
-    fn from_params(p: &Params) -> Self {
-        let window = p.usize("normalization_window", 100).max(10);
-        let min_history = p.usize("minimum_history", 30).max(2).min(window);
-        Self {
-            tick: p.float("tick", 0.25).max(f64::EPSILON),
-            recent_range_window: p.usize("recent_range_window", 20).max(2),
-            atr_period: p.usize("atr_period", 20).max(2),
-            realized_vol_window: p.usize("realized_vol_window", 20).max(2),
-            large_trade_mode_fixed: p.str("large_trade_mode", "percentile") == "fixed",
-            large_trade_min_size: p.float("large_trade_min_size", 10.0).max(1.0),
-            large_trade_percentile: p.float("large_trade_percentile", 0.95).clamp(0.5, 0.999),
-            large_trade_window: p.usize("large_trade_window", 2000).max(50),
-            imbalance_ratio: p.float("imbalance_ratio", 3.0).max(1.0),
-            imbalance_min_volume: p.float("imbalance_min_volume", 5.0).max(0.0),
-            pending_trades: VecDeque::new(),
-            size_hist: vec![0; SIZE_HIST_BUCKETS],
-            size_hist_total: 0,
-            size_window: VecDeque::new(),
-            z_delta: RollingZ::new(window, min_history),
-            z_volume: RollingZ::new(window, min_history),
-            z_trade_rate: RollingZ::new(window, min_history),
-            z_bar_move: RollingZ::new(window, min_history),
-            z_delta_eff: RollingZ::new(window, min_history),
-            z_abs_delta_eff: RollingZ::new(window, min_history),
-            atr_prev_close: None,
-            atr_window: VecDeque::new(),
-            atr_sum: 0.0,
-            rv_prev_close: None,
-            ret_window: VecDeque::new(),
-            session: SessionState::default(),
+impl TradeFlowFeatures {
+    fn init(&mut self) {
+        let window = self.normalization_window.max(10);
+        let min_history = self.minimum_history.max(2).min(window);
+        self.tick = self.tick.max(f64::EPSILON);
+        self.recent_range_window = self.recent_range_window.max(2);
+        self.atr_period = self.atr_period.max(2);
+        self.realized_vol_window = self.realized_vol_window.max(2);
+        self.large_trade_mode_fixed = self.large_trade_mode == "fixed";
+        self.large_trade_min_size = self.large_trade_min_size.max(1.0);
+        self.large_trade_percentile = self.large_trade_percentile.clamp(0.5, 0.999);
+        self.large_trade_window = self.large_trade_window.max(50);
+        self.imbalance_ratio = self.imbalance_ratio.max(1.0);
+        self.imbalance_min_volume = self.imbalance_min_volume.max(0.0);
+        self.size_hist = vec![0; SIZE_HIST_BUCKETS];
+        for z in [
+            &mut self.z_delta,
+            &mut self.z_volume,
+            &mut self.z_trade_rate,
+            &mut self.z_bar_move,
+            &mut self.z_delta_eff,
+            &mut self.z_abs_delta_eff,
+        ] {
+            *z = RollingZ::new(window, min_history);
         }
     }
 }

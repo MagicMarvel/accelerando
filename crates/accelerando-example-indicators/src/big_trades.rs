@@ -1,7 +1,7 @@
 use std::collections::BTreeMap;
 
 use accelerando_core::{
-    Configurable, EventInterest, Footprint, Indicator, OrderFlowEvent, ParamSpec, Params, Plot,
+    Configurable, EventInterest, Footprint, Indicator, OrderFlowEvent, Plot,
     Side,
 };
 
@@ -45,16 +45,28 @@ struct PendingCumulative {
 /// In `single` mode it keeps trades at or above `min_trade_size`. In `cumulative` mode it groups
 /// consecutive same-side trades and keeps the whole group when its total reaches the threshold.
 /// Both modes aggregate accepted volume by price inside the current footprint.
+#[derive(Configurable)]
+#[configurable(init = Self::init)]
 pub struct BigTrades {
+    #[param(default = "single", choice = ["single", "cumulative"])]
     mode: BigTradeMode,
+    #[param(default = "fixed", choice = ["fixed", "adaptive"])]
     threshold_mode: ThresholdMode,
+    #[param(default = 25.0, min = 1.0, max = 5000.0)]
     min_trade_size: f64,
+    #[param(default = 500.0, min = 1.0, max = 20000.0)]
     max_trade_size: f64,
+    #[param(default = 20, min = 3, max = 200)]
     lookback_bars: usize,
+    #[param(default = 1.0, min = 0.0, max = 4.0)]
     sensitivity: f64,
+    #[param(int, default = 16, min = 1, max = 120)]
     edge_band_ticks: f64,
+    #[param(fixed, default = 0.25)]
     tick: f64,
+    #[param(default = true)]
     plot_markers: bool,
+    #[param(default = 8, min = 1, max = 50)]
     max_markers_per_side: usize,
     pending: Option<PendingCumulative>,
     cached_threshold: f64,
@@ -66,49 +78,36 @@ pub struct BigTrades {
     count: u64,
 }
 
-impl Configurable for BigTrades {
-    fn param_spec() -> ParamSpec {
-        ParamSpec::new()
-            .choice("mode", "single", &["single", "cumulative"])
-            .choice("threshold_mode", "fixed", &["fixed", "adaptive"])
-            .float("min_trade_size", 25.0, 1.0, 5000.0)
-            .float("max_trade_size", 500.0, 1.0, 20000.0)
-            .int("lookback_bars", 20, 3, 200, 1)
-            .float("sensitivity", 1.0, 0.0, 4.0)
-            .int("edge_band_ticks", 16, 1, 120, 1)
-            .fixed_float("tick", 0.25)
-            .int("plot_markers", 1, 0, 1, 1)
-            .int("max_markers_per_side", 8, 1, 50, 1)
+impl BigTrades {
+    fn init(&mut self) {
+        self.min_trade_size = self.min_trade_size.max(1.0);
+        self.max_trade_size = self.max_trade_size.max(self.min_trade_size);
+        self.lookback_bars = self.lookback_bars.max(1);
+        self.sensitivity = self.sensitivity.max(0.0);
+        self.tick = self.tick.max(f64::EPSILON);
+        self.max_markers_per_side = self.max_markers_per_side.max(1);
+        self.cached_threshold = self.min_trade_size;
     }
+}
 
-    fn from_params(p: &Params) -> Self {
-        let mode = match p.str("mode", "single").as_str() {
-            "cumulative" => BigTradeMode::Cumulative,
-            _ => BigTradeMode::Single,
-        };
-        let min_trade_size = p.float("min_trade_size", 25.0).max(1.0);
-        Self {
-            mode,
-            threshold_mode: match p.str("threshold_mode", "fixed").as_str() {
-                "adaptive" => ThresholdMode::Adaptive,
-                _ => ThresholdMode::Fixed,
-            },
-            min_trade_size,
-            max_trade_size: p.float("max_trade_size", 500.0).max(min_trade_size),
-            lookback_bars: p.usize("lookback_bars", 20).max(1),
-            sensitivity: p.float("sensitivity", 1.0).max(0.0),
-            edge_band_ticks: p.int("edge_band_ticks", 16) as f64,
-            tick: p.float("tick", 0.25).max(f64::EPSILON),
-            plot_markers: p.int("plot_markers", 1) != 0,
-            max_markers_per_side: p.usize("max_markers_per_side", 8).max(1),
-            pending: None,
-            cached_threshold: min_trade_size,
-            current_candidate_max: 0.0,
-            prior_candidate_max: Vec::new(),
-            by_tick: BTreeMap::new(),
-            total_buy: 0.0,
-            total_sell: 0.0,
-            count: 0,
+impl std::str::FromStr for BigTradeMode {
+    type Err = String;
+    fn from_str(s: &str) -> Result<Self, String> {
+        match s {
+            "single" => Ok(Self::Single),
+            "cumulative" => Ok(Self::Cumulative),
+            other => Err(format!("unknown BigTradeMode `{other}`")),
+        }
+    }
+}
+
+impl std::str::FromStr for ThresholdMode {
+    type Err = String;
+    fn from_str(s: &str) -> Result<Self, String> {
+        match s {
+            "fixed" => Ok(Self::Fixed),
+            "adaptive" => Ok(Self::Adaptive),
+            other => Err(format!("unknown ThresholdMode `{other}`")),
         }
     }
 }

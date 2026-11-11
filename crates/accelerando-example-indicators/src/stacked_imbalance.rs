@@ -1,4 +1,4 @@
-use accelerando_core::{Configurable, Footprint, Indicator, ParamSpec, Params, Plot};
+use accelerando_core::{Configurable, Footprint, Indicator, Plot};
 use std::collections::VecDeque;
 
 pub const BUY_STACK: &str = "stacked_imbalance_buy";
@@ -49,15 +49,26 @@ struct Stack {
 /// per-level aggressive volumes). Runs of `min_stack`+ adjacent same-direction imbalances
 /// merge into one stacked-imbalance zone, published as values and as `PriceBox` plots
 /// (group `imbalance`) that the web studio extends right until price closes through them.
+#[derive(Configurable)]
+#[configurable(init = Self::init)]
 pub struct StackedImbalance {
+    #[param(default = 3.0, min = 1.1, max = 20.0)]
     ratio: f64,
+    #[param(default = 3, min = 1, max = 12)]
     min_stack: usize,
+    #[param(fixed, default = 0.25)]
     tick: f64,
+    #[param(default = "percentile", choice = ["percentile", "fixed"])]
     volume_mode: VolumeMode,
+    #[param(default = 10.0, min = 0.0, max = 5000.0)]
     min_volume: f64,
+    #[param(default = 0.70, min = 0.0, max = 0.999)]
     percentile: f64,
+    #[param(default = 500, min = 10, max = 20000, step = 10)]
     lookback_bars: usize,
+    #[param(default = true)]
     plot_zones: bool,
+    #[param(default = 2, min = 1, max = 8)]
     max_zones_per_side: usize,
     // Rolling histogram of per-level aggressive volumes for the percentile filter.
     hist: Vec<u32>,
@@ -66,38 +77,26 @@ pub struct StackedImbalance {
     seq: u64,
 }
 
-impl Configurable for StackedImbalance {
-    fn param_spec() -> ParamSpec {
-        ParamSpec::new()
-            .float("ratio", 3.0, 1.1, 20.0)
-            .int("min_stack", 3, 1, 12, 1)
-            .fixed_float("tick", 0.25)
-            .choice("volume_mode", "percentile", &["percentile", "fixed"])
-            .float("min_volume", 10.0, 0.0, 5000.0)
-            .float("percentile", 0.70, 0.0, 0.999)
-            .int("lookback_bars", 500, 10, 20000, 10)
-            .int("plot_zones", 1, 0, 1, 1)
-            .int("max_zones_per_side", 2, 1, 8, 1)
+impl StackedImbalance {
+    fn init(&mut self) {
+        self.ratio = self.ratio.max(1.0);
+        self.min_stack = self.min_stack.max(1);
+        self.tick = self.tick.max(f64::EPSILON);
+        self.min_volume = self.min_volume.max(0.0);
+        self.percentile = self.percentile.clamp(0.0, 0.999);
+        self.lookback_bars = self.lookback_bars.max(1);
+        self.max_zones_per_side = self.max_zones_per_side.max(1);
+        self.hist = vec![0; HIST_BUCKETS];
     }
+}
 
-    fn from_params(p: &Params) -> Self {
-        Self {
-            ratio: p.float("ratio", 3.0).max(1.0),
-            min_stack: p.usize("min_stack", 3).max(1),
-            tick: p.float("tick", 0.25).max(f64::EPSILON),
-            volume_mode: match p.str("volume_mode", "percentile").as_str() {
-                "fixed" => VolumeMode::Fixed,
-                _ => VolumeMode::Percentile,
-            },
-            min_volume: p.float("min_volume", 10.0).max(0.0),
-            percentile: p.float("percentile", 0.70).clamp(0.0, 0.999),
-            lookback_bars: p.usize("lookback_bars", 500).max(1),
-            plot_zones: p.int("plot_zones", 1) != 0,
-            max_zones_per_side: p.usize("max_zones_per_side", 2).max(1),
-            hist: vec![0; HIST_BUCKETS],
-            hist_total: 0,
-            window: VecDeque::new(),
-            seq: 0,
+impl std::str::FromStr for VolumeMode {
+    type Err = String;
+    fn from_str(s: &str) -> Result<Self, String> {
+        match s {
+            "percentile" => Ok(Self::Percentile),
+            "fixed" => Ok(Self::Fixed),
+            other => Err(format!("unknown VolumeMode `{other}`")),
         }
     }
 }
@@ -277,6 +276,7 @@ impl StackedImbalance {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use accelerando_core::Params;
     use accelerando_core::Level;
 
     fn fp_with_ladder(levels: &[(f64, f64, f64)]) -> Footprint {

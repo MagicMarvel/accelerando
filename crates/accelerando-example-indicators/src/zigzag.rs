@@ -1,33 +1,27 @@
 //! Causal ZigZag chart indicator. The detector itself lives in `accelerando_core::ta::zigzag`
 //! (re-exported here for compatibility).
 
-use accelerando_core::{Configurable, Footprint, Indicator, ParamSpec, Params, Plot};
+use accelerando_core::{Configurable, Footprint, Indicator, Plot};
 
 pub use accelerando_core::ta::zigzag::{Pivot, PivotConfirmation, PivotKind, ZigZag};
 
 /// Framework indicator wrapper around [`ZigZag`]. Prices are configured in instrument points.
+#[derive(Configurable)]
+#[configurable(init = Self::init)]
 pub struct ZigZagIndicator {
-    detector: ZigZag,
+    #[param(default = 4.0, min = 0.000001, max = 10000.0)]
+    reversal: f64,
+    #[param(default = 0.0, min = 0.0, max = 10000.0)]
+    min_leg: f64,
+    #[param(default = 0, min = 0, max = 10000)]
+    min_leg_bars: usize,
+    detector: Option<ZigZag>,
     bar: usize,
 }
 
-impl Configurable for ZigZagIndicator {
-    fn param_spec() -> ParamSpec {
-        ParamSpec::new()
-            .float("reversal", 4.0, 0.000001, 10000.0)
-            .float("min_leg", 0.0, 0.0, 10000.0)
-            .int("min_leg_bars", 0, 0, 10000, 1)
-    }
-
-    fn from_params(p: &Params) -> Self {
-        Self {
-            detector: ZigZag::with_filters(
-                p.float("reversal", 4.0),
-                p.float("min_leg", 0.0),
-                p.usize("min_leg_bars", 0),
-            ),
-            bar: 0,
-        }
+impl ZigZagIndicator {
+    fn init(&mut self) {
+        self.detector = Some(ZigZag::with_filters(self.reversal, self.min_leg, self.min_leg_bars));
     }
 }
 
@@ -37,7 +31,7 @@ impl Indicator for ZigZagIndicator {
     }
 
     fn on_footprint(&mut self, fp: &mut Footprint, _history: &[Footprint]) {
-        if let Some(event) = self.detector.update(self.bar, fp.high, fp.low) {
+        if let Some(event) = self.detector.as_mut().expect("built in init").update(self.bar, fp.high, fp.low) {
             fp.values
                 .insert("zigzag_pivot_price".into(), event.pivot.price);
             fp.values

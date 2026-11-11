@@ -147,7 +147,10 @@ cargo run --release -- data.csv --strategy my_strategy --grid --max-evals 200 --
 cargo run --release -- --list
 ```
 
-1. **`#[derive(Configurable)]`**：由字段属性生成 `param_spec()` 与 `from_params()`。整数 -> `int`
+1. **`#[derive(Configurable)]`**：由字段属性生成 `param_spec()` 与 `from_params()`，且是实现
+   `Configurable` 的唯一方式（trait 已封闭：参数名、默认值、范围只在字段上写一次）。浮点字段加
+   `int` -> 以 `f64` 保存的整数参数；整数字段加 `time` -> 一天中的分钟，写作 `"HH:MM"`（命令行可写
+   `18:00`）。整数 -> `int`
    （`min`/`max`，可选 `step`）；浮点 -> `float`（可选 `step`）；`bool` -> 开关（命令行接受
    `true/false`）；`String` 或实现 `FromStr` 的类型配 `choice = [...]`；`fixed` 表示不参与搜索；
    `name = "..."` 保留旧参数名；`#[param(flatten)]` 嵌入参数组。没有 `#[param]` 的字段以
@@ -192,7 +195,8 @@ for strategy in strategies {
 ## 自定义适配器
 
 1. 实现对应阶段的 trait（`DataSource` / `FootprintAggregator` / `Indicator` / `Strategy`）。
-2. 实现 `Configurable`（`param_spec()` + `from_params()`）。
+2. 加 `#[derive(Configurable)]`，在参数字段上写 `#[param(...)]`（手写 `impl Configurable` 无法编译；
+   由参数推导的状态放进 `#[configurable(init = Self::init)]`）。
 3. 注册后像内置适配器一样构建：
 
 ```rust

@@ -65,7 +65,8 @@ pub enum OrderFlowEvent {
 }
 
 /// Bitmask describing which event classes a component wants to receive in the hot loop.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// `Default` is [`EventInterest::NONE`].
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct EventInterest(u8);
 
 impl EventInterest {

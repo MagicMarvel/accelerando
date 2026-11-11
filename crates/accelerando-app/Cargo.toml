@@ -9,6 +9,13 @@ description = "Batteries-included runner for Accelerando: CLI, prepared-data cac
 accelerando = { workspace = true }
 accelerando-core = { workspace = true }
 accelerando-web = { workspace = true }
+accelerando-gui = { workspace = true, optional = true }
 rayon = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+toml = { workspace = true }
+
+[features]
+default = ["gui"]
+# `--gui`: native egui viewer (pulls in eframe; disable for headless builds).
+gui = ["dep:accelerando-gui"]

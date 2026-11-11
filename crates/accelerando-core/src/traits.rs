@@ -159,6 +159,12 @@ pub trait Strategy {
     /// Event runner lifecycle hook; cancel signal timers at EOF. No orders are executed afterward.
     fn on_end_of_data(&mut self) {}
 
+    /// Diagnostic tallies collected during the run (keep a [`crate::Counters`] field and return a
+    /// clone). Read once after the last bar; shown under the result table and in the viewers.
+    fn counters(&self) -> crate::Counters {
+        crate::Counters::default()
+    }
+
     /// Optional causal diagnostics drained by the event runner into a JSONL sink.
     fn take_diagnostics(&mut self) -> Vec<serde_json::Value> {
         Vec::new()

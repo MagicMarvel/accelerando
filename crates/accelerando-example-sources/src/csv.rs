@@ -20,35 +20,27 @@ use std::fs::File;
 use std::io::{BufRead, BufReader};
 
 use accelerando_core::{
-    Configurable, DataSource, EventInterest, OrderFlowEvent, ParamSpec, Params, ProgressHandle,
+    Configurable, DataSource, EventInterest, OrderFlowEvent, ProgressHandle,
     Side,
 };
 
 /// Streams an [`OrderFlowEvent`] sequence from a CSV file.
+#[derive(Configurable)]
+#[configurable(init = Self::init)]
 pub struct CsvSource {
+    #[param(fixed, default = "")]
     path: String,
+    #[param(fixed, default = 2)]
     buy_aggressor_code: i64,
+    #[param(fixed, default = 1)]
     bid_book_code: i64,
     progress: Option<ProgressHandle>,
     event_interest: EventInterest,
 }
 
-impl Configurable for CsvSource {
-    fn param_spec() -> ParamSpec {
-        ParamSpec::new()
-            .fixed_str("path", "")
-            .fixed_int("buy_aggressor_code", 2)
-            .fixed_int("bid_book_code", 1)
-    }
-
-    fn from_params(params: &Params) -> Self {
-        Self {
-            path: params.str("path", ""),
-            buy_aggressor_code: params.int("buy_aggressor_code", 2),
-            bid_book_code: params.int("bid_book_code", 1),
-            progress: None,
-            event_interest: EventInterest::ALL,
-        }
+impl CsvSource {
+    fn init(&mut self) {
+        self.event_interest = EventInterest::ALL;
     }
 }
 
@@ -333,6 +325,7 @@ fn parse_f64_field(bytes: &[u8], pos: &mut usize) -> Option<Option<f64>> {
 #[cfg(test)]
 mod event_tests {
     use super::*;
+    use accelerando_core::Params;
     #[test]
     fn csv_preserves_unknown_aggressor_instead_of_inventing_sell_volume() {
         let path = std::env::temp_dir().join(format!(

@@ -1,29 +1,25 @@
 //! Fixed-volume footprint aggregator: closes a footprint once it has traded `volume` contracts.
 
 use accelerando_core::{
-    Configurable, EventInterest, Footprint, FootprintAggregator, OrderFlowEvent, ParamSpec, Params,
+    Configurable, EventInterest, Footprint, FootprintAggregator, OrderFlowEvent,
     Side,
 };
 
 /// Aggregates trades into footprints of (at least) `volume` traded contracts each. The trade that
 /// reaches the target belongs to the closing bar; it is not split across two bars.
+#[derive(Configurable)]
+#[configurable(init = Self::init)]
 pub struct VolumeAggregator {
+    #[param(int, default = 1000, min = 10, max = 1_000_000, step = 10)]
     volume: f64,
     tick_size: f64,
     current: Option<Footprint>,
 }
 
-impl Configurable for VolumeAggregator {
-    fn param_spec() -> ParamSpec {
-        ParamSpec::new().int("volume", 1000, 10, 1_000_000, 10)
-    }
-
-    fn from_params(params: &Params) -> Self {
-        Self {
-            volume: params.int("volume", 1000).max(1) as f64,
-            tick_size: 0.25,
-            current: None,
-        }
+impl VolumeAggregator {
+    fn init(&mut self) {
+        self.volume = self.volume.max(1.0);
+        self.tick_size = 0.25;
     }
 }
 
@@ -77,6 +73,7 @@ impl FootprintAggregator for VolumeAggregator {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use accelerando_core::Params;
     use accelerando_core::ParamValue;
 
     #[test]

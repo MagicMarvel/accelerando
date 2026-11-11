@@ -1,36 +1,47 @@
 //! Trading-day bookkeeping shared by most intraday strategies.
 //!
-//! * [`SessionClock`] — turns a footprint timestamp into the US-Eastern day/minute and flags the
+//! * [`SessionClock`] — turns a footprint timestamp into a trading day + minute and flags the
 //!   first bar of a new day, so strategies stop hand-rolling `if day != self.cur_day { ... }`.
+//!   US-Eastern midnight by default; any [`TimeZone`] and any day-start time (e.g. Beijing 06:00,
+//!   or CME's 18:00 ET Globex open) via [`SessionClock::in_zone`] / [`SessionClock::day_starts_at`].
 //! * [`SessionFilter`] — allowed ET windows plus open/close exclusion bands (parameter group).
 //! * [`TradeDiscipline`] — per-day trade cap, cooldown, single-position rule (parameter group).
 //!
 //! Both groups derive `Configurable`, so embed them with `#[param(flatten)]`.
 
-use crate::market_time::{eastern_day_minute, in_session, parse_minute, parse_sessions};
+use crate::market_time::{in_session, parse_minute, parse_sessions, TimeZone};
 use crate::params::{ParamGroup, ParamSpec, Params};
 use crate::Configurable;
 
-/// One bar's position on the Eastern-time calendar.
+/// One bar's position on a [`SessionClock`]'s calendar.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct SessionTick {
-    /// Days since the Unix epoch, in US-Eastern civil time (DST aware).
+    /// Trading day: days since the Unix epoch of the local date on which the trading day
+    /// *started* (with an 18:00 start, Monday 20:00 and Tuesday 10:00 share Monday's number).
     pub day: i64,
-    /// Minute of the Eastern day, `0..1440`.
+    /// Local minute-of-day in the clock's time zone, `0..1440`.
     pub minute: u32,
+    /// Minutes since the trading day started, `0..1440`.
+    pub elapsed: u32,
     /// `true` on the first bar seen for `day`.
     pub new_day: bool,
 }
 
-/// Tracks the Eastern trading day across bars.
+/// Tracks the trading day across bars: US-Eastern midnight-to-midnight by default.
 #[derive(Clone, Debug)]
 pub struct SessionClock {
+    zone: TimeZone,
+    day_start: u32,
     day: i64,
 }
 
 impl Default for SessionClock {
     fn default() -> Self {
-        Self { day: i64::MIN }
+        Self {
+            zone: TimeZone::Eastern,
+            day_start: 0,
+            day: i64::MIN,
+        }
     }
 }
 
@@ -39,14 +50,39 @@ impl SessionClock {
         Self::default()
     }
 
+    /// Keep the calendar in `zone` (`TimeZone::BEIJING`, `"utc+8".parse()?`, ...).
+    pub fn in_zone(mut self, zone: TimeZone) -> Self {
+        self.zone = zone;
+        self
+    }
+
+    /// Start each trading day at this local minute instead of midnight (`18 * 60` for the CME
+    /// Globex day in Eastern time; `6 * 60` for a Beijing 06:00 day). Taken modulo 1440.
+    pub fn day_starts_at(mut self, minute: u32) -> Self {
+        self.day_start = minute % 1440;
+        self
+    }
+
+    pub fn zone(&self) -> TimeZone {
+        self.zone
+    }
+
+    /// `(trading day, local minute, minutes since day start)` of `ts_ns`, without advancing.
+    pub fn locate(&self, ts_ns: i64) -> (i64, u32, u32) {
+        let (date, minute) = self.zone.day_minute(ts_ns);
+        let since = date * 1440 + minute as i64 - self.day_start as i64;
+        (since.div_euclid(1440), minute, since.rem_euclid(1440) as u32)
+    }
+
     /// Advance to the bar ending at `ts_ns` (use `fp.ts_last_ns`).
     pub fn update(&mut self, ts_ns: i64) -> SessionTick {
-        let (day, minute) = eastern_day_minute(ts_ns);
+        let (day, minute, elapsed) = self.locate(ts_ns);
         let new_day = day != self.day;
         self.day = day;
         SessionTick {
             day,
             minute,
+            elapsed,
             new_day,
         }
     }
@@ -245,6 +281,29 @@ mod tests {
         let b = c.update(ts(24, 30));
         assert!(b.new_day);
         assert_eq!(b.minute, 30);
+    }
+
+    #[test]
+    fn clock_supports_zones_and_day_starts() {
+        // 2026-01-05 is EST (UTC-5); Beijing = UTC+8.
+        let base = days_from_civil(2026, 1, 5) * 86_400;
+        let utc = |h: i64, m: i64| (base + h * 3600 + m * 60) * NS_PER_SEC;
+        // Beijing day starting 06:00: 21:59 UTC Jan 5 = 05:59 BJ Jan 6 -> still Jan 5's day.
+        let mut bj = SessionClock::new().in_zone(TimeZone::BEIJING).day_starts_at(6 * 60);
+        let a = bj.update(utc(21, 59));
+        assert_eq!((a.day, a.minute, a.elapsed), (days_from_civil(2026, 1, 5), 5 * 60 + 59, 1439));
+        let b = bj.update(utc(22, 0));
+        assert!(b.new_day);
+        assert_eq!((b.day, b.elapsed), (days_from_civil(2026, 1, 6), 0));
+        // CME Globex day in ET starting 18:00: Mon 18:00 ET (23:00 UTC) and Tue 10:00 ET share it.
+        let mut cme = SessionClock::new().day_starts_at(18 * 60);
+        let mon = cme.update(utc(23, 0));
+        let tue = cme.update(utc(24 + 15, 0));
+        assert_eq!(mon.day, days_from_civil(2026, 1, 5));
+        assert_eq!((tue.day, tue.minute, tue.elapsed, tue.new_day), (mon.day, 600, 960, false));
+        assert_eq!("utc-5:30".parse::<TimeZone>().unwrap(), TimeZone::Fixed(-330));
+        assert_eq!("Beijing".parse::<TimeZone>().unwrap(), TimeZone::BEIJING);
+        assert!("mars".parse::<TimeZone>().is_err());
     }
 
     #[test]

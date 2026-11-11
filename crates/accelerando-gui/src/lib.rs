@@ -928,5 +928,10 @@ fn metrics_rows(result: &BacktestResult) -> Vec<(String, String)> {
             .filter(|(k, _)| !HEAD.contains(&k.as_str()))
             .map(|(k, v)| (k.clone(), fmt(v))),
     );
+    // The strategy's own tallies (`Strategy::counters`), prefixed so they read apart.
+    rows.extend(result.counters.iter().map(|(k, v)| {
+        let v = if v.fract() == 0.0 { format!("{}", v as i64) } else { format!("{v:.4}") };
+        (format!("· {k}"), v)
+    }));
     rows
 }

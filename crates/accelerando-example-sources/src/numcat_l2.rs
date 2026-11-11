@@ -9,47 +9,35 @@ use std::fs::File;
 use std::io::BufReader;
 
 use accelerando_core::{
-    Configurable, DataSource, EventInterest, OrderFlowEvent, ParamSpec, Params, ProgressHandle,
+    Configurable, DataSource, EventInterest, OrderFlowEvent, ProgressHandle,
     Side,
 };
 
 /// Data source that yields normalized order flow events from NumCat Stock/ETF L2 snapshots.
+#[derive(Configurable)]
+#[configurable(init = Self::init)]
 pub struct NumCatL2Source {
+    #[param(fixed, default = "")]
     path: String,
+    #[param(fixed, default = "")]
     api_key: String,
+    #[param(fixed, default = "510300.SH")]
     symbol: String,
+    #[param(fixed, default = "")]
     tradedate: String,
+    #[param(fixed, default = 0.001)]
     tick_size: f64,
+    #[param(fixed, default = 100.0)]
     multiplier: f64,
+    #[param(fixed, default = true)]
     infer_aggressor: bool,
     progress: Option<ProgressHandle>,
     event_interest: EventInterest,
 }
 
-impl Configurable for NumCatL2Source {
-    fn param_spec() -> ParamSpec {
-        ParamSpec::new()
-            .fixed_str("path", "")
-            .fixed_str("api_key", "")
-            .fixed_str("symbol", "510300.SH")
-            .fixed_str("tradedate", "")
-            .fixed_float("tick_size", 0.001)
-            .fixed_float("multiplier", 100.0)
-            .fixed_int("infer_aggressor", 1)
-    }
-
-    fn from_params(params: &Params) -> Self {
-        Self {
-            path: params.str("path", ""),
-            api_key: params.str("api_key", ""),
-            symbol: params.str("symbol", "510300.SH"),
-            tradedate: params.str("tradedate", ""),
-            tick_size: params.float("tick_size", 0.001),
-            multiplier: params.float("multiplier", 100.0),
-            infer_aggressor: params.int("infer_aggressor", 1) != 0,
-            progress: None,
-            event_interest: EventInterest::ALL,
-        }
+impl NumCatL2Source {
+    fn init(&mut self) {
+        self.event_interest = EventInterest::ALL;
     }
 }
 
@@ -569,6 +557,7 @@ fn days_from_civil(year: i32, month: i32, day: i32) -> i64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use accelerando_core::Params;
 
     #[test]
     fn test_numcat_l2_parsing_and_events() {

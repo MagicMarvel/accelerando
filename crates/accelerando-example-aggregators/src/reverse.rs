@@ -2,7 +2,7 @@
 //! closes the current footprint and starts the opposite one with the trigger trade.
 
 use accelerando_core::{
-    Configurable, EventInterest, Footprint, FootprintAggregator, OrderFlowEvent, ParamSpec, Params,
+    Configurable, EventInterest, Footprint, FootprintAggregator, OrderFlowEvent,
     Side,
 };
 
@@ -12,25 +12,20 @@ enum Direction {
     Down,
 }
 
+#[derive(Configurable)]
+#[configurable(init = Self::init)]
 pub struct ReverseAggregator {
+    #[param(default = 16, min = 1, max = 400)]
     reversal_ticks: i64,
     tick_size: f64,
     current: Option<Footprint>,
     direction: Option<Direction>,
 }
 
-impl Configurable for ReverseAggregator {
-    fn param_spec() -> ParamSpec {
-        ParamSpec::new().int("reversal_ticks", 16, 1, 400, 1)
-    }
-
-    fn from_params(params: &Params) -> Self {
-        Self {
-            reversal_ticks: params.int("reversal_ticks", 16).max(1),
-            tick_size: 0.25,
-            current: None,
-            direction: None,
-        }
+impl ReverseAggregator {
+    fn init(&mut self) {
+        self.reversal_ticks = self.reversal_ticks.max(1);
+        self.tick_size = 0.25;
     }
 }
 
@@ -101,6 +96,7 @@ impl FootprintAggregator for ReverseAggregator {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use accelerando_core::Params;
 
     #[test]
     fn reverses_from_the_running_extreme_and_assigns_the_trigger_once() {

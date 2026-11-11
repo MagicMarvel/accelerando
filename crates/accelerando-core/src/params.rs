@@ -160,6 +160,12 @@ impl ParamSpec {
         self.int(name, i64::from(default), 0, 1, 1)
     }
 
+    /// A minute-of-day (`0..=1440`), stored and searched as an integer number of minutes. The
+    /// CLI accepts both `1080` and `18:00` (every integer parameter does).
+    pub fn time(self, name: &str, default_minute: i64, min: i64, max: i64, step: i64) -> Self {
+        self.int(name, default_minute, min, max, step)
+    }
+
     /// A fixed, non-tunable parameter (e.g. a file path) with a string default.
     pub fn fixed_str(mut self, name: &str, default: &str) -> Self {
         self.entries.push(ParamEntry {
@@ -233,10 +239,11 @@ impl ParamSpec {
             let value =
                 match (&entry.range, &entry.default) {
                     (ParamRange::Int { .. }, _) | (ParamRange::Fixed, ParamValue::Int(_)) => {
-                        ParamValue::Int(match parse_bool_word(raw) {
-                            Some(b) => i64::from(b),
-                            None => raw.parse::<i64>().map_err(|_| {
-                                format!("parameter `{name}` expects an integer, got `{raw}`")
+                        ParamValue::Int(match (parse_bool_word(raw), parse_hhmm(raw)) {
+                            (Some(b), _) => i64::from(b),
+                            (None, Some(minutes)) => minutes,
+                            (None, None) => raw.parse::<i64>().map_err(|_| {
+                                format!("parameter `{name}` expects an integer (or HH:MM), got `{raw}`")
                             })?,
                         })
                     }
@@ -348,6 +355,13 @@ impl ParamSpec {
     }
 }
 
+/// `HH:MM` → minutes of the day (`24:00` = 1440).
+fn parse_hhmm(raw: &str) -> Option<i64> {
+    let (h, m) = raw.split_once(':')?;
+    let (h, m): (i64, i64) = (h.trim().parse().ok()?, m.trim().parse().ok()?);
+    ((0..=24).contains(&h) && (0..60).contains(&m) && h * 60 + m <= 1440).then_some(h * 60 + m)
+}
+
 fn parse_bool_word(raw: &str) -> Option<bool> {
     match raw.to_ascii_lowercase().as_str() {
         "true" | "on" | "yes" => Some(true),
@@ -417,10 +431,50 @@ impl Params {
     }
 }
 
+/// `FromStr` for an enum used as a `choice` parameter, one line per option:
+///
+/// ```
+/// #[derive(Clone, Copy, Debug, PartialEq)]
+/// enum Side { Both, Long, Short }
+/// accelerando_core::choice_from_str!(Side { "both" => Both, "long" => Long, "short" => Short });
+/// assert_eq!("long".parse::<Side>(), Ok(Side::Long));
+/// assert!("up".parse::<Side>().is_err());
+/// ```
+///
+/// then `#[param(default = "both", choice = ["both", "long", "short"])] side: Side`.
+#[macro_export]
+macro_rules! choice_from_str {
+    ($ty:ident { $($text:literal => $variant:ident),+ $(,)? }) => {
+        impl ::std::str::FromStr for $ty {
+            type Err = ::std::string::String;
+            fn from_str(s: &str) -> ::std::result::Result<Self, Self::Err> {
+                match s {
+                    $($text => Ok($ty::$variant),)+
+                    other => Err(format!("unknown {} `{}`", stringify!($ty), other)),
+                }
+            }
+        }
+    };
+}
+
+#[doc(hidden)]
+pub mod sealed {
+    /// Emitted by `#[derive(Configurable)]` only.
+    #[diagnostic::on_unimplemented(
+        message = "`{Self}` must declare its parameters with `#[derive(Configurable)]`",
+        label = "hand-written `Configurable` / `ParamGroup` impls are not supported",
+        note = "put `#[param(default = .., min = .., max = ..)]` on each field (`fixed`, `int`, `time`, `choice = [..]` as needed); compute derived state in `#[configurable(init = Self::init)]`"
+    )]
+    pub trait Sealed {}
+}
+
 /// A reusable bundle of parameters that can be embedded in several components (session windows,
 /// trade discipline, ...). `#[derive(Configurable)]` implements it for every struct it touches, and
 /// `#[param(flatten)]` embeds one group inside another component.
-pub trait ParamGroup: Sized {
+///
+/// Sealed: it cannot be implemented by hand. Declare parameters with `#[derive(Configurable)]`
+/// and `#[param(...)]` on the fields, so each name, default and range is written exactly once.
+pub trait ParamGroup: Sized + sealed::Sealed {
     /// Append this group's parameters to `spec`.
     fn declare_params(spec: ParamSpec) -> ParamSpec;
     /// Build the group from a resolved parameter map.
@@ -428,7 +482,20 @@ pub trait ParamGroup: Sized {
 }
 
 /// A component that can be described as a search space and built from concrete parameters.
-pub trait Configurable: Sized {
+///
+/// Implemented for every [`ParamGroup`], i.e. only through `#[derive(Configurable)]`; a manual
+/// `impl Configurable for ..` does not compile (conflicts with this blanket impl). Hand-written
+/// `param_spec()` + `from_params()` pairs repeated every name and default and let them drift.
+///
+/// ```compile_fail
+/// use accelerando_core::{Configurable, ParamSpec, Params};
+/// struct Manual;
+/// impl Configurable for Manual {
+///     fn param_spec() -> ParamSpec { ParamSpec::new().int("n", 3, 1, 9, 1) }
+///     fn from_params(_: &Params) -> Self { Manual }
+/// }
+/// ```
+pub trait Configurable: Sized + sealed::Sealed {
     /// The declared, tunable parameters (with defaults).
     fn param_spec() -> ParamSpec;
 
@@ -447,6 +514,16 @@ pub trait Configurable: Sized {
             .resolve(overrides)
             .unwrap_or_else(|err| panic!("invalid params: {err}"));
         Self::from_params(&resolved)
+    }
+}
+
+impl<T: ParamGroup> Configurable for T {
+    fn param_spec() -> ParamSpec {
+        T::declare_params(ParamSpec::new())
+    }
+
+    fn from_params(params: &Params) -> Self {
+        T::read_params(params)
     }
 }
 
@@ -472,6 +549,15 @@ mod tests {
         assert_eq!(resolved.str("side", ""), "long");
         assert_eq!(resolved.float("threshold", 0.0), 1.5);
         assert_eq!(resolved.float("tick", 0.0), 0.25);
+    }
+
+    #[test]
+    fn integer_params_accept_clock_times() {
+        let spec = ParamSpec::new().time("start", 1080, 0, 1440, 5);
+        let p = spec.parse_assignments(&["start=09:35".to_string()]).unwrap();
+        assert_eq!(p.int("start", 0), 9 * 60 + 35);
+        assert!(spec.parse_assignments(&["start=09:33".to_string()]).is_err()); // step 5
+        assert!(spec.parse_assignments(&["start=25:00".to_string()]).is_err());
     }
 
     #[test]

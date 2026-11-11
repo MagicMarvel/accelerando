@@ -53,14 +53,18 @@ pub use heatmap::{
 };
 pub use metrics::Metrics;
 pub use accelerando_derive::Configurable;
+#[doc(hidden)]
+pub mod __private {
+    pub use crate::params::sealed::Sealed;
+}
 pub use params::{Configurable, ParamGroup, ParamRange, ParamSpec, ParamValue, Params};
 pub use progress::{ProgressHandle, ProgressSnapshot};
 pub use registry::Registry;
-pub use result::{
-    BacktestResult, ExperimentResult, ExperimentRun, ExperimentRunSummary, LiquidityHeatmap,
+pub use result::{Counters, BacktestResult, ExperimentResult, ExperimentRun, ExperimentRunSummary, LiquidityHeatmap,
     LiquidityLevel, LiquiditySnapshot, Series, Trade, TradeReason,
 };
 pub use session::{SessionClock, SessionFilter, SessionTick, TradeDiscipline};
+pub use market_time::{in_clock_window, TimeZone};
 pub use traits::{
     DataSource, FootprintAggregator, Indicator, IndicatorRequest, Strategy, StrategyRequirements,
 };

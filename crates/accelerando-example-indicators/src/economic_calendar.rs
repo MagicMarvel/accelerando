@@ -5,7 +5,7 @@ use std::net::TcpStream;
 use std::path::PathBuf;
 use std::time::Duration;
 
-use accelerando_core::{Configurable, Footprint, Indicator, ParamSpec, Params, Plot};
+use accelerando_core::{Configurable, Footprint, Indicator, Plot};
 use serde_json::Value;
 
 pub const EVENT_COUNT: &str = "economic_calendar_event_count";
@@ -44,8 +44,10 @@ impl CalendarEvent {
     }
 }
 
+#[derive(Default)]
 enum SourceKind {
     /// Events fully loaded at construction (local file or a plain-http JSON feed).
+    #[default]
     Static,
     /// TradingView economic calendar: fetched lazily one month at a time as bars arrive,
     /// so any historical range is covered; each month's raw response is cached on disk.
@@ -61,15 +63,30 @@ enum SourceKind {
 ///
 /// Events that land between bars (overnight, pre-market, weekends) attach to the first bar
 /// after them instead of being dropped.
+#[derive(Configurable)]
+#[configurable(init = Self::init)]
 pub struct EconomicCalendar {
+    /// `tradingview`, a local JSON file, or an `http://` URL (ForexFactory weekly schema).
+    #[param(fixed, default = DEFAULT_SOURCE)]
+    source: String,
+    #[param(default = "High", choice = ["High", "Medium", "Low", "Holiday", "All"])]
+    impact: String,
+    /// Comma-separated country codes (empty = all; TradingView requests default to US).
+    #[param(name = "countries", fixed, default = "")]
+    countries_spec: String,
+    #[param(name = "cache_dir", fixed, default = DEFAULT_CACHE_DIR)]
+    cache_dir_spec: String,
+    #[param(default = true)]
+    plot_markers: bool,
+    #[param(default = 8, min = 1, max = 50)]
+    max_events_per_bar: usize,
+    #[param(fixed, default = DEFAULT_GROUP)]
+    group: String,
+    #[param(fixed, default = DEFAULT_COLOR)]
+    color: String,
     events: Vec<CalendarEvent>,
     next_idx: usize,
-    impact: String,
     countries: HashSet<String>,
-    plot_markers: bool,
-    max_events_per_bar: usize,
-    group: String,
-    color: String,
     source_kind: SourceKind,
     request_countries: String,
     cache_dir: PathBuf,
@@ -78,67 +95,36 @@ pub struct EconomicCalendar {
     prev_bar_end_ns: Option<i64>,
 }
 
-impl Configurable for EconomicCalendar {
-    fn param_spec() -> ParamSpec {
-        ParamSpec::new()
-            .fixed_str("source", DEFAULT_SOURCE)
-            .choice(
-                "impact",
-                "High",
-                &["High", "Medium", "Low", "Holiday", "All"],
-            )
-            .fixed_str("countries", "")
-            .fixed_str("cache_dir", DEFAULT_CACHE_DIR)
-            .int("plot_markers", 1, 0, 1, 1)
-            .int("max_events_per_bar", 8, 1, 50, 1)
-            .fixed_str("group", DEFAULT_GROUP)
-            .fixed_str("color", DEFAULT_COLOR)
-    }
-
-    fn from_params(p: &Params) -> Self {
-        let impact = p.str("impact", "High");
-        let countries = p
-            .str("countries", "")
+impl EconomicCalendar {
+    fn init(&mut self) {
+        self.countries = self
+            .countries_spec
             .split(',')
             .map(|s| s.trim().to_ascii_uppercase())
             .filter(|s| !s.is_empty())
-            .collect::<HashSet<_>>();
-        let source = p.str("source", DEFAULT_SOURCE);
-        let source_kind = if source.eq_ignore_ascii_case("tradingview") {
+            .collect();
+        self.source_kind = if self.source.eq_ignore_ascii_case("tradingview") {
             SourceKind::TradingView
         } else {
             SourceKind::Static
         };
-        let mut events = match source_kind {
+        self.events = match self.source_kind {
             SourceKind::TradingView => Vec::new(),
-            SourceKind::Static => load_events(&source, &impact).unwrap_or_else(|err| {
+            SourceKind::Static => load_events(&self.source, &self.impact).unwrap_or_else(|err| {
                 eprintln!("economic_calendar: {err}");
                 Vec::new()
             }),
         };
-        events.sort_by_key(|event| event.ts_ns);
-        let request_countries = if countries.is_empty() {
+        self.events.sort_by_key(|event| event.ts_ns);
+        self.request_countries = if self.countries.is_empty() {
             "US".to_string()
         } else {
-            let mut list: Vec<String> = countries.iter().cloned().collect();
+            let mut list: Vec<String> = self.countries.iter().cloned().collect();
             list.sort();
             list.join(",")
         };
-        Self {
-            events,
-            next_idx: 0,
-            impact,
-            countries,
-            plot_markers: p.int("plot_markers", 1) != 0,
-            max_events_per_bar: p.usize("max_events_per_bar", 8).max(1),
-            group: p.str("group", DEFAULT_GROUP),
-            color: p.str("color", DEFAULT_COLOR),
-            source_kind,
-            request_countries,
-            cache_dir: PathBuf::from(p.str("cache_dir", DEFAULT_CACHE_DIR)),
-            fetched_to_ns: 0,
-            prev_bar_end_ns: None,
-        }
+        self.max_events_per_bar = self.max_events_per_bar.max(1);
+        self.cache_dir = PathBuf::from(&self.cache_dir_spec);
     }
 }
 
