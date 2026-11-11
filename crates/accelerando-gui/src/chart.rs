@@ -6,6 +6,7 @@ use eframe::egui::{
 };
 
 use crate::data::{self, HeatMetric, RasterSpec};
+use crate::vp::VpTool;
 use crate::{Model, Settings};
 
 const AXIS_W: f32 = 72.0;
@@ -116,25 +117,25 @@ impl ChartState {
 
 /// Screen mapping for one frame.
 #[derive(Clone, Copy)]
-struct Mapper {
-    rect: Rect,
-    x0: f64,
-    x1: f64,
-    p0: f64,
-    p1: f64,
+pub(crate) struct Mapper {
+    pub rect: Rect,
+    pub x0: f64,
+    pub x1: f64,
+    pub p0: f64,
+    pub p1: f64,
 }
 
 impl Mapper {
-    fn sx(&self, x: f64) -> f32 {
+    pub fn sx(&self, x: f64) -> f32 {
         self.rect.left() + ((x - self.x0) / (self.x1 - self.x0)) as f32 * self.rect.width()
     }
-    fn sy(&self, p: f64) -> f32 {
+    pub fn sy(&self, p: f64) -> f32 {
         self.rect.top() + ((self.p1 - p) / (self.p1 - self.p0)) as f32 * self.rect.height()
     }
     fn pos(&self, x: f64, p: f64) -> Pos2 {
         pos2(self.sx(x), self.sy(p))
     }
-    fn x_at(&self, px: f32) -> f64 {
+    pub fn x_at(&self, px: f32) -> f64 {
         self.x0 + ((px - self.rect.left()) / self.rect.width()) as f64 * (self.x1 - self.x0)
     }
     fn p_at(&self, py: f32) -> f64 {
@@ -145,10 +146,12 @@ impl Mapper {
 pub(crate) fn price_panel(
     ui: &mut egui::Ui,
     model: &Model,
-    settings: &Settings,
+    settings: &mut Settings,
     state: &mut ChartState,
     selected_trade: Option<usize>,
-) {
+    vp: &mut VpTool,
+    pick_bar: bool,
+) -> Option<usize> {
     let outer = ui.available_rect_before_wrap();
     let response = ui.allocate_rect(outer, Sense::click_and_drag());
     let plot = Rect::from_min_max(
@@ -156,10 +159,12 @@ pub(crate) fn price_panel(
         pos2(outer.right() - AXIS_W, outer.bottom() - AXIS_H),
     );
     if plot.width() < 60.0 || plot.height() < 60.0 {
-        return;
+        return None;
     }
 
-    handle_input(ui, &response, plot, state);
+    let before = Mapper { rect: plot, x0: state.x0, x1: state.x1, p0: state.p0, p1: state.p1 };
+    let drawing_vp = !pick_bar && vp.handle_input(ui, &response, &before, model);
+    handle_input(ui, &response, plot, state, !drawing_vp);
     if state.auto_y {
         if let Some((lo, hi)) = visible_price_range(model, settings, state.x0, state.x1) {
             let pad = ((hi - lo) * 0.06).max(model.result.tick_size.abs() * 3.0).max(1e-9);
@@ -177,8 +182,17 @@ pub(crate) fn price_panel(
         draw_heatmap(ui.ctx(), &painter, model, settings, state, &m);
     }
     draw_axes(&axis_painter, &painter, model, &m);
+    // During a replay nothing is drawn to the right of the replay position.
+    let cut_px = model.replay_cut_x().map(|x| m.sx(x).clamp(plot.left(), plot.right()) + 1.0);
+    let full_painter = painter;
+    let painter = match cut_px {
+        Some(px) => full_painter
+            .with_clip_rect(Rect::from_min_max(plot.min, pos2(px, plot.bottom()))),
+        None => full_painter.clone(),
+    };
     if settings.show_overlays {
         draw_boxes(&painter, model, &m);
+        vp.draw_strategy(&painter, model, &m);
     }
     if settings.show_bars {
         draw_bars(&painter, model, settings, &m);
@@ -190,6 +204,7 @@ pub(crate) fn price_panel(
         draw_grid_series(&painter, &model.bid_smooth, &model.bounds, &m, BID_LINE);
         draw_grid_series(&painter, &model.ask_smooth, &model.bounds, &m, ASK_LINE);
         let legend = plot.right_top() + egui::vec2(-8.0, 6.0);
+        let painter = &full_painter;
         let rect = painter.text(legend, Align2::RIGHT_TOP, "ask", FontId::monospace(12.0), ASK_LINE);
         painter.text(
             rect.left_top() - egui::vec2(10.0, 0.0),
@@ -202,14 +217,153 @@ pub(crate) fn price_panel(
     if settings.show_trades {
         draw_trades(&painter, model, settings, &m, selected_trade);
     }
-    if let Some(pos) = response.hover_pos().filter(|p| plot.contains(*p)) {
+    let pointer_x = response
+        .interact_pointer_pos()
+        .or_else(|| response.hover_pos())
+        .map(|p| m.x_at(p.x));
+    vp.draw_manual(&painter, model, &m, pointer_x);
+    let painter = full_painter;
+    if let Some(px) = cut_px {
+        painter.vline(px, plot.y_range(), Stroke::new(1.0, REPLAY));
+    }
+    // Choosing the bar a replay starts from: highlight the bar under the pointer.
+    let mut picked = None;
+    let hover = response.hover_pos().filter(|p| plot.contains(*p));
+    if let (true, Some(pos)) = (pick_bar, hover) {
+        let x = m.x_at(pos.x);
+        let i = model.fp_x.partition_point(|f| f.1 < x);
+        if let Some(&(a, b)) = model.fp_x.get(i) {
+            let (left, right) = (m.sx(a), m.sx(b).max(m.sx(a) + 2.0));
+            painter.rect_filled(
+                Rect::from_min_max(pos2(left, plot.top()), pos2(right, plot.bottom())),
+                0.0,
+                with_alpha(REPLAY, 50),
+            );
+            painter.vline(left, plot.y_range(), Stroke::new(1.0, REPLAY));
+            painter.text(
+                pos2(left + 6.0, plot.top() + 30.0),
+                Align2::LEFT_TOP,
+                "replay from here",
+                FontId::monospace(12.0),
+                REPLAY,
+            );
+            if response.clicked() {
+                picked = Some(i);
+            }
+        }
+    }
+    if let Some(pos) = hover {
         draw_crosshair(&axis_painter, &painter, model, &m, pos);
     }
+    indicator_legend(ui, plot, model, settings, vp);
+    picked
 }
 
-fn handle_input(ui: &egui::Ui, response: &egui::Response, plot: Rect, state: &mut ChartState) {
+/// Replay position line and picker.
+pub(crate) const REPLAY: Color32 = Color32::from_rgb(0xf5, 0x9e, 0x0b);
+
+const LEGEND_BG: Color32 = Color32::from_rgba_premultiplied(6, 9, 18, 200);
+
+/// ATAS-style indicator list in the top-left corner, under the crosshair readout: one row per
+/// indicator with a visibility checkbox and, where it has any, a ⚙ settings popup.
+fn indicator_legend(
+    ui: &mut egui::Ui,
+    plot: Rect,
+    model: &Model,
+    settings: &mut Settings,
+    vp: &mut VpTool,
+) {
+    let rect = Rect::from_min_max(plot.left_top() + egui::vec2(6.0, 28.0), plot.right_bottom());
+    let builder = egui::UiBuilder::new()
+        .max_rect(rect)
+        .layout(egui::Layout::top_down(egui::Align::Min));
+    ui.scope_builder(builder, |ui| {
+        ui.spacing_mut().item_spacing.y = 2.0;
+
+        legend_row(ui, "Overlays (zones, lines)", &mut settings.show_overlays, true, false);
+
+        let markers_on = settings.show_overlays;
+        legend_row(ui, "Strategy markers (dots)", &mut settings.show_markers, markers_on, false);
+
+        let (n_strategy, n_drawn) = (model.overlays.profiles.len(), vp.items.len());
+        let label = if n_drawn > 0 {
+            format!("Volume profile ({n_strategy} strategy, {n_drawn} drawn)")
+        } else {
+            format!("Volume profile ({n_strategy})")
+        };
+        if let Some(gear) = legend_row(ui, &label, &mut vp.show_strategy, true, true) {
+            egui::Popup::from_toggle_button_response(&gear)
+                .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
+                .show(|ui| {
+                    ui.set_min_width(260.0);
+                    ui.strong("Volume profile");
+                    ui.weak("Checkbox hides the strategy profiles; drawn ones stay.");
+                    ui.add(
+                        egui::Slider::new(&mut vp.smooth_ticks, 0.0..=30.0)
+                            .text("drawn: smoothing σ (ticks)"),
+                    );
+                    ui.add(egui::Slider::new(&mut vp.va_fraction, 0.3..=0.95).text("value area"));
+                    ui.add(
+                        egui::Slider::new(&mut vp.peak_fraction, 0.0..=0.95)
+                            .text("peak area (0 = off)"),
+                    )
+                    .on_hover_text(
+                        "Shade the contiguous levels with at least this share of the POC volume.",
+                    );
+                    ui.checkbox(&mut vp.extend_lines, "Extend POC / VAH / VAL to the right");
+                    if ui
+                        .add_enabled(n_drawn > 0, egui::Button::new(format!("Clear drawn ({n_drawn})")))
+                        .clicked()
+                    {
+                        vp.items.clear();
+                    }
+                });
+        }
+    });
+}
+
+/// One legend row; returns the ⚙ button when `gear` is set.
+fn legend_row(
+    ui: &mut egui::Ui,
+    label: &str,
+    visible: &mut bool,
+    enabled: bool,
+    gear: bool,
+) -> Option<egui::Response> {
+    egui::Frame::new()
+        .fill(LEGEND_BG)
+        .corner_radius(3.0)
+        .inner_margin(egui::Margin::symmetric(4, 1))
+        .show(ui, |ui| {
+            ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = 4.0;
+                let color = if *visible && enabled {
+                    Color32::from_gray(225)
+                } else {
+                    Color32::from_gray(120)
+                };
+                ui.add_enabled(enabled, egui::Checkbox::without_text(visible))
+                    .on_hover_text("Show / hide");
+                ui.label(egui::RichText::new(label).monospace().size(12.0).color(color));
+                gear.then(|| {
+                    ui.add(egui::Button::new("⚙").frame(false).small())
+                        .on_hover_text("Settings")
+                })
+            })
+            .inner
+        })
+        .inner
+}
+
+fn handle_input(
+    ui: &egui::Ui,
+    response: &egui::Response,
+    plot: Rect,
+    state: &mut ChartState,
+    pan: bool,
+) {
     let per_px = (state.x1 - state.x0) / plot.width() as f64;
-    if response.dragged() {
+    if pan && response.dragged() {
         let delta = response.drag_delta();
         state.x0 -= delta.x as f64 * per_px;
         state.x1 -= delta.x as f64 * per_px;
@@ -439,7 +593,7 @@ fn draw_axes(axis_painter: &Painter, painter: &Painter, model: &Model, m: &Mappe
                 painter.text(
                     pos2(x + 4.0, plot.bottom() - 4.0),
                     Align2::LEFT_BOTTOM,
-                    data::format_ts(start_ts, model.utc_offset_secs, true, false),
+                    data::format_ts(start_ts, model.tz, true, false),
                     font.clone(),
                     AXIS_TEXT,
                 );
@@ -467,7 +621,7 @@ fn draw_axes(axis_painter: &Painter, painter: &Painter, model: &Model, m: &Mappe
         axis_painter.text(
             pos2(px, plot.bottom() + 4.0),
             align,
-            data::format_ts(ts, model.utc_offset_secs, span > 6.0 * 3600.0, span < 1800.0),
+            data::format_ts(ts, model.tz, span > 6.0 * 3600.0, span < 1800.0),
             font.clone(),
             AXIS_TEXT,
         );
@@ -888,20 +1042,26 @@ fn draw_trades(
     selected: Option<usize>,
 ) {
     let (up, down) = if settings.red_up { (RED, GREEN) } else { (GREEN, RED) };
+    // During a replay a trade shows up at its entry and its outcome only at its exit.
+    let now = model.replay_clock().unwrap_or(i64::MAX);
     for (i, trade) in model.result.trades.iter().enumerate() {
         let (entry_x, exit_x) = model.trade_x[i];
-        if exit_x < m.x0 || entry_x > m.x1 {
+        if exit_x < m.x0 || entry_x > m.x1 || trade.entry_ts_ns > now {
             continue;
         }
         let entry = m.pos(entry_x, trade.entry_px);
+        let scale = if selected == Some(i) { 1.4 } else { 1.0 };
+        let long = trade.dir > 0;
+        if trade.exit_ts_ns > now {
+            draw_arrow(painter, entry, long, if long { up } else { down }, scale);
+            continue;
+        }
         let exit = m.pos(exit_x, trade.exit_px);
         let color = if trade.pnl >= 0.0 { GAIN } else { LOSS };
         let width = if selected == Some(i) { 3.0 } else { 1.5 };
         painter.extend(Shape::dashed_line(&[entry, exit], Stroke::new(width, color), 5.0, 3.0));
         // Buying (long entry, short exit) is an up arrow below the fill price, selling a down
         // arrow above it.
-        let scale = if selected == Some(i) { 1.4 } else { 1.0 };
-        let long = trade.dir > 0;
         draw_arrow(painter, entry, long, if long { up } else { down }, scale);
         draw_arrow(painter, exit, !long, if long { down } else { up }, scale);
     }
@@ -967,10 +1127,10 @@ fn draw_crosshair(axis_painter: &Painter, painter: &Painter, model: &Model, m: &
         axis_painter,
         pos2(pos.x, plot.bottom() + 4.0),
         Align2::CENTER_TOP,
-        data::format_ts(ts, model.utc_offset_secs, true, true),
+        data::format_ts(ts, model.tz, true, true),
     );
 
-    let mut info = data::format_ts_full(ts, model.utc_offset_secs);
+    let mut info = data::format_ts_full(ts, model.tz);
     let i = model.fp_x.partition_point(|f| f.1 < x);
     if let Some(fp) = model.bars().get(i).filter(|_| model.fp_x[i].0 <= x) {
         info.push_str(&format!(
@@ -985,7 +1145,7 @@ fn draw_crosshair(axis_painter: &Painter, painter: &Painter, model: &Model, m: &
         let tick = model.result.tick_size.abs().max(1e-9);
         if let Some(lv) = fp.ladder.iter().find(|lv| (lv.price - price).abs() <= tick * 0.5) {
             info.push_str(&format!(
-                "\n{:.d$}  sell {}  buy {}  Δ {}",
+                "   @{:.d$}  sell {}  buy {}  Δ {}",
                 lv.price,
                 format_size(lv.sell_vol),
                 format_size(lv.buy_vol),
@@ -998,7 +1158,7 @@ fn draw_crosshair(axis_painter: &Painter, painter: &Painter, model: &Model, m: &
         if let (Some(&bid), Some(&ask)) = (model.grid.bid.get(sec), model.grid.ask.get(sec)) {
             if bid.is_finite() && ask.is_finite() {
                 info.push_str(&format!(
-                    "\nbid {bid:.d$}  ask {ask:.d$}  spread {:.d$}",
+                    "   bid {bid:.d$}  ask {ask:.d$}  spread {:.d$}",
                     ask - bid
                 ));
             }
@@ -1032,7 +1192,11 @@ pub(crate) fn equity_panel(ui: &mut egui::Ui, model: &Model, state: &ChartState)
     let equity = &model.result.equity;
     let xs = &model.equity_x;
     let i0 = xs.partition_point(|x| *x < state.x0).saturating_sub(1);
-    let i1 = (xs.partition_point(|x| *x <= state.x1) + 1).min(xs.len());
+    let mut i1 = (xs.partition_point(|x| *x <= state.x1) + 1).min(xs.len());
+    if let Some(now) = model.replay_clock() {
+        // During a replay the curve stops at the replay position.
+        i1 = i1.min(equity.partition_point(|e| e.ts_ns <= now));
+    }
     if i1 <= i0 {
         return;
     }

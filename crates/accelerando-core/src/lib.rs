@@ -28,6 +28,7 @@ pub mod session;
 pub mod ta;
 pub mod testkit;
 pub mod traits;
+pub mod volume_profile;
 
 pub use broker::{
     BracketSpec, Broker, BrokerConfig, EntryExecution, EntryIntent, OrderOutput, PortfolioSnapshot,

@@ -468,9 +468,54 @@ pub fn rasterize(
     cells
 }
 
-/// Format a nanosecond timestamp as local wall-clock time (`utc_offset_secs` east of UTC).
-pub fn format_ts(ts_ns: i64, utc_offset_secs: i64, with_date: bool, with_secs: bool) -> String {
-    let secs = ts_ns.div_euclid(SEC_NS) + utc_offset_secs;
+/// Time zone of the wall-clock times the viewer shows.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum TimeZone {
+    /// The computer's own time zone, with its daylight-saving rules applied per timestamp.
+    Local,
+    /// A fixed offset, in seconds east of UTC.
+    Fixed(i64),
+}
+
+impl TimeZone {
+    /// `Some(hours)` = fixed offset, `None` = the computer's time zone.
+    pub fn from_hours(hours: Option<f64>) -> Self {
+        match hours {
+            Some(h) => Self::Fixed((h * 3600.0).round() as i64),
+            None => Self::Local,
+        }
+    }
+
+    /// Offset from UTC in seconds at `ts_ns`.
+    pub fn offset_secs(self, ts_ns: i64) -> i64 {
+        match self {
+            Self::Fixed(secs) => secs,
+            Self::Local => {
+                use chrono::TimeZone as _;
+                chrono::Local
+                    .timestamp_opt(ts_ns.div_euclid(SEC_NS), 0)
+                    .single()
+                    .map_or(0, |dt| dt.offset().local_minus_utc() as i64)
+            }
+        }
+    }
+
+    /// `UTC+8`, `UTC-4`, `UTC+5:30` at `ts_ns`.
+    pub fn label(self, ts_ns: i64) -> String {
+        let off = self.offset_secs(ts_ns);
+        let sign = if off < 0 { '-' } else { '+' };
+        let (h, m) = (off.abs() / 3600, off.abs() % 3600 / 60);
+        if m == 0 {
+            format!("UTC{sign}{h}")
+        } else {
+            format!("UTC{sign}{h}:{m:02}")
+        }
+    }
+}
+
+/// Format a nanosecond timestamp as wall-clock time in `tz`.
+pub fn format_ts(ts_ns: i64, tz: TimeZone, with_date: bool, with_secs: bool) -> String {
+    let secs = ts_ns.div_euclid(SEC_NS) + tz.offset_secs(ts_ns);
     let days = secs.div_euclid(86_400);
     let tod = secs.rem_euclid(86_400);
     let (h, m, s) = (tod / 3600, tod % 3600 / 60, tod % 60);
@@ -486,11 +531,11 @@ pub fn format_ts(ts_ns: i64, utc_offset_secs: i64, with_date: bool, with_secs: b
     out
 }
 
-/// Full `YYYY-MM-DD HH:MM:SS` form of [`format_ts`].
-pub fn format_ts_full(ts_ns: i64, utc_offset_secs: i64) -> String {
-    let secs = ts_ns.div_euclid(SEC_NS) + utc_offset_secs;
+/// Full `YYYY-MM-DD HH:MM:SS UTC+8` form of [`format_ts`].
+pub fn format_ts_full(ts_ns: i64, tz: TimeZone) -> String {
+    let secs = ts_ns.div_euclid(SEC_NS) + tz.offset_secs(ts_ns);
     let (year, _, _) = civil_from_days(secs.div_euclid(86_400));
-    format!("{year}-{}", format_ts(ts_ns, utc_offset_secs, true, true))
+    format!("{year}-{} {}", format_ts(ts_ns, tz, true, true), tz.label(ts_ns))
 }
 
 fn civil_from_days(days: i64) -> (i64, i64, i64) {
@@ -633,7 +678,9 @@ mod tests {
     fn timestamps_format_in_local_time() {
         // 2026-07-01 01:30:15 UTC == 09:30:15 in UTC+8.
         let ts = (20_635 * 86_400 + 3600 + 30 * 60 + 15) * SEC_NS;
-        assert_eq!(format_ts_full(ts, 8 * 3600), "2026-07-01 09:30:15");
-        assert_eq!(format_ts(ts, 0, false, false), "01:30");
+        assert_eq!(format_ts_full(ts, TimeZone::Fixed(8 * 3600)), "2026-07-01 09:30:15 UTC+8");
+        assert_eq!(TimeZone::Fixed(-4 * 3600).label(ts), "UTC-4");
+        assert_eq!(TimeZone::from_hours(Some(5.5)).label(ts), "UTC+5:30");
+        assert_eq!(format_ts(ts, TimeZone::Fixed(0), false, false), "01:30");
     }
 }

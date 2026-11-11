@@ -18,6 +18,8 @@ pub mod bars;
 mod chart;
 pub mod data;
 mod overlay;
+pub mod replay;
+mod vp;
 
 use std::sync::mpsc;
 
@@ -26,17 +28,21 @@ use eframe::egui;
 
 use chart::ChartState;
 pub use bars::{aggregate, BarKind, BarSpec, Rebar};
-pub use data::AxisMode;
+pub use data::{AxisMode, TimeZone};
 use data::{BarAxis, BookGrid, HeatMetric, TimeAxis, XMap, SEC_NS};
 use overlay::Overlays;
+use replay::{Replay, ReplayBars};
+pub use replay::{ticks_from, Tick, TickSource};
+use vp::VpTool;
 
 /// Display settings for [`view`].
 #[derive(Clone)]
 pub struct ViewerOptions {
     /// Window title.
     pub title: String,
-    /// Offset of the displayed wall-clock time from UTC, in hours (e.g. `8.0` for China).
-    pub utc_offset_hours: f64,
+    /// Offset of the displayed wall-clock time from UTC, in hours (e.g. `Some(8.0)` for China).
+    /// `None` (the default) uses the computer's own time zone, daylight saving included.
+    pub utc_offset_hours: Option<f64>,
     /// Initial width of the bid/ask smoothing kernel in seconds (`0` or `1` = raw lines).
     pub smoothing_secs: u32,
     /// Draw rising bars red and falling bars green (China / Japan convention).
@@ -56,13 +62,16 @@ pub struct ViewerOptions {
     pub rebar: Option<Rebar>,
     /// Open showing these bars instead of the strategy's own (needs `rebar`).
     pub display_bars: Option<BarSpec>,
+    /// Reads raw trades for the tick-by-tick replay (usually [`ticks_from`] over the raw events).
+    /// Without it the replay button is disabled.
+    pub ticks: Option<TickSource>,
 }
 
 impl Default for ViewerOptions {
     fn default() -> Self {
         Self {
             title: "Accelerando".to_string(),
-            utc_offset_hours: 0.0,
+            utc_offset_hours: None,
             smoothing_secs: 10,
             red_up: false,
             max_gap_secs: 300,
@@ -71,6 +80,7 @@ impl Default for ViewerOptions {
             bar_spec: None,
             rebar: None,
             display_bars: None,
+            ticks: None,
         }
     }
 }
@@ -91,10 +101,33 @@ pub fn view(result: BacktestResult, options: ViewerOptions) -> std::io::Result<(
         native,
         Box::new(move |cc| {
             cc.egui_ctx.set_theme(egui::Theme::Dark);
+            install_cjk_font(&cc.egui_ctx);
             Ok(Box::new(Viewer::new(result, options)))
         }),
     )
     .map_err(|e| std::io::Error::other(e.to_string()))
+}
+
+/// Add a system CJK font as a fallback so Chinese strategy labels render (egui's built-in fonts
+/// have no CJK glyphs). Silently does nothing when none of the usual fonts exists.
+fn install_cjk_font(ctx: &egui::Context) {
+    const CANDIDATES: [&str; 6] = [
+        "C:/Windows/Fonts/msyh.ttc",
+        "C:/Windows/Fonts/simhei.ttf",
+        "C:/Windows/Fonts/simsun.ttc",
+        "/System/Library/Fonts/PingFang.ttc",
+        "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
+        "/usr/share/fonts/noto-cjk/NotoSansCJK-Regular.ttc",
+    ];
+    let Some(bytes) = CANDIDATES.iter().find_map(|p| std::fs::read(p).ok()) else { return };
+    let mut fonts = egui::FontDefinitions::default();
+    fonts
+        .font_data
+        .insert("cjk".to_owned(), std::sync::Arc::new(egui::FontData::from_owned(bytes)));
+    for family in [egui::FontFamily::Proportional, egui::FontFamily::Monospace] {
+        fonts.families.entry(family).or_default().push("cjk".to_owned());
+    }
+    ctx.set_fonts(fonts);
 }
 
 /// Bar-axis pauses longer than this become an empty spacer (overnight, weekend, lunch break).
@@ -120,14 +153,21 @@ pub(crate) struct Model {
     pub sessions: Vec<(f64, f64, i64)>,
     /// Session start x only, for [`data::crosses_session`].
     pub session_x: Vec<f64>,
-    /// `(x of first trade, x of last trade)` per footprint.
+    /// `(x of first trade, x of last trade)` per visible bar (see [`Model::bars`]).
     pub fp_x: Vec<(f64, f64)>,
+    /// The same for every bar, replayed or not.
+    fp_x_all: Vec<(f64, f64)>,
+    /// Bars visible during a replay; `None` shows everything.
+    replay: Option<ReplayBars>,
+    /// Strategy bars the overlays were built from (fewer than all during a replay).
+    overlay_bars: usize,
     pub equity_x: Vec<f64>,
     /// `(entry x, exit x)` per trade.
     pub trade_x: Vec<(f64, f64)>,
     pub overlays: Overlays,
     pub heat_ref: f32,
-    pub utc_offset_secs: i64,
+    /// Time zone of every time shown.
+    pub tz: TimeZone,
     pub price_decimals: usize,
     /// Median footprint duration, to translate time spans into bar counts.
     pub median_bar_secs: f64,
@@ -170,6 +210,9 @@ impl Model {
             sessions: Vec::new(),
             session_x: Vec::new(),
             fp_x: Vec::new(),
+            fp_x_all: Vec::new(),
+            replay: None,
+            overlay_bars: usize::MAX,
             equity_x: Vec::new(),
             trade_x: Vec::new(),
             overlays: Overlays::default(),
@@ -178,7 +221,7 @@ impl Model {
             bounds,
             grid,
             heat_ref,
-            utc_offset_secs: (options.utc_offset_hours * 3600.0).round() as i64,
+            tz: TimeZone::from_hours(options.utc_offset_hours),
             price_decimals,
             median_bar_secs: 60.0,
             display: None,
@@ -188,11 +231,92 @@ impl Model {
         model
     }
 
-    /// The bars on screen: the display bars if any, else the strategy's own.
+    /// The bars on screen: the display bars if any, else the strategy's own - during a replay
+    /// only the ones replayed so far, the last of them still being built.
     pub fn bars(&self) -> &[Footprint] {
+        match &self.replay {
+            Some(replay) => &replay.bars,
+            None => self.full_bars(),
+        }
+    }
+
+    /// Every bar of the current bar type, replay or not.
+    pub fn full_bars(&self) -> &[Footprint] {
         match &self.display {
             Some((_, bars)) => bars,
             None => &self.result.footprints,
+        }
+    }
+
+    /// Hide everything from bar `index` (of [`Self::full_bars`]) on and replay from there.
+    pub fn start_replay(&mut self, index: usize) {
+        self.replay = Some(ReplayBars::new(self.full_bars(), index, self.result.tick_size));
+        self.sync_replay();
+    }
+
+    pub fn stop_replay(&mut self) {
+        self.replay = None;
+        self.sync_replay();
+    }
+
+    /// Feed trades into the replay and move its clock to `clock_ns`.
+    pub fn replay_apply(&mut self, ticks: &[replay::Tick], clock_ns: i64) {
+        let full: &[Footprint] = match &self.display {
+            Some((_, bars)) => bars,
+            None => &self.result.footprints,
+        };
+        let Some(replay) = self.replay.as_mut() else { return };
+        for tick in ticks {
+            replay.apply(tick, full);
+        }
+        replay.set_clock(clock_ns, full);
+        self.sync_replay();
+    }
+
+    /// Replay time, when one is running: nothing later is shown.
+    pub fn replay_clock(&self) -> Option<i64> {
+        self.replay.as_ref().map(|r| r.clock_ns)
+    }
+
+    pub fn replay_finished(&self) -> bool {
+        self.replay.as_ref().is_some_and(|r| r.finished(self.full_bars()))
+    }
+
+    /// Last timestamp of the bar being replayed.
+    pub fn replay_bar_end(&self) -> Option<i64> {
+        self.replay.as_ref().and_then(|r| r.bar_end_ns(self.full_bars()))
+    }
+
+    /// x of the replay position: the chart is blank to the right of it.
+    pub fn replay_cut_x(&self) -> Option<f64> {
+        let replay = self.replay.as_ref()?;
+        Some(match self.xmap.mode() {
+            AxisMode::Time => self.xmap.to_x(replay.clock_ns),
+            AxisMode::Bars => self.fp_x.last().map_or(0.0, |f| f.1),
+        })
+    }
+
+    /// Bring `fp_x` and the strategy overlays in line with the visible bars.
+    fn sync_replay(&mut self) {
+        let n = self.bars().len().min(self.fp_x_all.len());
+        if self.fp_x.len() > n {
+            self.fp_x.truncate(n);
+        } else {
+            let from = self.fp_x.len();
+            self.fp_x.extend_from_slice(&self.fp_x_all[from..n]);
+        }
+        // Strategy output of a bar appears once that bar has closed.
+        let fps = &self.result.footprints;
+        let k = match &self.replay {
+            Some(replay) => fps.partition_point(|f| f.ts_last_ns < replay.clock_ns),
+            None => fps.len(),
+        };
+        if k != self.overlay_bars {
+            self.overlay_bars = k;
+            let xmap = &self.xmap;
+            self.overlays = Overlays::build(&fps[..k], &self.result.series, &|i| {
+                (xmap.to_x(fps[i].ts_first_ns), xmap.to_x(fps[i].ts_last_ns))
+            });
         }
     }
 
@@ -228,7 +352,7 @@ impl Model {
         let xmap = &self.xmap;
         self.sessions = xmap.sessions();
         self.session_x = self.sessions.iter().map(|s| s.1).collect();
-        self.fp_x = match xmap {
+        self.fp_x_all = match xmap {
             // One slot per bar, by construction of the bar axis.
             XMap::Bars(_) => bars
                 .iter()
@@ -250,10 +374,9 @@ impl Model {
             .collect();
         // Strategy overlays are anchored to the strategy's own bars; map them by time so they
         // land in the right place whatever bars are displayed.
-        let fps = &result.footprints;
-        self.overlays = Overlays::build(fps, &result.series, &|i| {
-            (xmap.to_x(fps[i].ts_first_ns), xmap.to_x(fps[i].ts_last_ns))
-        });
+        self.fp_x.clear();
+        self.overlay_bars = usize::MAX;
+        self.sync_replay();
     }
 
     fn set_smoothing(&mut self, window_secs: usize) {
@@ -318,6 +441,11 @@ struct Viewer {
     bar_error: Option<String>,
     /// Requested at the first frame (needs the egui context).
     startup_bars: Option<BarSpec>,
+    /// Volume profiles: strategy ones and the ones drawn by hand.
+    vp: VpTool,
+    /// Tick-by-tick replay and the host's tick reader.
+    replay: Replay,
+    ticks: Option<TickSource>,
 }
 
 impl Viewer {
@@ -371,6 +499,9 @@ impl Viewer {
             pending: None,
             bar_error: None,
             startup_bars: options.display_bars.filter(|spec| Some(*spec) != options.bar_spec),
+            vp: VpTool::default(),
+            replay: Replay::default(),
+            ticks: options.ticks.clone(),
         }
     }
 
@@ -394,7 +525,48 @@ impl Viewer {
             ui.separator();
             ui.checkbox(&mut self.chart.auto_y, "Auto Y")
                 .on_hover_text("Double-click the chart to show everything.");
+            ui.separator();
+            ui.toggle_value(&mut self.vp.drawing, "📊 Draw VP").on_hover_text(
+                "Drag across bars to draw a volume profile. Right-click a profile to delete it, \
+                 Esc to stop drawing. Profile settings are in ⚙ Settings.",
+            );
+            ui.label("σ");
+            ui.add(
+                egui::DragValue::new(&mut self.vp.smooth_ticks)
+                    .range(0.0..=30.0)
+                    .speed(0.1)
+                    .suffix(" t"),
+            )
+            .on_hover_text("Gaussian smoothing of drawn profiles, in ticks (0 = raw).");
+            let n = self.vp.items.len();
+            if ui.add_enabled(n > 0, egui::Button::new(format!("Clear VPs ({n})"))).clicked() {
+                self.vp.items.clear();
+            }
+            ui.separator();
+            if self.model.replay_clock().is_none() {
+                ui.add_enabled_ui(self.ticks.is_some(), |ui| {
+                    ui.toggle_value(&mut self.replay.picking, "⏵ Replay")
+                        .on_hover_text(
+                            "Click a bar: everything after it is hidden and the trades are \
+                             played back tick by tick.",
+                        )
+                        .on_disabled_hover_text("Replay (the host did not provide raw trades)");
+                });
+                if self.replay.picking {
+                    ui.weak("click the bar to start from (Esc cancels)");
+                }
+            } else {
+                let clock = self.model.replay_clock().unwrap_or(0);
+                ui.label(
+                    egui::RichText::new(format!("⏵ {}", data::format_ts_full(clock, self.model.tz)))
+                        .monospace()
+                        .color(chart::REPLAY),
+                );
+            }
         });
+        if self.model.replay_clock().is_some() {
+            ui.horizontal(|ui| self.replay.controls(ui, &mut self.model));
+        }
     }
 
     fn current_bar_label(&self) -> String {
@@ -510,6 +682,7 @@ impl Viewer {
 
     /// Swap the displayed bars, keeping the same stretch of time in view.
     fn show_bars(&mut self, display: Option<(BarSpec, Vec<Footprint>)>) {
+        self.replay.stop(&mut self.model);
         self.bar_error = None;
         let xmap = &self.model.xmap;
         let (t0, t1) = (xmap.to_ts(self.chart.x0), xmap.to_ts(self.chart.x1));
@@ -545,11 +718,10 @@ impl Viewer {
                     ui.checkbox(&mut s.show_footprint, "Footprint when zoomed in");
                 });
                 ui.checkbox(&mut s.show_trades, "Trades");
-                ui.checkbox(&mut s.show_overlays, "Overlays (zones, lines)");
-                ui.add_enabled_ui(s.show_overlays, |ui| {
-                    ui.checkbox(&mut s.show_markers, "Strategy markers (dots)");
-                });
                 ui.checkbox(&mut s.red_up, "Red up");
+
+                ui.weak("Indicators (overlays, markers, volume profile) are listed
+in the chart's top-left corner.");
 
                 ui.separator();
                 ui.strong("Order book");
@@ -622,7 +794,7 @@ impl Viewer {
         let mut open = self.trades_open;
         let mut clicked = None;
         let trades = &self.model.result.trades;
-        let utc_offset = self.model.utc_offset_secs;
+        let tz = self.model.tz;
         let selected = self.selected_trade;
         egui::Window::new("Trades")
             .open(&mut open)
@@ -641,7 +813,7 @@ impl Viewer {
                                 "{:>4} {} {}  {:>10.2}",
                                 i + 1,
                                 if t.dir > 0 { "L" } else { "S" },
-                                data::format_ts(t.entry_ts_ns, utc_offset, true, false),
+                                data::format_ts(t.entry_ts_ns, tz, true, false),
                                 t.pnl
                             );
                             let color = if t.pnl >= 0.0 { chart::GAIN } else { chart::LOSS };
@@ -695,21 +867,35 @@ impl eframe::App for Viewer {
         self.metrics_window(&ctx);
         self.trades_window(&ctx);
         self.sync();
+        if self.replay.picking && ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
+            self.replay.picking = false;
+        }
+        if let Some(source) = self.ticks.clone() {
+            self.replay.shortcuts(&ctx, &mut self.model);
+            self.replay.update(&mut self.model, &mut self.chart, &source, &ctx);
+        }
         if self.settings.show_equity && !self.model.result.equity.is_empty() {
             egui::Panel::bottom("equity")
                 .resizable(true)
                 .default_size(150.0)
                 .show(ui, |ui| chart::equity_panel(ui, &self.model, &self.chart));
         }
-        egui::CentralPanel::default().show(ui, |ui| {
-            chart::price_panel(
-                ui,
-                &self.model,
-                &self.settings,
-                &mut self.chart,
-                self.selected_trade,
-            );
-        });
+        let picked = egui::CentralPanel::default()
+            .show(ui, |ui| {
+                chart::price_panel(
+                    ui,
+                    &self.model,
+                    &mut self.settings,
+                    &mut self.chart,
+                    self.selected_trade,
+                    &mut self.vp,
+                    self.replay.picking,
+                )
+            })
+            .inner;
+        if let Some(index) = picked {
+            self.replay.start(&mut self.model, index);
+        }
     }
 }
 

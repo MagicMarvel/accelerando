@@ -113,7 +113,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             result,
             accelerando_gui::ViewerOptions {
                 title: format!("Accelerando — {path}"),
-                utc_offset_hours: 8.0,
+                utc_offset_hours: Some(8.0),
                 red_up: true,
                 initial_span_secs: span,
                 ..Default::default()

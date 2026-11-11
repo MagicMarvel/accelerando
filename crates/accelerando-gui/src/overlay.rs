@@ -4,7 +4,7 @@
 use std::collections::BTreeMap;
 
 use accelerando_core::result::Series;
-use accelerando_core::{Footprint, Plot};
+use accelerando_core::{Footprint, Plot, VpLevel};
 use eframe::egui::Color32;
 
 pub(crate) struct OverlayLine {
@@ -38,8 +38,19 @@ pub(crate) struct OverlayBox {
     pub text: String,
 }
 
+/// A volume profile drawn over the bars `[x0, x1]` (strategy `VolumeProfile*` plots).
+pub(crate) struct OverlayProfile {
+    pub x0: f64,
+    pub x1: f64,
+    pub levels: Vec<VpLevel>,
+    pub color: Option<Color32>,
+    pub text: String,
+}
+
 #[derive(Default)]
 pub(crate) struct Overlays {
+    /// Volume profiles, one per id (the last emission wins), sorted by `x0`.
+    pub profiles: Vec<OverlayProfile>,
     pub lines: Vec<OverlayLine>,
     /// Sorted by x.
     pub markers: Vec<OverlayMarker>,
@@ -71,6 +82,8 @@ impl Overlays {
         let mut lines: BTreeMap<&str, OverlayLine> = BTreeMap::new();
         // The same box id is re-emitted while a box grows; only its last emission is drawn.
         let mut boxes: BTreeMap<&str, OverlayBox> = BTreeMap::new();
+        // Profiles may also grow under one id; anonymous ones get a unique key.
+        let mut profiles: BTreeMap<String, OverlayProfile> = BTreeMap::new();
 
         for (i, fp) in footprints.iter().enumerate() {
             for plot in &fp.plots {
@@ -148,15 +161,44 @@ impl Overlays {
                             },
                         );
                     }
-                    // Background bands and volume profiles are not drawn by this viewer.
-                    Plot::BackgroundBand { .. }
-                    | Plot::VolumeProfile { .. }
-                    | Plot::VolumeProfileAt { .. } => {}
+                    Plot::VolumeProfile { id, levels, span } => {
+                        let key = if id.is_empty() { format!("__vp_{i}") } else { id.clone() };
+                        let start = back(i, span.saturating_sub(1));
+                        profiles.insert(
+                            key,
+                            OverlayProfile {
+                                x0: fp_x[start].0,
+                                x1: fp_x[i].1,
+                                levels: levels.clone(),
+                                color: None,
+                                text: String::new(),
+                            },
+                        );
+                    }
+                    Plot::VolumeProfileAt { bars_back, id, levels, span, text, color } => {
+                        let key = if id.is_empty() { format!("__vp_{i}") } else { id.clone() };
+                        let end = back(i, *bars_back);
+                        let start = back(end, span.saturating_sub(1));
+                        profiles.insert(
+                            key,
+                            OverlayProfile {
+                                x0: fp_x[start].0,
+                                x1: fp_x[end].1,
+                                levels: levels.clone(),
+                                color: color.as_deref().and_then(parse_color),
+                                text: text.clone(),
+                            },
+                        );
+                    }
+                    // Background bands are not drawn by this viewer.
+                    Plot::BackgroundBand { .. } => {}
                 }
             }
         }
         out.lines.extend(lines.into_values());
         out.boxes.extend(boxes.into_values());
+        out.profiles.extend(profiles.into_values().filter(|p| !p.levels.is_empty()));
+        out.profiles.sort_by(|a, b| a.x0.total_cmp(&b.x0));
 
         for (n, series) in series.iter().enumerate() {
             let points: Vec<(f64, f64)> = series
