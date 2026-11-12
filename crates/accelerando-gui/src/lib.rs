@@ -5,7 +5,7 @@
 //! accelerando_gui::view(result, accelerando_gui::ViewerOptions::default()).unwrap();
 //! ```
 //!
-//! The window shows the price panel (1-second liquidity heatmap, smoothed best-bid / best-ask
+//! The window shows the price panel (zoom-adaptive liquidity heatmap, best-bid / best-ask
 //! lines, bars, trades and strategy overlays) and an optional equity panel on the same x axis.
 //! Display options, the equity toggle, metrics and the trade list live behind the Settings
 //! button. The x axis is either one equal-width slot per bar or proportional to time; either
@@ -17,6 +17,8 @@
 pub mod bars;
 mod chart;
 pub mod data;
+mod liquidity_colors;
+mod market_history;
 mod overlay;
 pub mod replay;
 mod vp;
@@ -30,6 +32,7 @@ use chart::ChartState;
 pub use bars::{aggregate, BarKind, BarSpec, Rebar};
 pub use data::{AxisMode, TimeZone};
 use data::{BarAxis, BookGrid, HeatMetric, TimeAxis, XMap, SEC_NS};
+use liquidity_colors::PriceFilter;
 use overlay::Overlays;
 use replay::{Replay, ReplayBars};
 pub use replay::{ticks_from, Tick, TickSource};
@@ -52,7 +55,7 @@ pub struct ViewerOptions {
     /// Open zoomed in on the most recent this-many seconds instead of the whole data set.
     pub initial_span_secs: Option<f64>,
     /// x axis: `Some(AxisMode::Bars)` gives every K-line the same width, `Some(AxisMode::Time)`
-    /// is proportional to time (needed for the 1-second heatmap). `None` picks Time when the
+    /// is proportional to time (needed for the heatmap). `None` picks Time when the
     /// result carries a liquidity heatmap or trade-derived quotes, and Bars otherwise.
     pub axis_mode: Option<AxisMode>,
     /// What `result.footprints` are (shown in the bar-type chooser), e.g. `BarSpec::parse("reverse:16")`.
@@ -92,14 +95,36 @@ pub fn view(result: BacktestResult, options: ViewerOptions) -> std::io::Result<(
     view_with_trade_quotes(result, options, &[])
 }
 
-/// Open the viewer with 1-second trade bubbles and trade-derived quotes when depth is absent.
+/// Open the viewer with trade bubbles and trade-derived quotes when depth is absent.
 /// Pass trades in timestamp order.
 pub fn view_with_trade_quotes(
     result: BacktestResult,
     options: ViewerOptions,
     events: &[accelerando_core::OrderFlowEvent],
 ) -> std::io::Result<()> {
-    let quotes = data::trade_quotes(events);
+    let tape = accelerando_core::PreparedEventData::from_events(events.to_vec()).ok().map(std::sync::Arc::new);
+    open_viewer(result, options, data::trade_quotes(events), tape, Default::default())
+}
+
+/// Open the native viewer with original trade timestamps and sparse L2 history.
+pub fn view_with_market_history(
+    result: BacktestResult,
+    options: ViewerOptions,
+    trades: Option<std::sync::Arc<accelerando_core::PreparedEventData>>,
+    depth: accelerando_core::DepthHistory,
+) -> std::io::Result<()> {
+    let quotes = trades.as_ref().map_or_else(Vec::new, |tape| data::trade_quotes(tape.events()));
+    open_viewer(result, options, quotes, trades, depth)
+}
+
+fn open_viewer(
+    result: BacktestResult,
+    options: ViewerOptions,
+    quotes: Vec<data::TradeQuote>,
+    trades: Option<std::sync::Arc<accelerando_core::PreparedEventData>>,
+    depth: accelerando_core::DepthHistory,
+) -> std::io::Result<()> {
+    let tape = trades.map(|trades| market_history::TradeTape::new(trades, &quotes));
     let native = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_title(options.title.clone())
@@ -113,7 +138,7 @@ pub fn view_with_trade_quotes(
         Box::new(move |cc| {
             cc.egui_ctx.set_theme(egui::Theme::Dark);
             install_cjk_font(&cc.egui_ctx);
-            Ok(Box::new(Viewer::new(result, options, &quotes)))
+            Ok(Box::new(Viewer::new(result, options, &quotes, tape, depth)))
         }),
     )
     .map_err(|e| std::io::Error::other(e.to_string()))
@@ -176,9 +201,10 @@ pub(crate) struct Model {
     /// `(entry x, exit x)` per trade.
     pub trade_x: Vec<(f64, f64)>,
     pub overlays: Overlays,
-    pub heat_ref: f32,
     pub has_trade_quotes: bool,
     pub trade_volume: Vec<data::TradeVolume>,
+    pub tape: Option<market_history::TradeTape>,
+    pub depth: accelerando_core::DepthHistory,
     /// Time zone of every time shown.
     pub tz: TimeZone,
     pub price_decimals: usize,
@@ -189,12 +215,19 @@ pub(crate) struct Model {
 }
 
 impl Model {
-    fn new(result: BacktestResult, options: &ViewerOptions, quotes: &[data::TradeQuote]) -> Self {
+    fn new(
+        result: BacktestResult,
+        options: &ViewerOptions,
+        quotes: &[data::TradeQuote],
+        tape: Option<market_history::TradeTape>,
+        depth: accelerando_core::DepthHistory,
+    ) -> Self {
         let snapshots = &result.liquidity_heatmap.snapshots;
         let mut intervals: Vec<(i64, i64)> = Vec::with_capacity(
             snapshots.len() + quotes.len() + result.footprints.len() + result.equity.len() + result.trades.len(),
         );
         intervals.extend(snapshots.iter().map(|s| (s.ts_ns, s.ts_ns)));
+        intervals.extend(depth.quote_changes().iter().map(|&(ts, _)| (ts, ts)));
         intervals.extend(quotes.iter().map(|q| (q.ts_ns, q.ts_ns)));
         intervals.extend(result.footprints.iter().map(|f| (f.ts_first_ns, f.ts_last_ns)));
         intervals.extend(result.equity.iter().map(|e| (e.ts_ns, e.ts_ns)));
@@ -203,9 +236,11 @@ impl Model {
         let axis = TimeAxis::build(intervals, options.max_gap_secs.max(1) * SEC_NS);
         let bounds = axis.bounds();
         let mut grid = BookGrid::build(&axis, snapshots);
-        let has_trade_quotes = snapshots.is_empty() && !quotes.is_empty();
+        if !depth.is_empty() {
+            market_history::fill_overview_quotes(&mut grid, &axis, &depth);
+        }
+        let has_trade_quotes = depth.is_empty() && snapshots.is_empty() && !quotes.is_empty();
         let trade_volume = grid.apply_trade_samples(&axis, &bounds, quotes, has_trade_quotes);
-        let heat_ref = data::reference_size(snapshots);
         let tick = result.tick_size;
         let price_decimals = if tick > 0.0 && tick < 1.0 {
             (1..=6)
@@ -218,7 +253,7 @@ impl Model {
             2
         };
         let mode = options.axis_mode.unwrap_or(
-            if result.footprints.is_empty() || !snapshots.is_empty() || !quotes.is_empty() {
+            if result.footprints.is_empty() || !depth.is_empty() || !snapshots.is_empty() || !quotes.is_empty() {
                 AxisMode::Time
             } else {
                 AxisMode::Bars
@@ -241,9 +276,10 @@ impl Model {
             axis,
             bounds,
             grid,
-            heat_ref,
             has_trade_quotes,
             trade_volume,
+            tape,
+            depth,
             tz: TimeZone::from_hours(options.utc_offset_hours),
             price_decimals,
             median_bar_secs: 60.0,
@@ -419,7 +455,7 @@ impl Model {
     }
 
     pub fn has_heatmap(&self) -> bool {
-        !self.result.liquidity_heatmap.snapshots.is_empty()
+        !self.depth.is_empty() || !self.result.liquidity_heatmap.snapshots.is_empty()
     }
 
     /// The heatmap and bid/ask lines live on the per-second grid: time axis only.
@@ -445,6 +481,7 @@ pub(crate) struct Settings {
     pub bubble_aggregation: u32,
     pub bubble_size: u32,
     pub bubble_3d: bool,
+    pub bubble_colorblind: bool,
     pub bubble_delta: bool,
     pub bubble_transparency: u32,
     pub show_bars: bool,
@@ -457,6 +494,10 @@ pub(crate) struct Settings {
     pub show_equity: bool,
     pub heat_metric: HeatMetric,
     pub heat_smooth: bool,
+    pub price_filter: PriceFilter,
+    pub price_filter_px: f32,
+    pub heat_low_pct: f32,
+    pub heat_high_pct: f32,
     pub heat_contrast: f32,
     pub smoothing_secs: u32,
     pub red_up: bool,
@@ -489,9 +530,15 @@ struct Viewer {
 }
 
 impl Viewer {
-    fn new(result: BacktestResult, options: ViewerOptions, quotes: &[data::TradeQuote]) -> Self {
+    fn new(
+        result: BacktestResult,
+        options: ViewerOptions,
+        quotes: &[data::TradeQuote],
+        tape: Option<market_history::TradeTape>,
+        depth: accelerando_core::DepthHistory,
+    ) -> Self {
         let metrics_rows = metrics_rows(&result);
-        let mut model = Model::new(result, &options, quotes);
+        let mut model = Model::new(result, &options, quotes, tape, depth);
         let smoothing_secs = if model.has_trade_quotes { 3 } else { options.smoothing_secs };
         model.set_smoothing(smoothing_secs as usize);
         let settings = Settings {
@@ -502,6 +549,7 @@ impl Viewer {
             bubble_aggregation: 52,
             bubble_size: 40,
             bubble_3d: true,
+            bubble_colorblind: false,
             bubble_delta: true,
             bubble_transparency: 41,
             show_bars: true,
@@ -512,11 +560,15 @@ impl Viewer {
             show_equity: !model.result.equity.is_empty(),
             heat_metric: HeatMetric::Total,
             heat_smooth: true,
-            heat_contrast: 2.0,
+            price_filter: PriceFilter::Auto,
+            price_filter_px: 5.0,
+            heat_low_pct: 2.0,
+            heat_high_pct: 99.5,
+            heat_contrast: 1.2,
             smoothing_secs,
             red_up: options.red_up,
         };
-        let mut chart = ChartState::new(model.xmap.total());
+        let mut chart = ChartState::new(model.xmap.total(), model.xmap.mode());
         match options.initial_span_secs.filter(|s| *s > 0.0) {
             Some(span) => chart.show_latest(model.span_x(span)),
             // Like the web studio: open on the latest bars, zoomed in far enough for footprints.
@@ -737,7 +789,7 @@ impl Viewer {
         let (t0, t1) = (xmap.to_ts(self.chart.x0), xmap.to_ts(self.chart.x1));
         self.model.set_display(display);
         let xmap = &self.model.xmap;
-        self.chart.set_total(xmap.total());
+        self.chart.set_total(xmap.total(), xmap.mode());
         self.chart.show_range(xmap.to_x(t0), xmap.to_x(t1));
     }
 
@@ -751,7 +803,7 @@ impl Viewer {
             .checkbox(&mut time_axis, "Time-proportional x axis")
             .on_hover_text(
                 "Off: every bar has the same width. On: x is proportional to time, \
-                 which the 1-second heatmap and bid/ask lines need.",
+                 which the heatmap and bid/ask lines need.",
             )
             .changed()
         {
@@ -765,8 +817,8 @@ impl Viewer {
         }
         if has_quotes {
             ui.add_enabled_ui(time_axis, |ui| {
-                ui.checkbox(&mut s.show_heat, "Heatmap 1s (estimated Bid / Ask)")
-                    .on_hover_text("Highest buy and lowest sell per second. A missing side keeps its previous price.");
+                ui.checkbox(&mut s.show_heat, "Heatmap (estimated Bid / Ask)")
+                    .on_hover_text("Highest buy and lowest sell per visible time column. A missing side keeps its previous price.");
                 ui.add_enabled_ui(s.show_heat, |ui| {
                     trade_bubble_controls(ui, s);
                     ui.add(
@@ -774,13 +826,13 @@ impl Viewer {
                             .suffix(" s")
                             .text("line smoothing"),
                     )
-                    .on_hover_text("Trailing average. Set to 0 to show raw 1-second prices.");
+                    .on_hover_text("Trailing average for the overview. Close zoom uses event-time quotes.");
                 });
             });
             return;
         }
         ui.add_enabled_ui(has_heat && time_axis, |ui| {
-            ui.checkbox(&mut s.show_heat, "Heatmap 1s");
+            ui.checkbox(&mut s.show_heat, "Liquidity heatmap");
             ui.checkbox(&mut s.show_bbo, "Bid / Ask lines");
             if has_bubbles {
                 ui.add_enabled_ui(s.show_bbo, |ui| trade_bubble_controls(ui, s));
@@ -793,7 +845,7 @@ impl Viewer {
             )
             .on_hover_text(
                 "Width of the zero-lag (centered) smoothing kernel applied to the \
-                 best-bid and best-ask lines. 0 shows the raw 1-second quotes.",
+                 overview bid/ask lines. Close zoom uses event-time quotes.",
             );
             egui::ComboBox::from_label("heat")
                 .selected_text(match s.heat_metric {
@@ -806,8 +858,24 @@ impl Viewer {
                     ui.selectable_value(&mut s.heat_metric, HeatMetric::Bid, "Bid");
                     ui.selectable_value(&mut s.heat_metric, HeatMetric::Ask, "Ask");
                 });
-            ui.checkbox(&mut s.heat_smooth, "Smooth heatmap");
-            ui.add(egui::Slider::new(&mut s.heat_contrast, 0.5..=4.0).text("contrast"));
+            ui.checkbox(&mut s.heat_smooth, "Time smoothing");
+            egui::ComboBox::from_label("Price smoothing")
+                .selected_text(match s.price_filter {
+                    PriceFilter::Off => "Off",
+                    PriceFilter::Auto => "Auto",
+                    PriceFilter::Gaussian => "Gaussian",
+                })
+                .show_ui(ui, |ui| {
+                    ui.selectable_value(&mut s.price_filter, PriceFilter::Off, "Off");
+                    ui.selectable_value(&mut s.price_filter, PriceFilter::Auto, "Auto");
+                    ui.selectable_value(&mut s.price_filter, PriceFilter::Gaussian, "Gaussian");
+                });
+            if s.price_filter == PriceFilter::Gaussian {
+                ui.add(egui::Slider::new(&mut s.price_filter_px, 0.5..=15.0).suffix(" px").text("σ"));
+            }
+            ui.add(egui::Slider::new(&mut s.heat_low_pct, 0.0..=30.0).suffix("%").text("Lower cutoff"));
+            ui.add(egui::Slider::new(&mut s.heat_high_pct, 80.0..=100.0).suffix("%").text("Upper cutoff"));
+            ui.add(egui::Slider::new(&mut s.heat_contrast, 0.5..=4.0).text("Contrast"));
         });
     }
 
@@ -918,7 +986,7 @@ in the chart's top-left corner.");
             self.model.set_axis_mode(self.settings.axis_mode);
             self.chart.auto_y = true;
             let xmap = &self.model.xmap;
-            self.chart.set_total(xmap.total());
+            self.chart.set_total(xmap.total(), xmap.mode());
             self.chart.show_range(xmap.to_x(t0), xmap.to_x(t1));
         }
     }
@@ -932,6 +1000,8 @@ fn trade_bubble_controls(ui: &mut egui::Ui, settings: &mut Settings) {
         ui.add(egui::Slider::new(&mut settings.bubble_size, 0..=100).text("Dot size"));
         ui.add(egui::Slider::new(&mut settings.bubble_transparency, 0..=100).text("Transparency"));
         ui.checkbox(&mut settings.bubble_3d, "3D bubbles");
+        ui.checkbox(&mut settings.bubble_colorblind, "Cyan / violet bubbles")
+            .on_hover_text("Use cyan for buys and violet for sells. The default uses Bookmap's green and red.");
         ui.checkbox(&mut settings.bubble_delta, "Delta clustering");
     });
 }

@@ -90,7 +90,7 @@ impl TimeAxis {
         let Some(seg) = idx.checked_sub(1).and_then(|i| self.segments.get(i)) else {
             return self.segments.first().map_or(0, |s| s.t0_ns);
         };
-        let ts = seg.t0_ns + ((x - seg.x0) * SEC_NS as f64) as i64;
+        let ts = seg.t0_ns + ((x - seg.x0) * SEC_NS as f64).round() as i64;
         ts.min(seg.t1_ns)
     }
 
@@ -247,6 +247,7 @@ pub(crate) struct TradeQuote {
     bid: f32,
     ask: f32,
     volume: TradeVolume,
+    pub last_trade_ns: [Option<i64>; 2],
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -277,6 +278,7 @@ pub(crate) fn trade_quotes(events: &[OrderFlowEvent]) -> Vec<TradeQuote> {
                 bid: f32::NAN,
                 ask: f32::NAN,
                 volume: TradeVolume::default(),
+                last_trade_ns: [None; 2],
             });
         }
         let quote = quotes.last_mut().expect("current trade bucket");
@@ -285,10 +287,12 @@ pub(crate) fn trade_quotes(events: &[OrderFlowEvent]) -> Vec<TradeQuote> {
             Side::Buy => {
                 quote.ask = quote.ask.max(price as f32);
                 quote.volume.buy += size as f32;
+                quote.last_trade_ns[1] = Some(ts_ns);
             }
             Side::Sell => {
                 quote.bid = quote.bid.min(price as f32);
                 quote.volume.sell += size as f32;
+                quote.last_trade_ns[0] = Some(ts_ns);
             }
             Side::Unknown => unreachable!("unknown trades are skipped"),
         }
@@ -772,30 +776,6 @@ fn box_pass(src: &[f32], dst: &mut [f32], half: usize) {
     }
 }
 
-/// A robust "large resting size" used to normalize heat colors, so colors do not flicker while
-/// panning: the 99th percentile of per-level total size over an even sample of the history.
-pub fn reference_size(snapshots: &[LiquiditySnapshot]) -> f32 {
-    const MAX_SAMPLES: usize = 200_000;
-    let total: usize = snapshots.iter().map(|s| s.levels.len()).sum();
-    if total == 0 {
-        return 1.0;
-    }
-    let stride = total.div_ceil(MAX_SAMPLES).max(1);
-    let mut sample: Vec<f32> = snapshots
-        .iter()
-        .flat_map(|s| s.levels.iter())
-        .step_by(stride)
-        .map(|lv| (lv.bid_size + lv.ask_size) as f32)
-        .filter(|v| v.is_finite() && *v > 0.0)
-        .collect();
-    if sample.is_empty() {
-        return 1.0;
-    }
-    let k = ((sample.len() - 1) as f64 * 0.99) as usize;
-    let (_, v, _) = sample.select_nth_unstable_by(k, |a, b| a.total_cmp(b));
-    v.max(1.0)
-}
-
 /// Geometry of a heat raster. Columns and rows are aligned to multiples of `col_w` / `row_p`,
 /// so the raster does not shimmer while panning; at close zoom `col_w == 1` (one column per
 /// second) and `row_p == tick` (one row per price tick).
@@ -830,6 +810,16 @@ impl RasterSpec {
             rows: ((k_hi - k_lo + 1).max(1) as usize).min(2048),
             row_p,
         }
+    }
+
+    /// Use event-time columns when the source retains the original order-book updates.
+    pub fn with_event_time(mut self, x0: f64, x1: f64, width_px: f32) -> Self {
+        let width = f64::from(width_px).clamp(16.0, 2046.0);
+        self.col_w = ((x1 - x0) / width).max(1e-9);
+        self.c_lo = (x0 / self.col_w).floor() as i64;
+        let c_hi = (x1 / self.col_w).ceil() as i64;
+        self.cols = ((c_hi - self.c_lo).max(1) as usize).min(2048);
+        self
     }
 
     /// x range covered by the raster.
@@ -956,6 +946,13 @@ pub fn format_ts(ts_ns: i64, tz: TimeZone, with_date: bool, with_secs: bool) -> 
         out.push_str(&format!(":{s:02}"));
     }
     out
+}
+
+/// Fractional seconds for zoomed time axes and the crosshair.
+pub(crate) fn fractional_seconds(ts_ns: i64, span: f64) -> String {
+    let digits = if span < 0.001 { 9 } else if span < 1.0 { 6 } else { 3 };
+    let ns = ts_ns.rem_euclid(SEC_NS);
+    format!(".{:0width$}", ns / 10_i64.pow(9 - digits), width = digits as usize)
 }
 
 /// Full `YYYY-MM-DD HH:MM:SS UTC+8` form of [`format_ts`].

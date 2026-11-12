@@ -2,7 +2,7 @@ use std::env;
 use std::path::Path;
 
 use accelerando_core::{
-    broker::BrokerConfig, engine::run_backtest, engine::Pipeline, Configurable, DataSource, Params,
+    broker::BrokerConfig, engine::run_backtest, engine::Pipeline, Configurable, Params,
 };
 
 use accelerando_example_aggregators::TimeAggregator;
@@ -89,7 +89,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         strategy,
         broker_cfg: BrokerConfig::default(),
         keep_footprints: true,
-        keep_liquidity_heatmap: true,
+        keep_liquidity_heatmap: web,
     };
 
     println!("Running footprint engine over NumCat L2 events...");
@@ -105,11 +105,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         println!("Starting web UI server at http://localhost:{port} ...");
         accelerando_web::serve(&result, port)?;
     } else {
-        println!(
-            "Opening viewer window ({} one-second book snapshots)...",
-            result.liquidity_heatmap.snapshots.len()
+        println!("Loading event-time depth for the native viewer...");
+        let (trades, depth) = accelerando_core::prepare_market_history(
+            Box::new(NumCatL2Source::from_params(&src_params)),
         );
-        accelerando_gui::view(
+        accelerando_gui::view_with_market_history(
             result,
             accelerando_gui::ViewerOptions {
                 title: format!("Accelerando — {path}"),
@@ -118,6 +118,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 initial_span_secs: span,
                 ..Default::default()
             },
+            trades.ok().map(std::sync::Arc::new),
+            depth,
         )?;
     }
 

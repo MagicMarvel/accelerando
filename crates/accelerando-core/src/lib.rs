@@ -11,6 +11,7 @@
 extern crate self as accelerando_core;
 
 pub mod broker;
+pub mod depth_history;
 pub mod engine;
 pub mod event;
 pub mod event_engine;
@@ -34,6 +35,7 @@ pub use broker::{
     BracketSpec, Broker, BrokerConfig, EntryExecution, EntryIntent, OrderOutput, PortfolioSnapshot,
     PositionInfo, StrategyOutput, TradeSide, VisualOutput,
 };
+pub use depth_history::{prepare_market_history, DepthHistory};
 pub use engine::{
     prepare_backtest_data, run_backtest, run_backtest_progress, run_prepared_backtest, Pipeline,
     PreparedBacktestData,

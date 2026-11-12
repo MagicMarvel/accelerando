@@ -527,12 +527,17 @@ impl App {
             if o.validate {
                 eprintln!("note: --validate covers footprint strategies only; skipping for event-driven `{strategy}`");
             }
-            let events = accelerando_core::prepare_event_data(self.build_source(o, data_path)?)?;
-            let outcomes = self.run_event(o, &events, strategy, &reqs, &candidates)?;
+            let source = self.build_source(o, data_path)?;
             if o.gui {
-                gui_events = Some(events);
+                let (events, depth) = accelerando_core::prepare_market_history(source);
+                let events = Arc::new(events?);
+                let outcomes = self.run_event(o, &events, strategy, &reqs, &candidates)?;
+                gui_events = Some((events, depth));
+                outcomes
+            } else {
+                let events = accelerando_core::prepare_event_data(source)?;
+                self.run_event(o, &events, strategy, &reqs, &candidates)?
             }
-            outcomes
         } else {
             let prepared = self.prepare(o, data_path, &reqs)?;
             prepared.data.check_values(&reqs.values)?;

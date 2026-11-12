@@ -5,7 +5,9 @@ use eframe::egui::{
     StrokeKind, TextureHandle, TextureOptions,
 };
 
-use crate::data::{self, HeatMetric, QuoteColumn, RasterSpec};
+use crate::data::{self, AxisMode, HeatMetric, QuoteColumn, RasterSpec, TradeBubble};
+use crate::liquidity_colors::{self, ColorScale};
+use crate::market_history::{self, Viewport};
 use crate::vp::VpTool;
 use crate::{Model, Settings};
 
@@ -21,8 +23,17 @@ const GREEN: Color32 = Color32::from_rgb(0x26, 0xa6, 0x9a);
 const RED: Color32 = Color32::from_rgb(0xef, 0x53, 0x50);
 const BID_LINE: Color32 = Color32::from_rgb(0x04, 0xb1, 0xb1);
 const ASK_LINE: Color32 = Color32::from_rgb(0xf6, 0x03, 0xc0);
-const BUY_BUBBLE: Color32 = Color32::from_rgb(0x42, 0xe9, 0xe4);
-const SELL_BUBBLE: Color32 = Color32::from_rgb(0xc2, 0x86, 0xff);
+// Bookmap's DEFAULT_COLOR_BUY_TRADES_CIRCLES and DEFAULT_COLOR_SELL_TRADES_CIRCLES.
+const BOOKMAP_BUBBLES: [Color32; 2] = [
+    Color32::from_rgb(72, 254, 149),
+    Color32::from_rgb(255, 87, 70),
+];
+const CYAN_VIOLET_BUBBLES: [Color32; 2] = [
+    Color32::from_rgb(0x42, 0xe9, 0xe4),
+    Color32::from_rgb(0xc2, 0x86, 0xff),
+];
+const QUOTE_WIDTH_PX: f32 = 3.0;
+const BUBBLE_HOVER_TOLERANCE_PX: f32 = 5.0;
 const EQUITY_LINE: Color32 = Color32::from_rgb(0x7f, 0xb8, 0xff);
 pub(crate) const GAIN: Color32 = Color32::from_rgb(0x5f, 0xd3, 0x8d);
 pub(crate) const LOSS: Color32 = Color32::from_rgb(0xff, 0x7b, 0x72);
@@ -35,6 +46,7 @@ pub(crate) struct ChartState {
     pub p1: f64,
     pub auto_y: bool,
     total: f64,
+    mode: AxisMode,
     heat: Option<HeatCache>,
 }
 
@@ -44,6 +56,10 @@ struct HeatKey {
     metric: HeatMetric,
     contrast: f32,
     smooth: bool,
+    sigma_rows: f32,
+    low_pct: f32,
+    high_pct: f32,
+    replay_ns: Option<i64>,
 }
 
 struct HeatCache {
@@ -52,7 +68,7 @@ struct HeatCache {
 }
 
 impl ChartState {
-    pub fn new(total: f64) -> Self {
+    pub fn new(total: f64, mode: AxisMode) -> Self {
         Self {
             x0: 0.0,
             x1: total.max(1.0),
@@ -60,6 +76,7 @@ impl ChartState {
             p1: 1.0,
             auto_y: true,
             total: total.max(1.0),
+            mode,
             heat: None,
         }
     }
@@ -79,15 +96,16 @@ impl ChartState {
     }
 
     /// The axis length changed (x axis mode switch).
-    pub fn set_total(&mut self, total: f64) {
+    pub fn set_total(&mut self, total: f64, mode: AxisMode) {
         self.total = total.max(1.0);
+        self.mode = mode;
         self.heat = None;
     }
 
     /// Show exactly `[x0, x1]` (clamped to the data).
     pub fn show_range(&mut self, x0: f64, x1: f64) {
         self.x0 = x0;
-        self.x1 = x1.max(x0 + 1.0);
+        self.x1 = x1.max(x0 + self.min_span());
         self.clamp_x();
     }
 
@@ -100,8 +118,30 @@ impl ChartState {
         self.clamp_x();
     }
 
+    fn zoom_price(&mut self, fraction: f64, factor: f64, tick: f64) {
+        let span = self.p1 - self.p0;
+        let min_span = tick.abs().max(self.p1.abs().max(self.p0.abs()) * f64::EPSILON * 8.0).max(1e-9);
+        let span_after = (span * factor).max(min_span);
+        let anchor = self.p1 - fraction * span;
+        let low = anchor - (1.0 - fraction) * span_after;
+        let high = anchor + fraction * span_after;
+        if low.is_finite() && high.is_finite() && low < high {
+            self.p0 = low;
+            self.p1 = high;
+            self.auto_y = false;
+        }
+    }
+
+    fn min_span(&self) -> f64 {
+        match self.mode {
+            AxisMode::Bars => 5.0,
+            AxisMode::Time => (self.total * f64::EPSILON * 4.0).max(1e-9),
+        }
+    }
+
     fn clamp_x(&mut self) {
-        let span = (self.x1 - self.x0).clamp(5.0, self.total.max(5.0) * 1.1);
+        let min_span = self.min_span();
+        let span = (self.x1 - self.x0).clamp(min_span, self.total.max(min_span) * 1.1);
         let center = (self.x0 + self.x1) * 0.5;
         self.x0 = center - span * 0.5;
         self.x1 = center + span * 0.5;
@@ -166,21 +206,41 @@ pub(crate) fn price_panel(
 
     let before = Mapper { rect: plot, x0: state.x0, x1: state.x1, p0: state.p0, p1: state.p1 };
     let drawing_vp = !pick_bar && vp.handle_input(ui, &response, &before, model);
-    handle_input(ui, &response, plot, state, !drawing_vp);
+    handle_input(ui, &response, plot, state, !drawing_vp, model.result.tick_size);
     let book_visible = model.book_visible();
     let show_quotes = book_visible && (settings.show_bbo || (model.has_trade_quotes && settings.show_heat));
+    let pixels = f64::from(plot.width());
+    let seconds_per_pixel = (state.x1 - state.x0) / pixels;
+    let event_time = seconds_per_pixel < 1.0 && (model.tape.is_some() || !model.depth.is_empty());
     let columns = if show_quotes || (book_visible && settings.show_heat && state.auto_y) {
-        let (bid, ask) = model.display_quotes();
-        let end = model.completed_seconds().min(bid.len());
-        let volume = if show_quotes && settings.show_trade_bubbles { &model.trade_volume[..] } else { &[] };
-        let step = (((state.x1 - state.x0) / f64::from(plot.width())).ceil() as usize).max(1);
-        data::quote_columns(
-            &model.bounds,
-            [&bid[..end], &ask[..end]],
-            volume,
-            state.x0.floor() as usize..state.x1.ceil() as usize,
-            step,
-        )
+        let bubbles = show_quotes && settings.show_trade_bubbles;
+        if event_time {
+            let view = Viewport {
+                start: state.x0, end: state.x1, pixels, replay_ns: model.replay_clock(),
+            };
+            let mut columns = market_history::fine_columns(
+                &model.axis, model.tape.as_ref(), &model.depth, &view, bubbles,
+            );
+            if !model.has_trade_quotes && model.depth.is_empty() {
+                // Old result files have snapshots but no original L2 updates.
+                for col in columns.iter_mut().flatten() {
+                    let i = col.x.floor() as usize;
+                    col.prices = [model.grid.bid[i] as f64, model.grid.ask[i] as f64];
+                }
+            }
+            columns
+        } else {
+            let (bid, ask) = model.display_quotes();
+            let end = model.completed_seconds().min(bid.len());
+            let volume = if bubbles { &model.trade_volume[..] } else { &[] };
+            data::quote_columns(
+                &model.bounds,
+                [&bid[..end], &ask[..end]],
+                volume,
+                state.x0.floor() as usize..state.x1.ceil() as usize,
+                (seconds_per_pixel.ceil() as usize).max(1),
+            )
+        }
     } else {
         Vec::new()
     };
@@ -198,7 +258,12 @@ pub(crate) fn price_panel(
     painter.rect_filled(plot, 0.0, BACKGROUND);
 
     if settings.show_heat && model.has_heatmap() && book_visible {
-        draw_heatmap(ui.ctx(), &painter, model, settings, state, &m);
+        let heat_painter = model.replay_cut_x().map_or_else(|| painter.clone(), |x| {
+            painter.with_clip_rect(Rect::from_min_max(
+                plot.min, pos2(m.sx(x).clamp(plot.left(), plot.right()), plot.bottom()),
+            ))
+        });
+        draw_heatmap(ui.ctx(), &heat_painter, model, settings, state, &m);
     }
     draw_axes(&axis_painter, &painter, model, &m);
     // During a replay nothing is drawn to the right of the replay position.
@@ -219,10 +284,13 @@ pub(crate) fn price_panel(
     if settings.show_overlays {
         draw_overlays(&painter, model, &m, settings.show_markers);
     }
+    let hover = response.hover_pos().filter(|p| plot.contains(*p));
+    let mut hovered_bubble = None;
     if show_quotes {
         draw_quote_columns(&painter, &m, &columns);
         if settings.show_trade_bubbles {
-            draw_trade_bubbles(&painter, &m, &columns, settings);
+            let bubble_pointer = hover.filter(|_| !pick_bar && !drawing_vp && !response.dragged());
+            hovered_bubble = draw_trade_bubbles(&painter, &m, &columns, settings, bubble_pointer);
         }
         let legend = plot.right_top() + egui::vec2(-8.0, 6.0);
         let painter = &full_painter;
@@ -251,7 +319,6 @@ pub(crate) fn price_panel(
     }
     // Choosing the bar a replay starts from: highlight the bar under the pointer.
     let mut picked = None;
-    let hover = response.hover_pos().filter(|p| plot.contains(*p));
     if let (true, Some(pos)) = (pick_bar, hover) {
         let x = m.x_at(pos.x);
         let i = model.fp_x.partition_point(|f| f.1 < x);
@@ -276,9 +343,12 @@ pub(crate) fn price_panel(
         }
     }
     if let Some(pos) = hover {
-        draw_crosshair(&axis_painter, &painter, model, &m, pos);
+        draw_crosshair(&axis_painter, &painter, model, &m, pos, event_time.then_some(columns.as_slice()));
     }
     indicator_legend(ui, plot, model, settings, vp);
+    if let (Some(pos), Some(dot)) = (hover, hovered_bubble) {
+        draw_bubble_tooltip(&painter, model, pos, dot, settings.bubble_delta);
+    }
     picked
 }
 
@@ -384,7 +454,20 @@ fn handle_input(
     plot: Rect,
     state: &mut ChartState,
     pan: bool,
+    tick: f64,
 ) {
+    let hover = response.hover_pos();
+    let (scroll, zoom) = ui.input(|i| (i.smooth_scroll_delta(), i.zoom_delta()));
+    let zoom = if zoom.is_finite() && zoom > 0.0 { f64::from(zoom) } else { 1.0 };
+    if let Some(pos) = hover.filter(|p| p.x >= plot.right() && plot.y_range().contains(p.y)) {
+        ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeVertical);
+        if scroll.y != 0.0 || zoom != 1.0 {
+            let fraction = f64::from((pos.y - plot.top()) / plot.height());
+            let factor = (-f64::from(scroll.y) * 0.0025).exp() / zoom;
+            state.zoom_price(fraction, factor, tick);
+            return;
+        }
+    }
     let per_px = (state.x1 - state.x0) / plot.width() as f64;
     if pan && response.dragged() {
         let delta = response.drag_delta();
@@ -399,8 +482,7 @@ fn handle_input(
     if response.double_clicked() {
         state.fit_all();
     }
-    if let Some(pos) = response.hover_pos() {
-        let (scroll, zoom) = ui.input(|i| (i.smooth_scroll_delta(), i.zoom_delta()));
+    if let Some(pos) = hover {
         if scroll.y != 0.0 {
             // Wheel: zoom the time axis around the cursor.
             let factor = (-scroll.y as f64 * 0.0025).exp();
@@ -413,14 +495,10 @@ fn handle_input(
             state.x0 -= scroll.x as f64 * per_px;
             state.x1 -= scroll.x as f64 * per_px;
         }
-        if zoom != 1.0 && zoom > 0.0 {
+        if zoom != 1.0 {
             // Ctrl + wheel / pinch: zoom the price axis around the cursor.
-            state.auto_y = false;
-            let factor = 1.0 / zoom as f64;
-            let frac = ((pos.y - plot.top()) / plot.height()) as f64;
-            let anchor = state.p1 - frac * (state.p1 - state.p0);
-            state.p0 = anchor - (anchor - state.p0) * factor;
-            state.p1 = anchor + (state.p1 - anchor) * factor;
+            let fraction = f64::from(((pos.y - plot.top()) / plot.height()).clamp(0.0, 1.0));
+            state.zoom_price(fraction, 1.0 / zoom, tick);
         }
     }
     state.clamp_x();
@@ -465,7 +543,7 @@ fn draw_heatmap(
     state: &mut ChartState,
     m: &Mapper,
 ) {
-    let spec = RasterSpec::new(
+    let mut spec = RasterSpec::new(
         m.x0,
         m.x1,
         m.rect.width(),
@@ -474,48 +552,60 @@ fn draw_heatmap(
         m.rect.height(),
         model.result.tick_size,
     );
+    if !model.depth.is_empty() {
+        spec = spec.with_event_time(m.x0, m.x1, m.rect.width());
+    }
+    let pixels_per_price = f64::from(m.rect.height()) / (m.p1 - m.p0);
+    let sigma_rows = settings.price_filter.sigma(
+        model.result.tick_size * pixels_per_price,
+        spec.row_p * pixels_per_price,
+        settings.price_filter_px,
+    );
     let key = HeatKey {
         spec,
         metric: settings.heat_metric,
         contrast: settings.heat_contrast,
         smooth: settings.heat_smooth,
+        sigma_rows,
+        low_pct: settings.heat_low_pct,
+        high_pct: settings.heat_high_pct,
+        replay_ns: model.replay_clock(),
     };
     if state.heat.as_ref().is_none_or(|h| h.key != key) {
-        let cells = data::rasterize(
-            &spec,
-            &model.grid,
-            &model.result.liquidity_heatmap.snapshots,
-            settings.heat_metric,
-        );
-        let lut: Vec<Color32> = (0..256).map(|i| heat_color(i as f32 / 255.0)).collect();
-        let denom = model.heat_ref.ln_1p().max(1e-6);
-        let color = |v: f32| {
-            if v > 0.0 {
-                let t = (v.ln_1p() / denom).clamp(0.0, 1.0).powf(settings.heat_contrast);
-                lut[(t * 255.0) as usize]
-            } else {
-                Color32::TRANSPARENT
-            }
+        let mut cells = if model.depth.is_empty() {
+            data::rasterize(&spec, &model.grid, &model.result.liquidity_heatmap.snapshots, settings.heat_metric)
+        } else {
+            market_history::rasterize_depth(&spec, &model.axis, &model.depth, settings.heat_metric, key.replay_ns)
         };
-        // Smoothing interpolates along time only. Price levels are discrete, so each raster row
-        // is repeated to about one texel per screen pixel; the linear filter then blends
-        // neighbouring seconds but keeps the edge between two price levels about a pixel wide.
-        let repeat = if settings.heat_smooth {
-            let px_per_row = m.rect.height() as f64 * spec.row_p / (m.p1 - m.p0);
-            (px_per_row.floor() as usize).clamp(1, (2048 / spec.rows).max(1))
+        let groups = settings.heat_smooth.then(|| {
+            liquidity_colors::column_groups(&spec, &model.axis, model.replay_cut_x())
+        });
+        liquidity_colors::filter_cells(&mut cells, spec.cols, groups.as_deref(), sigma_rows);
+        let scale = ColorScale::from_cells(&cells, key.low_pct, key.high_pct, key.contrast);
+        let lut: Vec<_> = (0..256).map(|i| {
+            let [r, g, b] = liquidity_colors::palette(i as f32 / 255.0);
+            Color32::from_rgb(r, g, b)
+        }).collect();
+        let color = |v: f32| {
+            if v > 0.0 { lut[(scale.intensity(v) * 255.0) as usize] } else { Color32::TRANSPARENT }
+        };
+        // With only the time filter enabled, duplicate each price row so interpolation
+        // stays horizontal except for the edge between neighboring price levels.
+        let repeat = if key.smooth && sigma_rows < 0.01 {
+            ((spec.row_p * pixels_per_price).floor() as usize).clamp(1, (2048 / spec.rows).max(1))
         } else {
             1
         };
-        let mut pixels: Vec<Color32> = Vec::with_capacity(spec.cols * spec.rows * repeat);
+        let mut pixels = Vec::with_capacity(spec.cols * spec.rows * repeat);
         for row in cells.chunks_exact(spec.cols) {
             let start = pixels.len();
-            pixels.extend(row.iter().map(|&v| color(v)));
+            pixels.extend(row.iter().map(|&size| color(size)));
             for _ in 1..repeat {
                 pixels.extend_from_within(start..start + spec.cols);
             }
         }
         let image = ColorImage::new([spec.cols, spec.rows * repeat], pixels);
-        let options = if settings.heat_smooth {
+        let options = if key.smooth || sigma_rows >= 0.01 {
             TextureOptions::LINEAR
         } else {
             TextureOptions::NEAREST
@@ -537,30 +627,6 @@ fn draw_heatmap(
     let rect = Rect::from_min_max(m.pos(xa, top), m.pos(xb, bottom));
     let uv = Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0));
     painter.image(cache.texture.id(), rect, uv, Color32::WHITE);
-}
-
-/// Bookmap-like ramp: deep blue → cyan → yellow → orange → white.
-fn heat_color(t: f32) -> Color32 {
-    const STOPS: [(f32, [f32; 3]); 7] = [
-        (0.00, [12.0, 20.0, 48.0]),
-        (0.15, [18.0, 44.0, 112.0]),
-        (0.40, [22.0, 116.0, 190.0]),
-        (0.60, [44.0, 190.0, 172.0]),
-        (0.78, [245.0, 216.0, 72.0]),
-        (0.92, [250.0, 132.0, 32.0]),
-        (1.00, [255.0, 250.0, 240.0]),
-    ];
-    let t = t.clamp(0.0, 1.0);
-    for pair in STOPS.windows(2) {
-        let (t0, c0) = pair[0];
-        let (t1, c1) = pair[1];
-        if t <= t1 {
-            let f = (t - t0) / (t1 - t0);
-            let ch = |i: usize| (c0[i] + (c1[i] - c0[i]) * f) as u8;
-            return Color32::from_rgb(ch(0), ch(1), ch(2));
-        }
-    }
-    Color32::WHITE
 }
 
 fn nice_step(raw: f64) -> f64 {
@@ -640,10 +706,14 @@ fn draw_axes(axis_painter: &Painter, painter: &Painter, model: &Model, m: &Mappe
         } else {
             Align2::CENTER_TOP
         };
+        let mut time = data::format_ts(ts, model.tz, span > 6.0 * 3600.0, span < 1800.0);
+        if model.xmap.mode() == AxisMode::Time && span < 10.0 {
+            time.push_str(&data::fractional_seconds(ts, span));
+        }
         axis_painter.text(
             pos2(px, plot.bottom() + 4.0),
             align,
-            data::format_ts(ts, model.tz, span > 6.0 * 3600.0, span < 1800.0),
+            time,
             font.clone(),
             AXIS_TEXT,
         );
@@ -1000,12 +1070,13 @@ fn draw_marker(painter: &Painter, pos: Pos2, shape: &str, color: Color32, r: f32
 }
 
 fn draw_quote_columns(painter: &Painter, m: &Mapper, segments: &[Vec<QuoteColumn>]) {
+    let width = QUOTE_WIDTH_PX / painter.ctx().pixels_per_point();
     for (side, color) in [BID_LINE, ASK_LINE].into_iter().enumerate() {
-        let stroke = Stroke::new(1.6, color);
+        let stroke = Stroke::new(width, color);
         for segment in segments {
             for run in segment.split(|column| !column.prices[side].is_finite()) {
                 if let [column] = run {
-                    painter.circle_filled(m.pos(column.x, column.prices[side]), 1.2, color);
+                    painter.circle_filled(m.pos(column.x, column.prices[side]), width * 0.5, color);
                 } else if !run.is_empty() {
                     painter.line(
                         run.iter().map(|column| m.pos(column.x, column.prices[side])).collect(),
@@ -1017,12 +1088,27 @@ fn draw_quote_columns(painter: &Painter, m: &Mapper, segments: &[Vec<QuoteColumn
     }
 }
 
+#[derive(Clone, Copy)]
+struct PlottedBubble {
+    trade: TradeBubble,
+    center: Pos2,
+    radius: f32,
+}
+
+impl PlottedBubble {
+    fn hit_distance(self, pointer: Pos2, tolerance: f32) -> Option<f32> {
+        let distance = self.center.distance_sq(pointer);
+        (distance <= (self.radius + tolerance).powi(2)).then_some(distance)
+    }
+}
+
 fn draw_trade_bubbles(
     painter: &Painter,
     m: &Mapper,
     segments: &[Vec<QuoteColumn>],
     settings: &Settings,
-) {
+    pointer: Option<Pos2>,
+) -> Option<PlottedBubble> {
     let pixels_per_unit = [
         f64::from(m.rect.width()) / (m.x1 - m.x0),
         f64::from(m.rect.height()) / (m.p1 - m.p0),
@@ -1033,6 +1119,10 @@ fn draw_trade_bubbles(
         spherical: settings.bubble_3d,
         delta: settings.bubble_delta,
     };
+    let colors = if settings.bubble_colorblind { CYAN_VIOLET_BUBBLES } else { BOOKMAP_BUBBLES };
+    let tolerance = BUBBLE_HOVER_TOLERANCE_PX / painter.ctx().pixels_per_point();
+    let pointer = pointer.filter(|&pos| painter.clip_rect().contains(pos));
+    let mut hovered: Option<(PlottedBubble, f32)> = None;
     let mut mesh = egui::Mesh::default();
     for segment in segments {
         let bubbles = data::cluster_bubbles(
@@ -1053,8 +1143,14 @@ fn draw_trade_bubbles(
             let alpha = data::bubble_alpha(radius, settings.bubble_transparency);
             let radius = radius as f32;
             let center = m.pos(bubble.x, bubble.price);
-            if !m.rect.expand(radius).contains(center) {
+            if alpha == 0 || !painter.clip_rect().expand(radius).contains(center) {
                 continue;
+            }
+            let dot = PlottedBubble { trade: bubble, center, radius };
+            if let Some(distance) = pointer.and_then(|pos| dot.hit_distance(pos, tolerance)) {
+                if hovered.is_none_or(|(_, best)| distance <= best) {
+                    hovered = Some((dot, distance));
+                }
             }
             let buy_share = if options.delta {
                 u8::from(bubble.buy > bubble.sell) as f32
@@ -1062,9 +1158,9 @@ fn draw_trade_bubbles(
                 (bubble.buy / volume) as f32
             };
             if settings.bubble_3d {
-                add_sphere(&mut mesh, center, radius, buy_share, alpha);
+                add_sphere(&mut mesh, center, radius, buy_share, alpha, colors);
             } else {
-                let color = bubble_color(buy_share);
+                let color = bubble_color(buy_share, colors);
                 let fill = Color32::from_rgba_unmultiplied(color.r(), color.g(), color.b(), alpha);
                 painter.circle_filled(center, radius, fill);
             }
@@ -1073,27 +1169,62 @@ fn draw_trade_bubbles(
     if !mesh.indices.is_empty() {
         painter.add(Shape::mesh(mesh));
     }
+    hovered.map(|(dot, _)| {
+        painter.circle_stroke(dot.center, dot.radius, Stroke::new(1.0, Color32::WHITE));
+        dot
+    })
 }
 
-fn bubble_color(buy_share: f32) -> Color32 {
+fn draw_bubble_tooltip(painter: &Painter, model: &Model, pointer: Pos2, dot: PlottedBubble, delta: bool) {
+    let trade = dot.trade;
+    let size = |v: f64| format!("{v:.8}").trim_end_matches('0').trim_end_matches('.').to_owned();
+    let mut info = format!(
+        "Trade volume  {}\nBuy {}   Sell {}\nPrice {:.digits$}",
+        size(trade.total()), size(trade.buy), size(trade.sell), trade.price,
+        digits = model.price_decimals,
+    );
+    if delta {
+        info.push_str(&format!("   Δ {}", size(trade.buy - trade.sell)));
+    }
+    let font = FontId::monospace(12.0);
+    let bounds = painter.clip_rect().shrink(4.0);
+    let galley = painter.layout(info, font, Color32::WHITE, (bounds.width() - 16.0).max(1.0));
+    let padding = egui::vec2(8.0, 6.0);
+    let size = galley.size() + padding * 2.0;
+    let mut origin = pointer + egui::vec2(14.0, 16.0);
+    if origin.x + size.x > bounds.right() {
+        origin.x = pointer.x - size.x - 14.0;
+    }
+    if origin.y + size.y > bounds.bottom() {
+        origin.y = pointer.y - size.y - 12.0;
+    }
+    origin.x = origin.x.clamp(bounds.left(), (bounds.right() - size.x).max(bounds.left()));
+    origin.y = origin.y.clamp(bounds.top(), (bounds.bottom() - size.y).max(bounds.top()));
+    painter.rect_filled(Rect::from_min_size(origin, size), 4.0, Color32::from_rgb(17, 23, 33));
+    painter.galley(origin + padding, galley, Color32::WHITE);
+}
+
+fn bubble_color(buy_share: f32, [buy, sell]: [Color32; 2]) -> Color32 {
     let mix = |sell: u8, buy: u8| (f32::from(sell) + (f32::from(buy) - f32::from(sell)) * buy_share).round() as u8;
     Color32::from_rgb(
-        mix(SELL_BUBBLE.r(), BUY_BUBBLE.r()),
-        mix(SELL_BUBBLE.g(), BUY_BUBBLE.g()),
-        mix(SELL_BUBBLE.b(), BUY_BUBBLE.b()),
+        mix(sell.r(), buy.r()),
+        mix(sell.g(), buy.g()),
+        mix(sell.b(), buy.b()),
     )
 }
 
-/// Shade each side of a mixed sphere separately, using the lighting constants from
-/// Bookmap's Java renderer. Keep the chart's color-vision-friendly buy and sell colors.
-fn add_sphere(mesh: &mut egui::Mesh, center: Pos2, radius: f32, buy_share: f32, opacity: u8) {
+/// Shade each side of a mixed sphere separately using Bookmap's lighting constants.
+fn add_sphere(
+    mesh: &mut egui::Mesh, center: Pos2, radius: f32, buy_share: f32, opacity: u8,
+    [buy, sell]: [Color32; 2],
+) {
     use std::f32::consts::{FRAC_PI_2, PI, TAU};
 
     let buy_arc = TAU * buy_share;
     let buy_start = -FRAC_PI_2 - PI * buy_share;
     for (color, start, arc) in [
-        (BUY_BUBBLE, buy_start, buy_arc),
-        (SELL_BUBBLE, buy_start + buy_arc, TAU - buy_arc),
+        (buy, buy_start, buy_arc),
+        (sell, buy_start + buy_arc, TAU - buy_arc),
     ] {
         if arc <= 0.0 {
             continue;
@@ -1195,7 +1326,10 @@ fn format_size(v: f64) -> String {
     }
 }
 
-fn draw_crosshair(axis_painter: &Painter, painter: &Painter, model: &Model, m: &Mapper, pos: Pos2) {
+fn draw_crosshair(
+    axis_painter: &Painter, painter: &Painter, model: &Model, m: &Mapper, pos: Pos2,
+    fine: Option<&[Vec<QuoteColumn>]>,
+) {
     let plot = m.rect;
     let stroke = Stroke::new(1.0, CROSSHAIR);
     painter.vline(pos.x, plot.y_range(), stroke);
@@ -1220,12 +1354,11 @@ fn draw_crosshair(axis_painter: &Painter, painter: &Painter, model: &Model, m: &
         Align2::LEFT_CENTER,
         format!("{price:.d$}"),
     );
-    label(
-        axis_painter,
-        pos2(pos.x, plot.bottom() + 4.0),
-        Align2::CENTER_TOP,
-        data::format_ts(ts, model.tz, true, true),
-    );
+    let mut time = data::format_ts(ts, model.tz, true, true);
+    if model.xmap.mode() == AxisMode::Time && m.x1 - m.x0 < 10.0 {
+        time.push_str(&data::fractional_seconds(ts, m.x1 - m.x0));
+    }
+    label(axis_painter, pos2(pos.x, plot.bottom() + 4.0), Align2::CENTER_TOP, time);
 
     let mut info = data::format_ts_full(ts, model.tz);
     let i = model.fp_x.partition_point(|f| f.1 < x);
@@ -1250,7 +1383,20 @@ fn draw_crosshair(axis_painter: &Painter, painter: &Painter, model: &Model, m: &
             ));
         }
     }
-    if x >= 0.0 && model.book_visible() {
+    if let Some(columns) = fine {
+        if model.replay_clock().is_none_or(|clock| ts <= clock) {
+            if let Some(column) = columns.iter().flatten()
+                .min_by(|a, b| (a.x - x).abs().total_cmp(&(b.x - x).abs())) {
+                let [bid, ask] = if model.depth.is_empty() { column.prices } else { market_history::book_quote(&model.depth, ts) };
+                let prefix = if model.has_trade_quotes { "est. " } else { "" };
+                if bid.is_finite() { info.push_str(&format!("   {prefix}bid {bid:.d$}")); }
+                if ask.is_finite() { info.push_str(&format!("   {prefix}ask {ask:.d$}")); }
+                if let Some(bubble) = column.bubble {
+                    info.push_str(&format!("   buy {}  sell {}", format_size(bubble.buy), format_size(bubble.sell)));
+                }
+            }
+        }
+    } else if x >= 0.0 && model.book_visible() {
         let sec = x as usize;
         let quote_end = if model.has_trade_quotes { model.completed_seconds() } else { model.grid.bid.len() };
         let (bids, asks) = (&model.grid.bid[..quote_end], &model.grid.ask[..quote_end]);
@@ -1366,13 +1512,61 @@ mod tests {
     use super::*;
 
     #[test]
+    fn right_axis_wheel_zooms_price_at_pointer_and_plot_wheel_zooms_time() {
+        let ctx = egui::Context::default();
+        let outer = Rect::from_min_size(pos2(0.0, 0.0), egui::vec2(700.0, 500.0));
+        let plot = Rect::from_min_max(outer.min, pos2(600.0, 400.0));
+        let mut state = ChartState::new(300.0, AxisMode::Time);
+        state.p0 = 90.0;
+        state.p1 = 110.0;
+        let mut frame = |events| {
+            let input = egui::RawInput { screen_rect: Some(outer), events, ..Default::default() };
+            let mut output = ctx.run_ui(input, |ui| {
+                let response = ui.allocate_rect(outer, Sense::click_and_drag());
+                handle_input(ui, &response, plot, &mut state, true, 0.25);
+            });
+            output.textures_delta.clear();
+            (state.x0, state.x1, state.p0, state.p1, state.auto_y)
+        };
+        let wheel = || egui::Event::MouseWheel {
+            unit: egui::MouseWheelUnit::Point,
+            delta: egui::vec2(0.0, 120.0),
+            phase: egui::TouchPhase::Move,
+            source: egui::MouseWheelSource::Unknown,
+            modifiers: egui::Modifiers::NONE,
+        };
+        frame(vec![egui::Event::PointerMoved(pos2(630.0, 100.0))]);
+        let (x0, x1, low, high, auto_y) = frame(vec![wheel()]);
+        assert_eq!((x0, x1), (0.0, 300.0));
+        assert!(!auto_y);
+        assert!(high - low < 20.0);
+        assert!((high - 0.25 * (high - low) - 105.0).abs() < 1e-9);
+
+        frame(vec![egui::Event::PointerMoved(pos2(300.0, 100.0))]);
+        let (left, right, new_low, new_high, _) = frame(vec![wheel()]);
+        assert!(right - left < x1 - x0);
+        assert_eq!((new_low, new_high), (low, high));
+    }
+
+    #[test]
+    fn hover_uses_the_rendered_bubble_radius() {
+        let dot = PlottedBubble {
+            trade: TradeBubble { x: 1.0, price: 7600.25, buy: 200.0, sell: 20.0 },
+            center: pos2(40.0, 40.0),
+            radius: 10.0,
+        };
+        assert!(dot.hit_distance(pos2(52.0, 40.0), 5.0).is_some());
+        assert!(dot.hit_distance(pos2(54.0, 54.0), 5.0).is_none());
+    }
+
+    #[test]
     fn sphere_bubbles_have_valid_shaded_geometry() {
-        assert_eq!(bubble_color(0.0), SELL_BUBBLE);
-        assert_eq!(bubble_color(1.0), BUY_BUBBLE);
+        assert_eq!(bubble_color(0.0, BOOKMAP_BUBBLES), BOOKMAP_BUBBLES[1]);
+        assert_eq!(bubble_color(1.0, BOOKMAP_BUBBLES), BOOKMAP_BUBBLES[0]);
 
         let mut mesh = egui::Mesh::default();
-        add_sphere(&mut mesh, pos2(10.0, 20.0), 8.0, 0.5, 191);
-        add_sphere(&mut mesh, pos2(40.0, 60.0), 4.0, 1.0, 191);
+        add_sphere(&mut mesh, pos2(10.0, 20.0), 8.0, 0.5, 191, BOOKMAP_BUBBLES);
+        add_sphere(&mut mesh, pos2(40.0, 60.0), 4.0, 1.0, 191, CYAN_VIOLET_BUBBLES);
         assert!(mesh.is_valid());
         assert!(mesh.vertices.iter().any(|vertex| vertex.color.a() == 0));
         let center = mesh.vertices[0].color;
