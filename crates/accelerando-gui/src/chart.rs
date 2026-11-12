@@ -21,8 +21,8 @@ const SESSION_LINE: Color32 = Color32::from_rgba_premultiplied(70, 78, 100, 160)
 const CROSSHAIR: Color32 = Color32::from_rgba_premultiplied(150, 150, 150, 150);
 const GREEN: Color32 = Color32::from_rgb(0x26, 0xa6, 0x9a);
 const RED: Color32 = Color32::from_rgb(0xef, 0x53, 0x50);
-const BID_LINE: Color32 = Color32::from_rgb(0x04, 0xb1, 0xb1);
-const ASK_LINE: Color32 = Color32::from_rgb(0xf6, 0x03, 0xc0);
+const BID_LINE: Color32 = Color32::from_rgb(0x2e, 0xcc, 0x71);
+const ASK_LINE: Color32 = Color32::from_rgb(0xe7, 0x4c, 0x3c);
 // Bookmap's DEFAULT_COLOR_BUY_TRADES_CIRCLES and DEFAULT_COLOR_SELL_TRADES_CIRCLES.
 const BOOKMAP_BUBBLES: [Color32; 2] = [
     Color32::from_rgb(72, 254, 149),
@@ -33,6 +33,8 @@ const CYAN_VIOLET_BUBBLES: [Color32; 2] = [
     Color32::from_rgb(0xc2, 0x86, 0xff),
 ];
 const QUOTE_WIDTH_PX: f32 = 3.0;
+// Match the falloff measured across flat quote lines in Bookmap screenshots.
+const QUOTE_FEATHER_PX: f32 = 1.6;
 const BUBBLE_HOVER_TOLERANCE_PX: f32 = 5.0;
 const EQUITY_LINE: Color32 = Color32::from_rgb(0x7f, 0xb8, 0xff);
 pub(crate) const GAIN: Color32 = Color32::from_rgb(0x5f, 0xd3, 0x8d);
@@ -1070,21 +1072,34 @@ fn draw_marker(painter: &Painter, pos: Pos2, shape: &str, color: Color32, r: f32
 }
 
 fn draw_quote_columns(painter: &Painter, m: &Mapper, segments: &[Vec<QuoteColumn>]) {
-    let width = QUOTE_WIDTH_PX / painter.ctx().pixels_per_point();
+    let pixels_per_point = painter.ctx().pixels_per_point();
+    let width = QUOTE_WIDTH_PX / pixels_per_point;
+    let mut options = painter.ctx().tessellation_options(|options| *options);
+    options.feathering = true;
+    options.feathering_size_in_pixels = QUOTE_FEATHER_PX;
+    let mut tessellator = egui::epaint::Tessellator::new(pixels_per_point, options, [0, 0], Vec::new());
+    tessellator.set_clip_rect(painter.clip_rect());
+    let mut mesh = egui::Mesh::default();
+
     for (side, color) in [BID_LINE, ASK_LINE].into_iter().enumerate() {
         let stroke = Stroke::new(width, color);
         for segment in segments {
             for run in segment.split(|column| !column.prices[side].is_finite()) {
-                if let [column] = run {
-                    painter.circle_filled(m.pos(column.x, column.prices[side]), width * 0.5, color);
-                } else if !run.is_empty() {
-                    painter.line(
+                let shape = match run {
+                    [] => continue,
+                    [column] => Shape::circle_filled(m.pos(column.x, column.prices[side]), width * 0.5, color),
+                    _ => Shape::line(
                         run.iter().map(|column| m.pos(column.x, column.prices[side])).collect(),
                         stroke,
-                    );
-                }
+                    ),
+                };
+                tessellator.tessellate_shape(shape, &mut mesh);
             }
         }
+    }
+
+    if !mesh.is_empty() {
+        painter.add(Shape::mesh(mesh));
     }
 }
 
