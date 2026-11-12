@@ -522,11 +522,17 @@ impl App {
         }
 
         let started = Instant::now();
+        let mut gui_events = None;
         let outcomes = if event_driven {
             if o.validate {
                 eprintln!("note: --validate covers footprint strategies only; skipping for event-driven `{strategy}`");
             }
-            self.run_event(o, data_path, strategy, &reqs, &candidates)?
+            let events = accelerando_core::prepare_event_data(self.build_source(o, data_path)?)?;
+            let outcomes = self.run_event(o, &events, strategy, &reqs, &candidates)?;
+            if o.gui {
+                gui_events = Some(events);
+            }
+            outcomes
         } else {
             let prepared = self.prepare(o, data_path, &reqs)?;
             prepared.data.check_values(&reqs.values)?;
@@ -576,7 +582,9 @@ impl App {
                 best.result.clone()
             };
             if o.gui {
-                return gui::view(Arc::clone(&self.registry), o, data_path, &best.label, result);
+                return gui::view(
+                    Arc::clone(&self.registry), o, data_path, &best.label, result, gui_events,
+                );
             }
             accelerando_web::serve(&result, o.port).map_err(|e| e.to_string())?;
         }
@@ -803,12 +811,11 @@ impl App {
     fn run_event(
         &self,
         o: &RunOptions,
-        path: &str,
+        events: &PreparedEventData,
         strategy: &str,
         reqs: &StrategyRequirements,
         candidates: &[Params],
     ) -> Result<Vec<RunOutcome>, String> {
-        let events = accelerando_core::prepare_event_data(self.build_source(o, path)?)?;
         let requests = self.indicator_requests(o, reqs)?;
         let labels = labels(strategy, candidates);
         candidates
@@ -816,7 +823,7 @@ impl App {
             .zip(labels)
             .map(|(params, label)| {
                 let result = run_prepared_event_backtest(
-                    &events,
+                    events,
                     self.build_aggregator(o.agg())?,
                     self.build_indicators(&requests)?,
                     self.build_strategy(strategy, params)?,

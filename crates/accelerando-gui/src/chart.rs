@@ -5,7 +5,7 @@ use eframe::egui::{
     StrokeKind, TextureHandle, TextureOptions,
 };
 
-use crate::data::{self, HeatMetric, RasterSpec};
+use crate::data::{self, HeatMetric, QuoteColumn, RasterSpec};
 use crate::vp::VpTool;
 use crate::{Model, Settings};
 
@@ -19,8 +19,10 @@ const SESSION_LINE: Color32 = Color32::from_rgba_premultiplied(70, 78, 100, 160)
 const CROSSHAIR: Color32 = Color32::from_rgba_premultiplied(150, 150, 150, 150);
 const GREEN: Color32 = Color32::from_rgb(0x26, 0xa6, 0x9a);
 const RED: Color32 = Color32::from_rgb(0xef, 0x53, 0x50);
-const BID_LINE: Color32 = Color32::from_rgb(0x4a, 0xe3, 0x8a);
-const ASK_LINE: Color32 = Color32::from_rgb(0xff, 0x7a, 0x6b);
+const BID_LINE: Color32 = Color32::from_rgb(0x04, 0xb1, 0xb1);
+const ASK_LINE: Color32 = Color32::from_rgb(0xf6, 0x03, 0xc0);
+const BUY_BUBBLE: Color32 = Color32::from_rgb(0x42, 0xe9, 0xe4);
+const SELL_BUBBLE: Color32 = Color32::from_rgb(0xc2, 0x86, 0xff);
 const EQUITY_LINE: Color32 = Color32::from_rgb(0x7f, 0xb8, 0xff);
 pub(crate) const GAIN: Color32 = Color32::from_rgb(0x5f, 0xd3, 0x8d);
 pub(crate) const LOSS: Color32 = Color32::from_rgb(0xff, 0x7b, 0x72);
@@ -165,8 +167,25 @@ pub(crate) fn price_panel(
     let before = Mapper { rect: plot, x0: state.x0, x1: state.x1, p0: state.p0, p1: state.p1 };
     let drawing_vp = !pick_bar && vp.handle_input(ui, &response, &before, model);
     handle_input(ui, &response, plot, state, !drawing_vp);
+    let book_visible = model.book_visible();
+    let show_quotes = book_visible && (settings.show_bbo || (model.has_trade_quotes && settings.show_heat));
+    let columns = if show_quotes || (book_visible && settings.show_heat && state.auto_y) {
+        let (bid, ask) = model.display_quotes();
+        let end = model.completed_seconds().min(bid.len());
+        let volume = if show_quotes && settings.show_trade_bubbles { &model.trade_volume[..] } else { &[] };
+        let step = (((state.x1 - state.x0) / f64::from(plot.width())).ceil() as usize).max(1);
+        data::quote_columns(
+            &model.bounds,
+            [&bid[..end], &ask[..end]],
+            volume,
+            state.x0.floor() as usize..state.x1.ceil() as usize,
+            step,
+        )
+    } else {
+        Vec::new()
+    };
     if state.auto_y {
-        if let Some((lo, hi)) = visible_price_range(model, settings, state.x0, state.x1) {
+        if let Some((lo, hi)) = visible_price_range(model, settings, state.x0, state.x1, &columns) {
             let pad = ((hi - lo) * 0.06).max(model.result.tick_size.abs() * 3.0).max(1e-9);
             state.p0 = lo - pad;
             state.p1 = hi + pad;
@@ -178,7 +197,7 @@ pub(crate) fn price_panel(
     let painter = ui.painter_at(plot);
     painter.rect_filled(plot, 0.0, BACKGROUND);
 
-    if settings.show_heat && model.book_visible() {
+    if settings.show_heat && model.has_heatmap() && book_visible {
         draw_heatmap(ui.ctx(), &painter, model, settings, state, &m);
     }
     draw_axes(&axis_painter, &painter, model, &m);
@@ -200,16 +219,20 @@ pub(crate) fn price_panel(
     if settings.show_overlays {
         draw_overlays(&painter, model, &m, settings.show_markers);
     }
-    if settings.show_bbo && model.book_visible() {
-        draw_grid_series(&painter, &model.bid_smooth, &model.bounds, &m, BID_LINE);
-        draw_grid_series(&painter, &model.ask_smooth, &model.bounds, &m, ASK_LINE);
+    if show_quotes {
+        draw_quote_columns(&painter, &m, &columns);
+        if settings.show_trade_bubbles {
+            draw_trade_bubbles(&painter, &m, &columns, settings);
+        }
         let legend = plot.right_top() + egui::vec2(-8.0, 6.0);
         let painter = &full_painter;
-        let rect = painter.text(legend, Align2::RIGHT_TOP, "ask", FontId::monospace(12.0), ASK_LINE);
+        let ask_label = if model.has_trade_quotes { "est. ask" } else { "ask" };
+        let bid_label = if model.has_trade_quotes { "est. bid" } else { "bid" };
+        let rect = painter.text(legend, Align2::RIGHT_TOP, ask_label, FontId::monospace(12.0), ASK_LINE);
         painter.text(
             rect.left_top() - egui::vec2(10.0, 0.0),
             Align2::RIGHT_TOP,
-            "bid",
+            bid_label,
             FontId::monospace(12.0),
             BID_LINE,
         );
@@ -404,7 +427,13 @@ fn handle_input(
 }
 
 /// Low/high of everything price-like that is visible in `[x0, x1]`.
-fn visible_price_range(model: &Model, settings: &Settings, x0: f64, x1: f64) -> Option<(f64, f64)> {
+fn visible_price_range(
+    model: &Model,
+    settings: &Settings,
+    x0: f64,
+    x1: f64,
+    columns: &[Vec<QuoteColumn>],
+) -> Option<(f64, f64)> {
     let mut lo = f64::INFINITY;
     let mut hi = f64::NEG_INFINITY;
     if settings.show_bars || !model.book_visible() {
@@ -415,21 +444,14 @@ fn visible_price_range(model: &Model, settings: &Settings, x0: f64, x1: f64) -> 
             hi = hi.max(fp.high);
         }
     }
-    if model.book_visible() && (settings.show_bbo || settings.show_heat) {
-        let n = model.bid_smooth.len();
-        let ia = (x0.floor().max(0.0) as usize).min(n);
-        let ib = (x1.ceil().max(0.0) as usize).min(n);
-        let step = ((ib.saturating_sub(ia)) / 4000).max(1);
-        for i in (ia..ib).step_by(step) {
-            let (bid, ask) = (model.bid_smooth[i] as f64, model.ask_smooth[i] as f64);
-            if bid > 0.0 {
-                lo = lo.min(bid);
-                hi = hi.max(bid);
-            }
-            if ask > 0.0 {
-                lo = lo.min(ask);
-                hi = hi.max(ask);
-            }
+    for column in columns.iter().flatten() {
+        for price in column.prices.into_iter().filter(|price| price.is_finite()) {
+            lo = lo.min(price);
+            hi = hi.max(price);
+        }
+        if let Some(bubble) = column.bubble {
+            lo = lo.min(bubble.price);
+            hi = hi.max(bubble.price);
         }
     }
     (lo.is_finite() && hi.is_finite()).then_some((lo, hi))
@@ -640,7 +662,7 @@ fn draw_bars(painter: &Painter, model: &Model, settings: &Settings, m: &Mapper) 
     if i1 <= i0 {
         return;
     }
-    let over_heat = settings.show_heat && model.book_visible();
+    let over_heat = settings.show_heat && model.has_heatmap() && model.book_visible();
 
     if (i1 - i0) as f32 > m.rect.width() / 3.0 {
         // More bars than pixels: one high-low line per pixel column.
@@ -977,60 +999,135 @@ fn draw_marker(painter: &Painter, pos: Pos2, shape: &str, color: Color32, r: f32
     }
 }
 
-/// Draw a per-second series (the bid or ask line), averaging cells when several share a pixel
-/// and breaking the line at missing data and at session boundaries.
-fn draw_grid_series(
-    painter: &Painter,
-    values: &[f32],
-    bounds: &[(usize, usize)],
-    m: &Mapper,
-    color: Color32,
-) {
-    let n = values.len();
-    let ia = (m.x0.floor().max(0.0) as usize).min(n);
-    let ib = ((m.x1.ceil().max(0.0) as usize) + 1).min(n);
-    if ib <= ia {
-        return;
-    }
-    let step = (((ib - ia) as f32 / (m.rect.width() * 1.5)) as usize).max(1);
-    let stroke = Stroke::new(1.6, color);
-    let flush = |points: &mut Vec<Pos2>| {
-        match points.len() {
-            0 => {}
-            1 => {
-                painter.circle_filled(points[0], 1.2, color);
-            }
-            _ => {
-                painter.line(std::mem::take(points), stroke);
-            }
-        }
-        points.clear();
-    };
-    let first = bounds.partition_point(|b| b.1 <= ia);
-    let mut points: Vec<Pos2> = Vec::new();
-    for &(start, end) in &bounds[first..] {
-        if start >= ib {
-            break;
-        }
-        let (a, b) = (start.max(ia), end.min(ib));
-        let mut i = a;
-        while i < b {
-            let j = (i + step).min(b);
-            let (mut sum, mut count) = (0f64, 0u32);
-            for &v in &values[i..j] {
-                if v.is_finite() {
-                    sum += v as f64;
-                    count += 1;
+fn draw_quote_columns(painter: &Painter, m: &Mapper, segments: &[Vec<QuoteColumn>]) {
+    for (side, color) in [BID_LINE, ASK_LINE].into_iter().enumerate() {
+        let stroke = Stroke::new(1.6, color);
+        for segment in segments {
+            for run in segment.split(|column| !column.prices[side].is_finite()) {
+                if let [column] = run {
+                    painter.circle_filled(m.pos(column.x, column.prices[side]), 1.2, color);
+                } else if !run.is_empty() {
+                    painter.line(
+                        run.iter().map(|column| m.pos(column.x, column.prices[side])).collect(),
+                        stroke,
+                    );
                 }
             }
-            if count == 0 {
-                flush(&mut points);
-            } else {
-                points.push(m.pos((i + j) as f64 * 0.5, sum / count as f64));
-            }
-            i = j;
         }
-        flush(&mut points);
+    }
+}
+
+fn draw_trade_bubbles(
+    painter: &Painter,
+    m: &Mapper,
+    segments: &[Vec<QuoteColumn>],
+    settings: &Settings,
+) {
+    let pixels_per_unit = [
+        f64::from(m.rect.width()) / (m.x1 - m.x0),
+        f64::from(m.rect.height()) / (m.p1 - m.p0),
+    ];
+    let options = data::BubbleClustering {
+        strength: settings.bubble_aggregation,
+        target: data::bubble_size_target(settings.bubble_size),
+        spherical: settings.bubble_3d,
+        delta: settings.bubble_delta,
+    };
+    let mut mesh = egui::Mesh::default();
+    for segment in segments {
+        let bubbles = data::cluster_bubbles(
+            segment.iter().filter_map(|column| column.bubble),
+            pixels_per_unit,
+            m.x0,
+            options,
+        );
+        let largest = bubbles.iter().map(|bubble| bubble.clustering_volume(options.delta)).fold(0.0, f64::max);
+        for bubble in bubbles {
+            // In Delta mode Bookmap cancels matched buy/sell size before sending the dot
+            // to the renderer, while the cluster center still uses total executed volume.
+            let volume = bubble.clustering_volume(options.delta);
+            if volume < 1.0 {
+                continue;
+            }
+            let radius = data::bubble_radius(volume, largest, options.target, options.spherical);
+            let alpha = data::bubble_alpha(radius, settings.bubble_transparency);
+            let radius = radius as f32;
+            let center = m.pos(bubble.x, bubble.price);
+            if !m.rect.expand(radius).contains(center) {
+                continue;
+            }
+            let buy_share = if options.delta {
+                u8::from(bubble.buy > bubble.sell) as f32
+            } else {
+                (bubble.buy / volume) as f32
+            };
+            if settings.bubble_3d {
+                add_sphere(&mut mesh, center, radius, buy_share, alpha);
+            } else {
+                let color = bubble_color(buy_share);
+                let fill = Color32::from_rgba_unmultiplied(color.r(), color.g(), color.b(), alpha);
+                painter.circle_filled(center, radius, fill);
+            }
+        }
+    }
+    if !mesh.indices.is_empty() {
+        painter.add(Shape::mesh(mesh));
+    }
+}
+
+fn bubble_color(buy_share: f32) -> Color32 {
+    let mix = |sell: u8, buy: u8| (f32::from(sell) + (f32::from(buy) - f32::from(sell)) * buy_share).round() as u8;
+    Color32::from_rgb(
+        mix(SELL_BUBBLE.r(), BUY_BUBBLE.r()),
+        mix(SELL_BUBBLE.g(), BUY_BUBBLE.g()),
+        mix(SELL_BUBBLE.b(), BUY_BUBBLE.b()),
+    )
+}
+
+/// Shade each side of a mixed sphere separately, using the lighting constants from
+/// Bookmap's Java renderer. Keep the chart's color-vision-friendly buy and sell colors.
+fn add_sphere(mesh: &mut egui::Mesh, center: Pos2, radius: f32, buy_share: f32, opacity: u8) {
+    use std::f32::consts::{FRAC_PI_2, PI, TAU};
+
+    let buy_arc = TAU * buy_share;
+    let buy_start = -FRAC_PI_2 - PI * buy_share;
+    for (color, start, arc) in [
+        (BUY_BUBBLE, buy_start, buy_arc),
+        (SELL_BUBBLE, buy_start + buy_arc, TAU - buy_arc),
+    ] {
+        if arc <= 0.0 {
+            continue;
+        }
+        let sides = ((arc / TAU * 36.0).ceil() as u32).max(1);
+        let stride = sides + 1;
+        let base = mesh.vertices.len() as u32;
+        let shade = |x: f32, y: f32, alpha: u8| {
+            let z = (1.0 - x * x - y * y).max(0.0).sqrt();
+            let light = (0.6 * x + 0.8 * z).max(0.0).powf(0.7);
+            let intensity = (0.02 + 0.98 * light * light).sqrt();
+            let channel = |c: u8| (f32::from(c) * intensity).round() as u8;
+            Color32::from_rgba_unmultiplied(channel(color.r()), channel(color.g()), channel(color.b()), alpha)
+        };
+        mesh.colored_vertex(center, shade(0.0, 0.0, opacity));
+        for (ring, r) in [0.35, 0.65, 0.86, 1.0, 1.0 + 0.75 / radius].into_iter().enumerate() {
+            let ring_start = base + 1 + ring as u32 * stride;
+            let alpha = if ring < 4 { opacity } else { 0 };
+            for i in 0..=sides {
+                let angle = start + arc * i as f32 / sides as f32;
+                let (y, x) = angle.sin_cos();
+                mesh.colored_vertex(center + egui::vec2(x, y) * (r * radius), shade(x * r, y * r, alpha));
+                if i == sides {
+                    break;
+                }
+                if ring == 0 {
+                    mesh.add_triangle(base, ring_start + i, ring_start + i + 1);
+                } else {
+                    let previous = ring_start - stride;
+                    mesh.add_triangle(previous + i, ring_start + i, ring_start + i + 1);
+                    mesh.add_triangle(previous + i, ring_start + i + 1, previous + i + 1);
+                }
+            }
+        }
     }
 }
 
@@ -1155,12 +1252,23 @@ fn draw_crosshair(axis_painter: &Painter, painter: &Painter, model: &Model, m: &
     }
     if x >= 0.0 && model.book_visible() {
         let sec = x as usize;
-        if let (Some(&bid), Some(&ask)) = (model.grid.bid.get(sec), model.grid.ask.get(sec)) {
-            if bid.is_finite() && ask.is_finite() {
-                info.push_str(&format!(
-                    "   bid {bid:.d$}  ask {ask:.d$}  spread {:.d$}",
-                    ask - bid
-                ));
+        let quote_end = if model.has_trade_quotes { model.completed_seconds() } else { model.grid.bid.len() };
+        let (bids, asks) = (&model.grid.bid[..quote_end], &model.grid.ask[..quote_end]);
+        if let (Some(&bid), Some(&ask)) = (bids.get(sec), asks.get(sec)) {
+            let prefix = if model.has_trade_quotes { "est. " } else { "" };
+            if bid.is_finite() {
+                info.push_str(&format!("   {prefix}bid {bid:.d$}"));
+            }
+            if ask.is_finite() {
+                info.push_str(&format!("   {prefix}ask {ask:.d$}"));
+            }
+            if !model.has_trade_quotes && bid.is_finite() && ask.is_finite() {
+                info.push_str(&format!("   spread {:.d$}", ask - bid));
+            }
+        }
+        if sec < model.completed_seconds() {
+            if let Some(vol) = model.trade_volume.get(sec) {
+                info.push_str(&format!("   1s buy {}  sell {}", format_size(vol.buy as f64), format_size(vol.sell as f64)));
             }
         }
     }
@@ -1250,5 +1358,24 @@ pub(crate) fn equity_panel(ui: &mut egui::Ui, model: &Model, state: &ChartState)
             font.clone(),
             AXIS_TEXT,
         );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sphere_bubbles_have_valid_shaded_geometry() {
+        assert_eq!(bubble_color(0.0), SELL_BUBBLE);
+        assert_eq!(bubble_color(1.0), BUY_BUBBLE);
+
+        let mut mesh = egui::Mesh::default();
+        add_sphere(&mut mesh, pos2(10.0, 20.0), 8.0, 0.5, 191);
+        add_sphere(&mut mesh, pos2(40.0, 60.0), 4.0, 1.0, 191);
+        assert!(mesh.is_valid());
+        assert!(mesh.vertices.iter().any(|vertex| vertex.color.a() == 0));
+        let center = mesh.vertices[0].color;
+        assert!(mesh.vertices.iter().any(|vertex| vertex.color.a() == center.a() && vertex.color != center));
     }
 }

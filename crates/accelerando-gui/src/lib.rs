@@ -53,7 +53,7 @@ pub struct ViewerOptions {
     pub initial_span_secs: Option<f64>,
     /// x axis: `Some(AxisMode::Bars)` gives every K-line the same width, `Some(AxisMode::Time)`
     /// is proportional to time (needed for the 1-second heatmap). `None` picks Time when the
-    /// result carries a liquidity heatmap and Bars otherwise.
+    /// result carries a liquidity heatmap or trade-derived quotes, and Bars otherwise.
     pub axis_mode: Option<AxisMode>,
     /// What `result.footprints` are (shown in the bar-type chooser), e.g. `BarSpec::parse("reverse:16")`.
     pub bar_spec: Option<BarSpec>,
@@ -89,6 +89,17 @@ impl Default for ViewerOptions {
 ///
 /// Must be called from the main thread (a windowing-system requirement).
 pub fn view(result: BacktestResult, options: ViewerOptions) -> std::io::Result<()> {
+    view_with_trade_quotes(result, options, &[])
+}
+
+/// Open the viewer with 1-second trade bubbles and trade-derived quotes when depth is absent.
+/// Pass trades in timestamp order.
+pub fn view_with_trade_quotes(
+    result: BacktestResult,
+    options: ViewerOptions,
+    events: &[accelerando_core::OrderFlowEvent],
+) -> std::io::Result<()> {
+    let quotes = data::trade_quotes(events);
     let native = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_title(options.title.clone())
@@ -102,7 +113,7 @@ pub fn view(result: BacktestResult, options: ViewerOptions) -> std::io::Result<(
         Box::new(move |cc| {
             cc.egui_ctx.set_theme(egui::Theme::Dark);
             install_cjk_font(&cc.egui_ctx);
-            Ok(Box::new(Viewer::new(result, options)))
+            Ok(Box::new(Viewer::new(result, options, &quotes)))
         }),
     )
     .map_err(|e| std::io::Error::other(e.to_string()))
@@ -166,6 +177,8 @@ pub(crate) struct Model {
     pub trade_x: Vec<(f64, f64)>,
     pub overlays: Overlays,
     pub heat_ref: f32,
+    pub has_trade_quotes: bool,
+    pub trade_volume: Vec<data::TradeVolume>,
     /// Time zone of every time shown.
     pub tz: TimeZone,
     pub price_decimals: usize,
@@ -176,28 +189,36 @@ pub(crate) struct Model {
 }
 
 impl Model {
-    fn new(result: BacktestResult, options: &ViewerOptions) -> Self {
+    fn new(result: BacktestResult, options: &ViewerOptions, quotes: &[data::TradeQuote]) -> Self {
         let snapshots = &result.liquidity_heatmap.snapshots;
         let mut intervals: Vec<(i64, i64)> = Vec::with_capacity(
-            snapshots.len() + result.footprints.len() + result.equity.len() + result.trades.len(),
+            snapshots.len() + quotes.len() + result.footprints.len() + result.equity.len() + result.trades.len(),
         );
         intervals.extend(snapshots.iter().map(|s| (s.ts_ns, s.ts_ns)));
+        intervals.extend(quotes.iter().map(|q| (q.ts_ns, q.ts_ns)));
         intervals.extend(result.footprints.iter().map(|f| (f.ts_first_ns, f.ts_last_ns)));
         intervals.extend(result.equity.iter().map(|e| (e.ts_ns, e.ts_ns)));
         intervals.extend(result.trades.iter().map(|t| (t.entry_ts_ns, t.entry_ts_ns)));
         intervals.extend(result.trades.iter().map(|t| (t.exit_ts_ns, t.exit_ts_ns)));
         let axis = TimeAxis::build(intervals, options.max_gap_secs.max(1) * SEC_NS);
         let bounds = axis.bounds();
-        let grid = BookGrid::build(&axis, snapshots);
+        let mut grid = BookGrid::build(&axis, snapshots);
+        let has_trade_quotes = snapshots.is_empty() && !quotes.is_empty();
+        let trade_volume = grid.apply_trade_samples(&axis, &bounds, quotes, has_trade_quotes);
         let heat_ref = data::reference_size(snapshots);
         let tick = result.tick_size;
         let price_decimals = if tick > 0.0 && tick < 1.0 {
-            ((-tick.log10()).ceil() as usize).clamp(1, 6)
+            (1..=6)
+                .find(|&digits| {
+                    let scaled = tick * 10_f64.powi(digits as i32);
+                    scaled.round() >= 1.0 && (scaled - scaled.round()).abs() < 1e-8
+                })
+                .unwrap_or(6)
         } else {
             2
         };
         let mode = options.axis_mode.unwrap_or(
-            if result.footprints.is_empty() || !snapshots.is_empty() {
+            if result.footprints.is_empty() || !snapshots.is_empty() || !quotes.is_empty() {
                 AxisMode::Time
             } else {
                 AxisMode::Bars
@@ -221,13 +242,14 @@ impl Model {
             bounds,
             grid,
             heat_ref,
+            has_trade_quotes,
+            trade_volume,
             tz: TimeZone::from_hours(options.utc_offset_hours),
             price_decimals,
             median_bar_secs: 60.0,
             display: None,
         };
         model.set_axis_mode(mode);
-        model.set_smoothing(options.smoothing_secs as usize);
         model
     }
 
@@ -380,8 +402,20 @@ impl Model {
     }
 
     fn set_smoothing(&mut self, window_secs: usize) {
-        self.bid_smooth = data::smooth(&self.grid.bid, &self.bounds, window_secs);
-        self.ask_smooth = data::smooth(&self.grid.ask, &self.bounds, window_secs);
+        let smooth = if self.has_trade_quotes { data::smooth_estimates } else { data::smooth };
+        self.bid_smooth = smooth(&self.grid.bid, &self.bounds, window_secs);
+        self.ask_smooth = smooth(&self.grid.ask, &self.bounds, window_secs);
+    }
+
+    pub fn completed_seconds(&self) -> usize {
+        self.replay_cut_x().map_or(self.grid.bid.len(), |x| {
+            (x as usize).min(self.grid.bid.len())
+        })
+    }
+
+    pub fn display_quotes(&self) -> (&[f32], &[f32]) {
+        let len = if self.has_trade_quotes { self.completed_seconds() } else { self.grid.bid.len() };
+        (&self.bid_smooth[..len], &self.ask_smooth[..len])
     }
 
     pub fn has_heatmap(&self) -> bool {
@@ -390,7 +424,7 @@ impl Model {
 
     /// The heatmap and bid/ask lines live on the per-second grid: time axis only.
     pub fn book_visible(&self) -> bool {
-        self.has_heatmap() && self.xmap.mode() == AxisMode::Time
+        (self.has_heatmap() || self.has_trade_quotes) && self.xmap.mode() == AxisMode::Time
     }
 
     /// A time span expressed in x units of the current axis.
@@ -407,6 +441,12 @@ pub(crate) struct Settings {
     pub axis_mode: AxisMode,
     pub show_heat: bool,
     pub show_bbo: bool,
+    pub show_trade_bubbles: bool,
+    pub bubble_aggregation: u32,
+    pub bubble_size: u32,
+    pub bubble_3d: bool,
+    pub bubble_delta: bool,
+    pub bubble_transparency: u32,
     pub show_bars: bool,
     /// Draw bars as footprints once they are wide enough.
     pub show_footprint: bool,
@@ -449,13 +489,21 @@ struct Viewer {
 }
 
 impl Viewer {
-    fn new(result: BacktestResult, options: ViewerOptions) -> Self {
+    fn new(result: BacktestResult, options: ViewerOptions, quotes: &[data::TradeQuote]) -> Self {
         let metrics_rows = metrics_rows(&result);
-        let model = Model::new(result, &options);
+        let mut model = Model::new(result, &options, quotes);
+        let smoothing_secs = if model.has_trade_quotes { 3 } else { options.smoothing_secs };
+        model.set_smoothing(smoothing_secs as usize);
         let settings = Settings {
             axis_mode: model.xmap.mode(),
             show_heat: model.has_heatmap(),
             show_bbo: model.has_heatmap(),
+            show_trade_bubbles: !model.trade_volume.is_empty(),
+            bubble_aggregation: 52,
+            bubble_size: 40,
+            bubble_3d: true,
+            bubble_delta: true,
+            bubble_transparency: 41,
             show_bars: true,
             show_footprint: true,
             show_trades: true,
@@ -465,7 +513,7 @@ impl Viewer {
             heat_metric: HeatMetric::Total,
             heat_smooth: true,
             heat_contrast: 2.0,
-            smoothing_secs: options.smoothing_secs,
+            smoothing_secs,
             red_up: options.red_up,
         };
         let mut chart = ChartState::new(model.xmap.total());
@@ -486,7 +534,7 @@ impl Viewer {
             model,
             settings,
             chart,
-            applied_smoothing: options.smoothing_secs,
+            applied_smoothing: smoothing_secs,
             metrics_rows,
             selected_trade: None,
             settings_open: false,
@@ -518,6 +566,7 @@ impl Viewer {
             {
                 self.bar_dialog_open = !self.bar_dialog_open;
             }
+            ui.menu_button("Heatmap", |ui| self.heatmap_controls(ui));
             if let Some((spec, _)) = &self.pending {
                 ui.spinner();
                 ui.label(format!("building {} bars ...", spec.label()));
@@ -692,9 +741,78 @@ impl Viewer {
         self.chart.show_range(xmap.to_x(t0), xmap.to_x(t1));
     }
 
+    fn heatmap_controls(&mut self, ui: &mut egui::Ui) {
+        let has_heat = self.model.has_heatmap();
+        let has_quotes = self.model.has_trade_quotes;
+        let has_bubbles = !self.model.trade_volume.is_empty();
+        let s = &mut self.settings;
+        let mut time_axis = s.axis_mode == AxisMode::Time;
+        if ui
+            .checkbox(&mut time_axis, "Time-proportional x axis")
+            .on_hover_text(
+                "Off: every bar has the same width. On: x is proportional to time, \
+                 which the 1-second heatmap and bid/ask lines need.",
+            )
+            .changed()
+        {
+            s.axis_mode = if time_axis { AxisMode::Time } else { AxisMode::Bars };
+        }
+        let time_axis = s.axis_mode == AxisMode::Time;
+        if !has_heat && !has_quotes {
+            ui.weak("No order-book or trade-derived quote data in this result.");
+        } else if !time_axis {
+            ui.weak("Turn on the time-proportional x axis to show the heatmap.");
+        }
+        if has_quotes {
+            ui.add_enabled_ui(time_axis, |ui| {
+                ui.checkbox(&mut s.show_heat, "Heatmap 1s (estimated Bid / Ask)")
+                    .on_hover_text("Highest buy and lowest sell per second. A missing side keeps its previous price.");
+                ui.add_enabled_ui(s.show_heat, |ui| {
+                    trade_bubble_controls(ui, s);
+                    ui.add(
+                        egui::Slider::new(&mut s.smoothing_secs, 0..=15)
+                            .suffix(" s")
+                            .text("line smoothing"),
+                    )
+                    .on_hover_text("Trailing average. Set to 0 to show raw 1-second prices.");
+                });
+            });
+            return;
+        }
+        ui.add_enabled_ui(has_heat && time_axis, |ui| {
+            ui.checkbox(&mut s.show_heat, "Heatmap 1s");
+            ui.checkbox(&mut s.show_bbo, "Bid / Ask lines");
+            if has_bubbles {
+                ui.add_enabled_ui(s.show_bbo, |ui| trade_bubble_controls(ui, s));
+            }
+            ui.add(
+                egui::Slider::new(&mut s.smoothing_secs, 0..=300)
+                    .logarithmic(true)
+                    .suffix(" s")
+                    .text("line smoothing"),
+            )
+            .on_hover_text(
+                "Width of the zero-lag (centered) smoothing kernel applied to the \
+                 best-bid and best-ask lines. 0 shows the raw 1-second quotes.",
+            );
+            egui::ComboBox::from_label("heat")
+                .selected_text(match s.heat_metric {
+                    HeatMetric::Total => "Bid + Ask",
+                    HeatMetric::Bid => "Bid",
+                    HeatMetric::Ask => "Ask",
+                })
+                .show_ui(ui, |ui| {
+                    ui.selectable_value(&mut s.heat_metric, HeatMetric::Total, "Bid + Ask");
+                    ui.selectable_value(&mut s.heat_metric, HeatMetric::Bid, "Bid");
+                    ui.selectable_value(&mut s.heat_metric, HeatMetric::Ask, "Ask");
+                });
+            ui.checkbox(&mut s.heat_smooth, "Smooth heatmap");
+            ui.add(egui::Slider::new(&mut s.heat_contrast, 0.5..=4.0).text("contrast"));
+        });
+    }
+
     fn settings_window(&mut self, ctx: &egui::Context) {
         let mut open = self.settings_open;
-        let has_heat = self.model.has_heatmap();
         let has_equity = !self.model.result.equity.is_empty();
         let trade_count = self.model.result.trades.len();
         egui::Window::new("Settings")
@@ -722,53 +840,6 @@ impl Viewer {
 
                 ui.weak("Indicators (overlays, markers, volume profile) are listed
 in the chart's top-left corner.");
-
-                ui.separator();
-                ui.strong("Order book");
-                let book = has_heat && s.axis_mode == AxisMode::Time;
-                if !has_heat {
-                    ui.weak("No order-book data in this result.");
-                } else if !book {
-                    ui.weak("Turn on the time-proportional x axis to show the book.");
-                }
-                let mut time_axis = s.axis_mode == AxisMode::Time;
-                if ui
-                    .checkbox(&mut time_axis, "Time-proportional x axis")
-                    .on_hover_text(
-                        "Off: every bar has the same width. On: x is proportional to time, \
-                         which the 1-second heatmap and bid/ask lines need.",
-                    )
-                    .changed()
-                {
-                    s.axis_mode = if time_axis { AxisMode::Time } else { AxisMode::Bars };
-                }
-                ui.add_enabled_ui(book, |ui| {
-                    ui.checkbox(&mut s.show_heat, "Heatmap 1s");
-                    ui.checkbox(&mut s.show_bbo, "Bid / Ask lines");
-                    ui.add(
-                        egui::Slider::new(&mut s.smoothing_secs, 0..=300)
-                            .logarithmic(true)
-                            .suffix(" s")
-                            .text("line smoothing"),
-                    )
-                    .on_hover_text(
-                        "Width of the zero-lag (centered) smoothing kernel applied to the \
-                         best-bid and best-ask lines. 0 shows the raw 1-second quotes.",
-                    );
-                    egui::ComboBox::from_label("heat")
-                        .selected_text(match s.heat_metric {
-                            HeatMetric::Total => "Bid + Ask",
-                            HeatMetric::Bid => "Bid",
-                            HeatMetric::Ask => "Ask",
-                        })
-                        .show_ui(ui, |ui| {
-                            ui.selectable_value(&mut s.heat_metric, HeatMetric::Total, "Bid + Ask");
-                            ui.selectable_value(&mut s.heat_metric, HeatMetric::Bid, "Bid");
-                            ui.selectable_value(&mut s.heat_metric, HeatMetric::Ask, "Ask");
-                        });
-                    ui.checkbox(&mut s.heat_smooth, "Smooth heatmap");
-                    ui.add(egui::Slider::new(&mut s.heat_contrast, 0.5..=4.0).text("contrast"));
-                });
             });
         self.settings_open = open;
     }
@@ -851,6 +922,18 @@ in the chart's top-left corner.");
             self.chart.show_range(xmap.to_x(t0), xmap.to_x(t1));
         }
     }
+}
+
+fn trade_bubble_controls(ui: &mut egui::Ui, settings: &mut Settings) {
+    ui.checkbox(&mut settings.show_trade_bubbles, "Trade bubbles");
+    ui.add_enabled_ui(settings.show_trade_bubbles, |ui| {
+        ui.add(egui::Slider::new(&mut settings.bubble_aggregation, 0..=100).text("Smart aggregation"))
+            .on_hover_text("Higher values merge dots farther apart on screen. 0 shows the base dots.");
+        ui.add(egui::Slider::new(&mut settings.bubble_size, 0..=100).text("Dot size"));
+        ui.add(egui::Slider::new(&mut settings.bubble_transparency, 0..=100).text("Transparency"));
+        ui.checkbox(&mut settings.bubble_3d, "3D bubbles");
+        ui.checkbox(&mut settings.bubble_delta, "Delta clustering");
+    });
 }
 
 impl eframe::App for Viewer {
