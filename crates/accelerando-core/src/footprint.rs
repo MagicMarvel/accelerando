@@ -24,6 +24,9 @@ pub struct VpLevel {
 }
 
 /// A chart overlay an indicator or strategy wants drawn on the price panel.
+///
+/// Set `group` on markers, segments or price boxes to a shared display name to give them
+/// a single visibility toggle in the native chart legend.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "kind")]
 pub enum Plot {

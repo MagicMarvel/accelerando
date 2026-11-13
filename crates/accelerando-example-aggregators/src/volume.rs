@@ -24,6 +24,10 @@ impl VolumeAggregator {
 }
 
 impl FootprintAggregator for VolumeAggregator {
+    fn includes_closing_trade(&self) -> bool {
+        true
+    }
+
     fn event_interest(&self) -> EventInterest {
         EventInterest::CONTRACT.union(EventInterest::TRADE)
     }

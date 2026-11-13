@@ -2,11 +2,11 @@
 //! `cargo run --release` (plus whatever you want to change this time).
 //!
 //! ```toml
-//! data = "C:/Bookmap/Feeds/ESZ6.csv"   # the positional data path
+//! data = "C:/data/ESZ6.parquet"       # the positional data path
 //! strategy = "vp_poc_return"
 //! slippage_ticks = 1
 //! gui = true                             # boolean flags: true = pass the flag
-//! indicator = ["regime", "big_trades:min_size=20"]   # repeatable flags take arrays
+//! indicator = ["regime", "big_trades:min_trade_size=20"]   # repeatable flags take arrays
 //!
 //! [params]                               # --param name=value, for `strategy`
 //! reward_risk = 1.5
@@ -93,7 +93,7 @@ mod tests {
     fn file_maps_to_flags() {
         let args = args_from_str(
             r#"
-            data = "d.csv"
+            data = "d.parquet"
             strategy = "s"
             slippage_ticks = 2
             gui = true
@@ -108,7 +108,7 @@ mod tests {
         .unwrap();
         let joined = args.join(" ");
         for part in [
-            "d.csv",
+            "d.parquet",
             "--strategy s",
             "--slippage-ticks 2",
             "--gui",

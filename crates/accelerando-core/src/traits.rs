@@ -17,12 +17,17 @@ pub trait DataSource {
     /// Consume the source and yield its events in chronological order.
     fn events(self: Box<Self>) -> Box<dyn Iterator<Item = OrderFlowEvent>>;
 
+    /// Read events while allowing a source to report an open or decode error.
+    fn try_events(self: Box<Self>) -> Box<dyn Iterator<Item = Result<OrderFlowEvent, String>>> {
+        Box::new(self.events().map(Ok))
+    }
+
     /// Optionally receive the event classes needed downstream, so sources can skip parsing rows
     /// that no component will consume.
     fn set_event_interest(&mut self, _interest: EventInterest) {}
 
     /// Optionally accept a progress handle to report input consumption (default: ignore).
-    /// Sources that know their size (e.g. a CSV) should set the total and add bytes as they read.
+    /// Sources that know their input size should set the total and report consumption as they read.
     fn set_progress(&mut self, _progress: ProgressHandle) {}
 }
 
@@ -35,6 +40,12 @@ pub trait FootprintAggregator {
 
     /// Feed one event. Returns the just-completed footprint, if this event closed a bar.
     fn on_event(&mut self, ev: &OrderFlowEvent) -> Option<Footprint>;
+
+    /// Whether the trade that closes a bar belongs to that bar. By default it opens the next bar.
+    fn includes_closing_trade(&self) -> bool {
+        false
+    }
+
     /// Emit any partially-built footprint at end of stream.
     fn flush(&mut self) -> Option<Footprint>;
 }

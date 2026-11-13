@@ -305,17 +305,30 @@ pub fn run_backtest(pipeline: Pipeline) -> BacktestResult {
 
 /// Prepare enriched footprints from a raw source without running a strategy or broker.
 pub fn prepare_backtest_data(
+    source: Box<dyn DataSource>,
+    aggregator: Box<dyn FootprintAggregator>,
+    indicators: Vec<Box<dyn Indicator>>,
+    keep_liquidity_heatmap: bool,
+    progress: Option<ProgressHandle>,
+) -> PreparedBacktestData {
+    try_prepare_backtest_data(source, aggregator, indicators, keep_liquidity_heatmap, progress)
+        .unwrap_or_else(|e| panic!("{e}"))
+}
+
+/// Prepare footprints and return any input error to the caller.
+pub fn try_prepare_backtest_data(
     mut source: Box<dyn DataSource>,
     mut aggregator: Box<dyn FootprintAggregator>,
     mut indicators: Vec<Box<dyn Indicator>>,
     keep_liquidity_heatmap: bool,
     progress: Option<ProgressHandle>,
-) -> PreparedBacktestData {
+) -> Result<PreparedBacktestData, String> {
     let mut history: Vec<Footprint> = Vec::new();
     let mut heatmap_sampler = keep_liquidity_heatmap.then(HeatmapSampler::new);
     let mut tick_size = 0.25;
     let mut multiplier = 1.0;
     let aggregator_interest = aggregator.event_interest();
+    let includes_closing_trade = aggregator.includes_closing_trade();
     let indicator_interests: Vec<EventInterest> =
         indicators.iter().map(|ind| ind.event_interest()).collect();
     let mut source_interest = EventInterest::CONTRACT.union(aggregator_interest);
@@ -341,7 +354,16 @@ pub fn prepare_backtest_data(
         history.push(fp);
     };
 
-    for ev in source.events() {
+    for event in source.try_events() {
+        let ev = match event {
+            Ok(ev) => ev,
+            Err(error) => {
+                if let Some(h) = &progress {
+                    h.finish();
+                }
+                return Err(error);
+            }
+        };
         if let OrderFlowEvent::Contract {
             tick_size: t,
             multiplier: m,
@@ -355,6 +377,10 @@ pub fn prepare_backtest_data(
             }
         }
 
+        let feed_before_close = includes_closing_trade && matches!(ev, OrderFlowEvent::Trade { .. });
+        if feed_before_close {
+            feed_indicators(&mut indicators, &indicator_interests, &ev);
+        }
         if aggregator_interest.matches(&ev) {
             if let Some(fp) = aggregator.on_event(&ev) {
                 handle(
@@ -368,10 +394,8 @@ pub fn prepare_backtest_data(
             }
         }
 
-        for (ind, interest) in indicators.iter_mut().zip(indicator_interests.iter()) {
-            if interest.matches(&ev) {
-                ind.on_event(&ev);
-            }
+        if !feed_before_close {
+            feed_indicators(&mut indicators, &indicator_interests, &ev);
         }
         if let Some(sampler) = heatmap_sampler.as_mut() {
             sampler.on_event(&ev);
@@ -391,14 +415,14 @@ pub fn prepare_backtest_data(
         h.finish();
     }
 
-    PreparedBacktestData {
+    Ok(PreparedBacktestData {
         footprints: history,
         liquidity_heatmap: heatmap_sampler
             .map(HeatmapSampler::finish)
             .unwrap_or_default(),
         tick_size,
         multiplier,
-    }
+    })
 }
 
 /// Run a footprint-only strategy over prepared enriched footprints.
@@ -492,6 +516,7 @@ pub fn run_backtest_progress(
     let mut last_close = f64::NAN;
     let mut last_ts = 0i64;
     let aggregator_interest = aggregator.event_interest();
+    let includes_closing_trade = aggregator.includes_closing_trade();
     let indicator_interests: Vec<EventInterest> =
         indicators.iter().map(|ind| ind.event_interest()).collect();
     assert_eq!(
@@ -548,6 +573,10 @@ pub fn run_backtest_progress(
     };
 
     for ev in source.events() {
+        let feed_before_close = includes_closing_trade && matches!(ev, OrderFlowEvent::Trade { .. });
+        if feed_before_close {
+            feed_indicators(&mut indicators, &indicator_interests, &ev);
+        }
         match ev {
             OrderFlowEvent::Contract {
                 tick_size,
@@ -584,12 +613,8 @@ pub fn run_backtest_progress(
             }
         }
 
-        // Event-level consumers see the same normalized stream after any prior footprint close.
-        // That keeps boundary-crossing events associated with the new in-progress footprint.
-        for (ind, interest) in indicators.iter_mut().zip(indicator_interests.iter()) {
-            if interest.matches(&ev) {
-                ind.on_event(&ev);
-            }
+        if !feed_before_close {
+            feed_indicators(&mut indicators, &indicator_interests, &ev);
         }
         if let Some(sampler) = heatmap_sampler.as_mut() {
             sampler.on_event(&ev);
@@ -633,6 +658,18 @@ pub fn run_backtest_progress(
         counters: strategy.counters(),
         tick_size,
         multiplier,
+    }
+}
+
+fn feed_indicators(
+    indicators: &mut [Box<dyn Indicator>],
+    interests: &[EventInterest],
+    event: &OrderFlowEvent,
+) {
+    for (indicator, interest) in indicators.iter_mut().zip(interests) {
+        if interest.matches(event) {
+            indicator.on_event(event);
+        }
     }
 }
 

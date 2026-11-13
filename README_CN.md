@@ -32,7 +32,7 @@ BacktestResult <- Broker <- Strategy <- Indicator 逐层增强
 | `accelerando-core` | 事件/footprint 模型、trait、回测引擎、Broker、指标统计 |
 | `accelerando` | 门面 crate，注册内置示例适配器 |
 | `accelerando-web` | 浏览器工作台：结果查看、实验对比、手动 bar 回放 |
-| `accelerando-example-sources` | 示例数据源：`csv`（Bookmap 式行情） |
+| `accelerando-example-sources` | 示例数据源 `parquet`（ATAS Replay，支持 ZSTD）和 `numcat_l2`（NumCat 二级行情） |
 | `accelerando-example-aggregators` | 示例聚合器：`range`、`time` |
 | `accelerando-example-indicators` | 示例指标：`technical`、`regime`、`stacked_imbalance`、`adaptive_imbalance`、`big_trades`、`economic_calendar` |
 | `accelerando-example-strategy` | 示例策略：`indicator_cross` |
@@ -65,14 +65,13 @@ fn main() {
     let registry = default_registry(); // 内置示例适配器
 
     let mut source_params = Params::default();
-    source_params.set("path", ParamValue::Str("C:/data/feed.csv".into()));
-    source_params.set("buy_aggressor_code", ParamValue::Int(2));
+    source_params.set("path", ParamValue::Str("C:/data/feed.parquet".into()));
 
     let mut agg_params = Params::default();
     agg_params.set("range_ticks", ParamValue::Int(30));
 
     let pipeline = Pipeline {
-        source: registry.build_source("csv", &source_params).unwrap(),
+        source: registry.build_source("parquet", &source_params).unwrap(),
         aggregator: registry.build_aggregator("range", &agg_params).unwrap(),
         indicators: vec![registry.build_indicator("technical", &Params::default()).unwrap()],
         strategy: registry.build_strategy("indicator_cross", &Params::default()).unwrap(),
@@ -142,10 +141,26 @@ fn main() {                                            // 4
 ```
 
 ```text
-cargo run --release -- data.csv --strategy my_strategy --param stop_ticks=12 --serve
-cargo run --release -- data.csv --strategy my_strategy --grid --max-evals 200 --validate
+cargo run --release -- data.parquet --strategy my_strategy --param stop_ticks=12 --serve
+cargo run --release -- data.parquet --strategy my_strategy --grid --max-evals 200 --validate
 cargo run --release -- --list
 ```
+
+运行器默认读取 ATAS Replay 导出的 Parquet + ZSTD 行情文件。可用 `--source NAME` 选择其他已注册的数据源。
+
+**Big Trades** 已内置于默认注册表。用 `--indicator big_trades:min_trade_size=50` 加到回测，也可在策略的 `requirements()` 中声明。默认采用累计成交、1 ms 时间窗、末笔成交价和固定最小成交量 25。逐笔模式用 `mode=single`。累计模式支持 `execution_price=start|last|weighted_average`，并可用 `price_location` 按 K 线位置过滤。两种模式均支持 `max_volume`，0 表示不限。
+
+原生 GUI 默认显示 Big Trades。点击图表左上角 **Big Trades** 旁的齿轮可设置成交量上下限、标记大小、形状、内部成交量标签、买卖颜色和透明度。动态尺寸按成交量相对最低门槛的倍数线性放大，并限制在 **Min size** 和 **Max size** 之间。只有结果文件时，成交量阈值会筛选其中已保存的 Big Trades 标记。
+
+策略绘制标记、线段或价格区域时，可设置 `group: Some("POC 回踩".into())`。图表左上角会以这个名字显示一个开关，同名图形一起显隐。可用不同名称给不同信号各设一个开关。
+
+热图的 **Trade bubbles** 支持两个独立门槛。**Min trade size** 在聚合前筛选原始逐笔成交，默认 0。**Min displayed volume** 在聚合后筛选气泡，默认 1，Delta 模式下使用绝对 Delta。
+
+累计模式在每根 footprint 内按首笔起算的时间窗、主动方向和扫单价格走势分组。对照本机 ATAS X 8.0.15.656，传统市场使用小于 1 ms 的时间窗，加密市场使用小于 1 秒的时间窗，可设 `cumulative_window_ms=1000`。Accelerando 的归一化成交流以单市场为前提。可选的 `threshold_mode=adaptive` 只使用已完成的 footprint 计算阈值。ATAS 的自动阈值则依赖数据提供方返回的历史累计成交。[ATAS Big Trades 文档](https://help.atas.net/en/support/solutions/articles/72000602332)
+
+大文件可用 `--from 2026-09-02 --to 2026-09-03`（UTC，也可写 `2026-09-02T13:30` 或纳秒）只读这一段：范围外的 row group 依据 Parquet footer 统计信息直接跳过。没有组件需要盘口时只解码成交行；需要盘口时仍会扫描 `--from` 之前的盘口行来重建订单簿，并在 `--from` 时刻以 `SetLevel` 事件发出。
+
+`--gui` 无需手动切分：盘口只读一遍，写入缓存目录下的分块存储（`depth_<hash>/`，约为 Parquet 文件的 2 倍大小）。查看器内存里只保留 30 秒粒度的概览，放大到 12 小时以内时在后台加载当前区域的精确盘口；同一文件再次 `--gui` 直接用缓存打开。
 
 1. **`#[derive(Configurable)]`**：由字段属性生成 `param_spec()` 与 `from_params()`，且是实现
    `Configurable` 的唯一方式（trait 已封闭：参数名、默认值、范围只在字段上写一次）。浮点字段加
@@ -349,12 +364,10 @@ stable。本工作区 `.cargo/config.toml` 里的 `RUSTC_BOOTSTRAP = "perpetual"
 这一个 crate 生效）让它在 stable 工具链上编译；下游依赖 `accelerando-ml` 的应用需要在自己的
 `.cargo/config.toml` 里加同样一条。
 
-## 数据格式（Bookmap 式 CSV）
+## 数据格式（ATAS Replay Parquet）
 
-- `T` 行：`T,ts_ns,id,price,size,side,flag` —— 主动方在第 5 列（0 起数），取值 `1`/`2`。
-  哪个值代表买方主动因数据源而异，通过数据源参数 `buy_aggressor_code` 配置，不用改代码。
-- `c` 行的第 6 列是 `tick_size`、第 7 列是 `multiplier`；Broker 用它们做 tick 取整和
-  货币盈亏换算。
+- ATAS Replay v1 文件按事件顺序保存成交和盘口绝对量更新。
+- 文件元数据提供合约最小变动价位 `tick_size` 和乘数 `multiplier`，用于价格取整和盈亏换算。
 - 时间戳是纳秒 `i64`（超过 JS `Number.MAX_SAFE_INTEGER`）；浏览器端仅用于显示，
   容忍亚毫秒精度损失。
 

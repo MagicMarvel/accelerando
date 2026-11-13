@@ -107,6 +107,54 @@ pub fn strategy_grid_size(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use accelerando_core::{prepare_backtest_data, DataSource, OrderFlowEvent, Side};
+    use accelerando_example_indicators::big_trades::{COUNT, TOTAL_BUY};
+
+    struct TradeTape(Vec<OrderFlowEvent>);
+
+    impl DataSource for TradeTape {
+        fn events(self: Box<Self>) -> Box<dyn Iterator<Item = OrderFlowEvent>> {
+            Box::new(self.0.into_iter())
+        }
+    }
+
+    #[test]
+    fn built_in_big_trades_attributes_the_trigger_print_to_its_own_bar() {
+        let registry = default_registry();
+        let trade = |ts_ns, size| OrderFlowEvent::Trade {
+            ts_ns,
+            price: 100.0,
+            size,
+            aggressor: Side::Buy,
+        };
+        let tape = vec![
+            trade(0, 15.0),
+            trade(100_000, 15.0),
+            trade(5_000_000_000, 40.0),
+        ];
+        for (name, params) in [
+            ("time", Params::default().with("bar_secs", 5)),
+            ("volume", Params::default().with("volume", 30)),
+        ] {
+            let bars = prepare_backtest_data(
+                Box::new(TradeTape(tape.clone())),
+                registry.build_aggregator(name, &params).unwrap(),
+                vec![registry
+                    .build_indicator("big_trades", &Params::default())
+                    .unwrap()],
+                false,
+                None,
+            )
+            .footprints;
+            assert_eq!(bars.len(), 2, "{name}");
+            assert_eq!(bars[0].value(TOTAL_BUY), Some(30.0), "{name}");
+            assert_eq!(bars[1].value(TOTAL_BUY), Some(40.0), "{name}");
+            assert!(
+                bars.iter().all(|bar| bar.value(COUNT) == Some(1.0)),
+                "{name}"
+            );
+        }
+    }
 
     #[test]
     fn strategy_grid_returns_complete_framework_resolved_params() {

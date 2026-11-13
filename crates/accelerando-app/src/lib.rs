@@ -13,8 +13,8 @@
 //! and then:
 //!
 //! ```text
-//! cargo run --release -- data.csv --param stop_ticks=8 --gui
-//! cargo run --release -- data.csv --strategy my_strategy --grid --validate
+//! cargo run --release -- data.parquet --param stop_ticks=8 --gui
+//! cargo run --release -- data.parquet --strategy my_strategy --grid --validate
 //! cargo run --release -- --list
 //! ```
 //!
@@ -42,6 +42,7 @@
 pub mod config;
 mod events;
 mod gui;
+mod market;
 pub mod stats;
 pub mod validate;
 
@@ -54,7 +55,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use accelerando_core::{
-    prepare_backtest_data, run_prepared_backtest, run_prepared_event_backtest, BacktestResult,
+    run_prepared_backtest, run_prepared_event_backtest, try_prepare_backtest_data, BacktestResult,
     BrokerConfig, Configurable, DataSource, EventInterest, FootprintAggregator, Indicator,
     IndicatorRequest, ParamRange, ParamValue, Params, PreparedBacktestData, PreparedEventData,
     ProgressHandle, Registry, Strategy, StrategyRequirements,
@@ -66,7 +67,7 @@ pub use stats::TradeStats;
 pub use validate::{Candidate, ValidationReport};
 
 /// Bumped whenever the cached `PreparedBacktestData` layout or preparation semantics change.
-const CACHE_VERSION: u32 = 1;
+const CACHE_VERSION: u32 = 2;
 
 /// Bars used when neither `--agg` nor the strategy's `requirements().bars` says otherwise.
 pub const DEFAULT_AGG: &str = "time:60";
@@ -84,7 +85,10 @@ pub struct RunOptions {
     /// [`RunOptions::agg`].
     pub agg: Option<String>,
     pub source: String,
-    pub buy_aggressor_code: i64,
+    /// `--from` / `--to`: only read data in this time range (UTC; `2026-08-20`,
+    /// `"2026-08-20 13:30"` or nanoseconds). Passed to the source as `start` / `end`.
+    pub from: Option<String>,
+    pub to: Option<String>,
     /// Extra indicators: `name` or `name:key=value,key=value`.
     pub indicators: Vec<String>,
     pub commission: f64,
@@ -122,8 +126,9 @@ impl Default for RunOptions {
             grid: false,
             max_evals: 256,
             agg: None,
-            source: "csv".into(),
-            buy_aggressor_code: 1,
+            source: "parquet".into(),
+            from: None,
+            to: None,
             indicators: Vec::new(),
             commission: 2.0,
             slippage_ticks: 1.0,
@@ -150,7 +155,7 @@ impl Default for RunOptions {
 }
 
 const HELP: &str = "\
-usage: <runner> <data.csv> --strategy NAME [options]
+usage: <runner> <data.parquet> --strategy NAME [options]
 
 strategy & parameters
   --strategy NAME            strategy to run (see --list); optional when the app registers one
@@ -162,8 +167,9 @@ strategy & parameters
 data & pipeline
   --agg SPEC                 time:60 | range:30 | reverse:16 | name:k=v,k=v
                              (default: the strategy's declared bars, else time:60)
-  --source NAME              data source adapter (default csv)
-  --buy-aggressor-code N     CSV side code meaning buy aggressor (default 1 = Bookmap)
+  --source NAME              data source adapter (default parquet)
+  --from T / --to T          only read [T, T) in UTC: 2026-08-20, 2026-08-20T13:30 or ns
+                             (Parquet skips whole row groups outside the range)
   --indicator SPEC           extra indicator, name or name:k=v,k=v (repeatable)
   --no-cache / --cache-dir D prepared-footprint disk cache (default ./prepared_cache)
 
@@ -230,7 +236,8 @@ impl RunOptions {
                 "--max-evals" => o.max_evals = num(arg, value(arg)?)? as usize,
                 "--agg" => o.agg = Some(value(arg)?),
                 "--source" => o.source = value(arg)?,
-                "--buy-aggressor-code" => o.buy_aggressor_code = num(arg, value(arg)?)? as i64,
+                "--from" => o.from = Some(value(arg)?),
+                "--to" => o.to = Some(value(arg)?),
                 "--indicator" => o.indicators.push(value(arg)?),
                 "--commission" => o.commission = num(arg, value(arg)?)?,
                 "--slippage-ticks" => o.slippage_ticks = num(arg, value(arg)?)?,
@@ -527,15 +534,13 @@ impl App {
             if o.validate {
                 eprintln!("note: --validate covers footprint strategies only; skipping for event-driven `{strategy}`");
             }
-            let source = self.build_source(o, data_path)?;
             if o.gui {
-                let (events, depth) = accelerando_core::prepare_market_history(source);
-                let events = Arc::new(events?);
+                let (events, depth) = market::load(&self.registry, o, data_path)?;
                 let outcomes = self.run_event(o, &events, strategy, &reqs, &candidates)?;
                 gui_events = Some((events, depth));
                 outcomes
             } else {
-                let events = accelerando_core::prepare_event_data(source)?;
+                let events = accelerando_core::prepare_event_data(self.build_source(o, data_path)?)?;
                 self.run_event(o, &events, strategy, &reqs, &candidates)?
             }
         } else {
@@ -738,18 +743,20 @@ impl App {
                 }
             }
         }
-        let mut source = self.build_source(o, path)?;
+        let source = self.build_source(o, path)?;
+        let aggregator = self.build_aggregator(o.agg())?;
+        let built_indicators = self.build_indicators(&indicators)?;
         let progress = ProgressHandle::new();
-        source.set_progress(progress.clone());
         let reporter = spawn_progress(progress.clone());
-        let data = prepare_backtest_data(
+        let data = try_prepare_backtest_data(
             source,
-            self.build_aggregator(o.agg())?,
-            self.build_indicators(&indicators)?,
+            aggregator,
+            built_indicators,
             false,
             Some(progress),
         );
         let _ = reporter.join();
+        let data = data?;
         println!(
             "prepared {} footprints (tick {}, multiplier {})",
             data.footprints.len(),
@@ -983,16 +990,20 @@ fn print_table(outcomes: &[RunOutcome]) {
 
 pub(crate) fn build_source(registry: &Registry, o: &RunOptions, path: &str) -> Result<Box<dyn DataSource>, String> {
     std::fs::metadata(path).map_err(|e| format!("cannot read data file {path}: {e}"))?;
+    let mut params = Params::default().with("path", path);
+    for (key, value) in [("start", &o.from), ("end", &o.to)] {
+        if let Some(value) = value {
+            params = params.with(key, value.as_str());
+        }
+    }
     let spec = registry
         .source_spec(&o.source)
         .ok_or_else(|| format!("unknown source `{}`", o.source))?;
-    let mut params = Params::default().with("path", path);
-    if spec.entries.iter().any(|e| e.name == "buy_aggressor_code") {
-        params.set("buy_aggressor_code", ParamValue::Int(o.buy_aggressor_code));
-    }
+    spec.validate(&params)
+        .map_err(|e| format!("source `{}`: {e} (--from/--to need a source with start/end)", o.source))?;
     registry
         .build_source(&o.source, &params)
-        .ok_or_else(|| format!("source `{}` not registered", o.source))
+        .ok_or_else(|| format!("unknown source `{}`", o.source))
 }
 
 /// Path + size + mtime: changes whenever the data file does.
@@ -1110,7 +1121,8 @@ fn cache_key(o: &RunOptions, path: &str, indicators: &[IndicatorRequest]) -> u64
         "size": meta.map(|m| m.len()).unwrap_or(0),
         "mtime": mtime.to_string(),
         "source": o.source,
-        "buy_aggressor_code": o.buy_aggressor_code,
+        "from": o.from,
+        "to": o.to,
         "agg": o.agg(),
         "indicators": indicators,
     });
@@ -1170,12 +1182,13 @@ mod tests {
 
     #[test]
     fn cli_parses_and_rejects_unknown_flags() {
-        let args: Vec<String> = ["data.csv", "--strategy", "x", "--param", "a=1", "--grid", "--validate"]
+        let args: Vec<String> = ["data.parquet", "--strategy", "x", "--param", "a=1", "--grid", "--validate"]
             .iter()
             .map(|s| s.to_string())
             .collect();
         let o = RunOptions::parse(&args).unwrap();
-        assert_eq!(o.data.as_deref(), Some("data.csv"));
+        assert_eq!(o.data.as_deref(), Some("data.parquet"));
+        assert_eq!(o.source, "parquet");
         assert!(o.grid && o.validate);
         assert_eq!(o.params, vec!["a=1".to_string()]);
         assert!(RunOptions::parse(&["--bogus".to_string()]).is_err());
@@ -1187,14 +1200,14 @@ mod tests {
 
     #[test]
     fn cli_layers_over_config() {
-        let base = RunOptions::parse(&args("file.csv --strategy s --param a=1 --param b=2 --gui --slippage-ticks 2")).unwrap();
+        let base = RunOptions::parse(&args("file.parquet --strategy s --param a=1 --param b=2 --gui --slippage-ticks 2")).unwrap();
         let o = RunOptions::parse_onto(base.clone(), &args("--param b=3 --slippage-ticks 0")).unwrap();
-        assert_eq!(o.data.as_deref(), Some("file.csv"));
+        assert_eq!(o.data.as_deref(), Some("file.parquet"));
         assert_eq!(o.params, vec!["a=1".to_string(), "b=3".to_string()]);
         assert_eq!(o.slippage_ticks, 0.0);
         assert!(o.gui);
-        let o = RunOptions::parse_onto(base.clone(), &args("other.csv --strategy t --no-gui")).unwrap();
-        assert_eq!(o.data.as_deref(), Some("other.csv"));
+        let o = RunOptions::parse_onto(base.clone(), &args("other.parquet --strategy t --no-gui")).unwrap();
+        assert_eq!(o.data.as_deref(), Some("other.parquet"));
         assert!(o.params.is_empty() && !o.gui);
         assert!(RunOptions::parse(&args("--opt x=1")).is_err());
         assert_eq!(RunOptions::default().agg(), DEFAULT_AGG);

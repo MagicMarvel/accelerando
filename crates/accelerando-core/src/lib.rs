@@ -12,6 +12,7 @@ extern crate self as accelerando_core;
 
 pub mod broker;
 pub mod depth_history;
+pub mod depth_store;
 pub mod engine;
 pub mod event;
 pub mod event_engine;
@@ -36,8 +37,10 @@ pub use broker::{
     PositionInfo, StrategyOutput, TradeSide, VisualOutput,
 };
 pub use depth_history::{prepare_market_history, DepthHistory};
+pub use depth_store::{DepthStore, DepthWindow};
 pub use engine::{
-    prepare_backtest_data, run_backtest, run_backtest_progress, run_prepared_backtest, Pipeline,
+    prepare_backtest_data, run_backtest, run_backtest_progress, run_prepared_backtest,
+    try_prepare_backtest_data, Pipeline,
     PreparedBacktestData,
 };
 pub use event::{EventInterest, OrderFlowEvent, Side};

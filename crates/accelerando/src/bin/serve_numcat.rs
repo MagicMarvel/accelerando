@@ -75,7 +75,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Configure BigTrades indicator
     let mut ind_params = Params::default();
-    ind_params.set("min_size", accelerando_core::ParamValue::Float(50.0));
+    ind_params.set("min_trade_size", accelerando_core::ParamValue::Float(50.0));
     let indicator = Box::new(BigTrades::from_params(&ind_params));
 
     // Configure IndicatorCross strategy

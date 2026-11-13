@@ -2,10 +2,10 @@
 
 use std::sync::Arc;
 
-use accelerando_core::{DepthHistory, OrderFlowEvent, PreparedEventData, Side};
+use accelerando_core::{DepthHistory, DepthStore, OrderFlowEvent, PreparedEventData, Side};
 
 use crate::data::{
-    BookGrid, HeatMetric, QuoteColumn, RasterSpec, Segment, TimeAxis, TradeBubble, TradeQuote,
+    BookGrid, HeatMetric, QuoteColumn, RasterSpec, Segment, TimeAxis, TradeBubble, TradeQuote, TradeVolume,
     SEC_NS,
 };
 
@@ -17,6 +17,25 @@ pub(crate) struct TradeTape {
 }
 
 impl TradeTape {
+    pub fn events(&self) -> &[OrderFlowEvent] {
+        self.data.events()
+    }
+
+    pub fn filtered_volume(&self, axis: &TimeAxis, cells: usize, min_size: f64) -> Vec<TradeVolume> {
+        let mut volume = vec![TradeVolume::default(); cells];
+        for event in self.events() {
+            if let OrderFlowEvent::Trade { ts_ns, price, size, aggressor } = *event {
+                if size >= min_size {
+                    let second = ts_ns.div_euclid(SEC_NS) * SEC_NS;
+                    if let Some(cell) = volume.get_mut(axis.to_x(second) as usize) {
+                        cell.add(price, size, aggressor);
+                    }
+                }
+            }
+        }
+        volume
+    }
+
     pub fn new(data: Arc<PreparedEventData>, quotes: &[TradeQuote]) -> Self {
         let first = data
             .events()
@@ -149,14 +168,14 @@ fn at_ts(segment: &Segment, ts: i64) -> f64 {
     segment.x0 + (ts - segment.t0_ns) as f64 / SEC_NS as f64
 }
 
-pub(crate) fn book_quote(depth: &DepthHistory, ts: i64) -> [f64; 2] {
+pub(crate) fn book_quote(depth: &DepthStore, ts: i64) -> [f64; 2] {
     let changes = depth.quote_changes();
     let end = changes.partition_point(|change| change.0 <= ts);
     end.checked_sub(1).map_or([f64::NAN; 2], |i| changes[i].1)
 }
 
 /// Cache only the quote overview. The heatmap and close zoom still query the raw history.
-pub(crate) fn fill_overview_quotes(grid: &mut BookGrid, axis: &TimeAxis, depth: &DepthHistory) {
+pub(crate) fn fill_overview_quotes(grid: &mut BookGrid, axis: &TimeAxis, depth: &DepthStore) {
     let changes = depth.quote_changes();
     let mut next = 0;
     for seg in &axis.segments {
@@ -185,9 +204,9 @@ pub(crate) struct Viewport {
 pub(crate) fn fine_columns(
     axis: &TimeAxis,
     tape: Option<&TradeTape>,
-    depth: &DepthHistory,
+    depth: &DepthStore,
     view: &Viewport,
-    show_bubbles: bool,
+    bubble_min_trade_size: Option<f64>,
 ) -> Vec<Vec<QuoteColumn>> {
     let width_ns = (((view.end - view.start) / view.pixels) * SEC_NS as f64)
         .ceil()
@@ -223,7 +242,7 @@ pub(crate) fn fine_columns(
                 let until = from.saturating_add(width_ns).min(end);
                 let mut prices = [f64::NAN; 2];
                 let (mut buy, mut sell, mut notional, mut time) = (0.0, 0.0, 0.0, 0.0);
-                if let Some(tape) = tape.filter(|_| show_bubbles || depth.is_empty()) {
+                if let Some(tape) = tape.filter(|_| bubble_min_trade_size.is_some() || depth.is_empty()) {
                     while trade_index < tape.len() {
                         let (ts, price, size, side) = tape.get(trade_index);
                         if ts >= until {
@@ -231,15 +250,17 @@ pub(crate) fn fine_columns(
                         }
                         trade_index += 1;
                         match side {
-                            Side::Buy => {
-                                prices[1] = prices[1].max(price);
-                                buy += size;
-                            }
-                            Side::Sell => {
-                                prices[0] = prices[0].min(price);
-                                sell += size;
-                            }
+                            Side::Buy => prices[1] = prices[1].max(price),
+                            Side::Sell => prices[0] = prices[0].min(price),
                             Side::Unknown => continue,
+                        }
+                        if !bubble_min_trade_size.is_some_and(|min_size| size >= min_size) {
+                            continue;
+                        }
+                        match side {
+                            Side::Buy => buy += size,
+                            Side::Sell => sell += size,
+                            Side::Unknown => unreachable!("unknown trades are skipped"),
                         }
                         notional += price * size;
                         time += (ts - from) as f64 * size;
@@ -258,7 +279,7 @@ pub(crate) fn fine_columns(
                 columns.push(QuoteColumn {
                     x: (at_ts(seg, from) + at_ts(seg, until)) * 0.5,
                     prices: last,
-                    bubble: (show_bubbles && total > 0.0).then(|| TradeBubble {
+                    bubble: (total > 0.0).then(|| TradeBubble {
                         x: at_ts(seg, from) + time / total / SEC_NS as f64,
                         price: notional / total,
                         buy,
@@ -404,7 +425,7 @@ mod tests {
             pixels: 20.0,
             replay_ns: Some(110_000_000),
         };
-        let columns = fine_columns(&axis, Some(&tape), &DepthHistory::default(), &view, true);
+        let columns = fine_columns(&axis, Some(&tape), &DepthStore::default(), &view, Some(0.0));
         let bubbles: Vec<_> = columns
             .iter()
             .flatten()
@@ -415,5 +436,15 @@ mod tests {
         assert!((bubbles[1].x - 0.108).abs() < 1e-12);
         assert_eq!(bubbles[1].sell, 3.0);
         assert_eq!(columns[0].last().unwrap().prices, [100.0, 100.25]);
+
+        let filtered = fine_columns(&axis, Some(&tape), &DepthStore::default(), &view, Some(3.0));
+        let bubbles: Vec<_> = filtered.iter().flatten().filter_map(|col| col.bubble).collect();
+        assert_eq!(bubbles.len(), 1);
+        assert_eq!(bubbles[0].sell, 3.0);
+        assert_eq!(filtered[0].last().unwrap().prices, [100.0, 100.25]);
+
+        let overview = tape.filtered_volume(&axis, 1, 3.0);
+        assert_eq!(overview[0].buy, 4.0);
+        assert_eq!(overview[0].sell, 3.0);
     }
 }

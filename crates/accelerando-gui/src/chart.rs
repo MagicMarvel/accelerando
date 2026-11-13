@@ -7,6 +7,7 @@ use eframe::egui::{
 };
 
 use crate::data::{self, AxisMode, HeatMetric, QuoteColumn, RasterSpec, TradeBubble};
+use crate::big_trades::{BigTradeSettings, MarkerShape};
 use crate::liquidity_colors::{self, ColorScale};
 use crate::market_history::{self, Viewport};
 use crate::vp::VpTool;
@@ -65,6 +66,8 @@ struct HeatKey {
     low_pct: f32,
     high_pct: f32,
     replay_ns: Option<i64>,
+    /// Exact depth window drawn, if any (`None` = overview or in-memory history).
+    depth_window: Option<(i64, i64)>,
 }
 
 struct HeatCache {
@@ -228,7 +231,7 @@ pub(crate) fn price_panel(
     selected_trade: Option<usize>,
     vp: &mut VpTool,
     pick_bar: bool,
-) -> Option<usize> {
+) -> egui::InnerResponse<Option<usize>> {
     let outer = ui.available_rect_before_wrap();
     let area = ui.allocate_rect(outer, Sense::hover());
     let plot = Rect::from_min_max(
@@ -236,7 +239,7 @@ pub(crate) fn price_panel(
         pos2(outer.right() - AXIS_W, outer.bottom() - AXIS_H),
     );
     if plot.width() < 60.0 || plot.height() < 60.0 {
-        return None;
+        return egui::InnerResponse::new(None, area);
     }
 
     let response = ui.interact(plot, area.id.with("plot"), Sense::click_and_drag());
@@ -266,7 +269,8 @@ pub(crate) fn price_panel(
                 start: state.x0, end: state.x1, pixels, replay_ns: model.replay_clock(),
             };
             let mut columns = market_history::fine_columns(
-                &model.axis, model.tape.as_ref(), &model.depth, &view, bubbles,
+                &model.axis, model.tape.as_ref(), &model.depth, &view,
+                bubbles.then_some(settings.bubble_min_trade_size),
             );
             if !model.has_trade_quotes && model.depth.is_empty() {
                 // Old result files have snapshots but no original L2 updates.
@@ -279,7 +283,11 @@ pub(crate) fn price_panel(
         } else {
             let (bid, ask) = model.display_quotes();
             let end = model.completed_seconds().min(bid.len());
-            let volume = if bubbles { &model.trade_volume[..] } else { &[] };
+            let volume = if bubbles {
+                model.filtered_bubble_volume.as_deref().unwrap_or(&model.trade_volume)
+            } else {
+                &[]
+            };
             data::quote_columns(
                 &model.bounds,
                 [&bid[..end], &ask[..end]],
@@ -304,7 +312,8 @@ pub(crate) fn price_panel(
     let painter = ui.painter_at(plot);
     painter.rect_filled(plot, 0.0, BACKGROUND);
 
-    if settings.show_heat && model.has_heatmap() && book_visible {
+    let heat_visible = settings.show_heat && book_visible;
+    if heat_visible && model.has_heatmap() {
         let heat_painter = model.replay_cut_x().map_or_else(|| painter.clone(), |x| {
             painter.with_clip_rect(Rect::from_min_max(
                 plot.min, pos2(m.sx(x).clamp(plot.left(), plot.right()), plot.bottom()),
@@ -321,15 +330,10 @@ pub(crate) fn price_panel(
             .with_clip_rect(Rect::from_min_max(plot.min, pos2(px.clamp(plot.left(), plot.right()), plot.bottom()))),
         None => full_painter.clone(),
     };
-    if settings.show_overlays {
-        draw_boxes(&painter, model, &m);
-        vp.draw_strategy(&painter, model, &m);
-    }
-    if settings.show_bars {
-        draw_bars(&painter, model, settings, &m);
-    }
-    if settings.show_overlays {
-        draw_overlays(&painter, model, &m, settings.show_markers);
+    draw_boxes(&painter, model, settings, &m);
+    vp.draw_strategy(&painter, model, &m);
+    if !heat_visible {
+        draw_price_overlays(&painter, model, settings, &m, false);
     }
     let hover = response.hover_pos().filter(|p| plot.contains(*p));
     let mut hovered_bubble = None;
@@ -351,6 +355,12 @@ pub(crate) fn price_panel(
             FontId::monospace(12.0),
             BID_LINE,
         );
+    }
+    if heat_visible {
+        draw_price_overlays(&painter, model, settings, &m, true);
+    }
+    if settings.big_trades.visible {
+        draw_big_trades(&painter, model, &m, &settings.big_trades);
     }
     if settings.show_trades {
         draw_trades(&painter, model, settings, &m, selected_trade);
@@ -393,10 +403,20 @@ pub(crate) fn price_panel(
         draw_crosshair(&axis_painter, &painter, model, &m, pos, event_time.then_some(columns.as_slice()));
     }
     indicator_legend(ui, plot, model, settings, vp);
-    if let (Some(pos), Some(dot)) = (hover, hovered_bubble) {
-        draw_bubble_tooltip(&painter, model, pos, dot, settings.bubble_delta);
+    if let Some(pos) = hover.filter(|_| !pick_bar && !drawing_vp && !response.dragged()) {
+        let liquidity = heat_visible
+            .then(|| resting_liquidity_tooltip(model, &m, pos, settings.heat_metric))
+            .flatten();
+        let trade = hovered_bubble.map(|dot| bubble_tooltip(model, dot, settings.bubble_delta));
+        let info = match (liquidity, trade) {
+            (Some(liquidity), Some(trade)) => Some(format!("{liquidity}\n\n{trade}")),
+            (liquidity, trade) => liquidity.or(trade),
+        };
+        if let Some(info) = info {
+            draw_chart_tooltip(&painter, pos, info);
+        }
     }
-    picked
+    egui::InnerResponse::new(picked, response)
 }
 
 /// Replay position line and picker.
@@ -420,10 +440,28 @@ fn indicator_legend(
     ui.scope_builder(builder, |ui| {
         ui.spacing_mut().item_spacing.y = 2.0;
 
-        legend_row(ui, "Overlays (zones, lines)", &mut settings.show_overlays, true, false);
-
-        let markers_on = settings.show_overlays;
-        legend_row(ui, "Strategy markers (dots)", &mut settings.show_markers, markers_on, false);
+        let overlays = &model.overlays;
+        if !overlays.lines.is_empty()
+            || overlays.boxes.iter().any(|plot| plot.group.is_none())
+            || overlays.segments.iter().any(|plot| plot.group.is_none())
+        {
+            legend_row(ui, "Overlays (zones, lines)", &mut settings.show_overlays, true, false);
+        }
+        if overlays.markers.iter().any(|plot| plot.group.is_none()) {
+            legend_row(ui, "Strategy markers (dots)", &mut settings.show_markers, true, false);
+        }
+        for group in &overlays.groups {
+            let mut visible = !settings.hidden_overlay_groups.contains(group);
+            let was_visible = visible;
+            legend_row(ui, group, &mut visible, true, false);
+            if visible != was_visible {
+                if visible {
+                    settings.hidden_overlay_groups.remove(group);
+                } else {
+                    settings.hidden_overlay_groups.insert(group.clone());
+                }
+            }
+        }
 
         let (n_strategy, n_drawn) = (model.overlays.profiles.len(), vp.items.len());
         let label = if n_drawn > 0 {
@@ -458,6 +496,18 @@ fn indicator_legend(
                         vp.items.clear();
                     }
                 });
+        }
+        if let Some(gear) = legend_row(
+            ui, "Big Trades", &mut settings.big_trades.visible, model.big_trades.available(), true,
+        ) {
+            let mut open = settings.big_trades.settings_open ^ gear.clicked();
+            egui::Window::new("Big Trades")
+                .default_pos(gear.rect.left_bottom())
+                .collapsible(false)
+                .resizable(false)
+                .open(&mut open)
+                .show(ui.ctx(), |ui| settings.big_trades.controls(ui, &model.big_trades));
+            settings.big_trades.settings_open = open;
         }
     });
 }
@@ -568,29 +618,35 @@ fn handle_axis_input(
     tick: f64,
     replay_x: Option<f64>,
 ) {
-    if let Some((pos, factor)) = axis_zoom(price_axis) {
+    if let Some((pos, factor)) = axis_zoom(price_axis, egui::Direction::TopDown) {
         let fraction = f64::from(((pos.y - plot.top()) / plot.height()).clamp(0.0, 1.0));
         state.zoom_price(fraction, factor, tick);
     }
-    if let Some((pos, factor)) = axis_zoom(time_axis) {
+    if let Some((pos, factor)) = axis_zoom(time_axis, egui::Direction::LeftToRight) {
         let fraction = f64::from(((pos.x - plot.left()) / plot.width()).clamp(0.0, 1.0));
         state.zoom_time(fraction, factor, replay_x);
     }
 }
 
-fn axis_zoom(response: &egui::Response) -> Option<(Pos2, f64)> {
+fn axis_zoom(response: &egui::Response, direction: egui::Direction) -> Option<(Pos2, f64)> {
+    let vertical = direction == egui::Direction::TopDown;
     let dragging = response.dragged_by(egui::PointerButton::Primary);
     if dragging || response.hovered() {
-        response.ctx.set_cursor_icon(egui::CursorIcon::ResizeHorizontal);
+        response.ctx.set_cursor_icon(if vertical {
+            egui::CursorIcon::ResizeVertical
+        } else {
+            egui::CursorIcon::ResizeHorizontal
+        });
     }
     if dragging {
-        let delta = response.drag_delta().x;
+        let movement = response.drag_delta();
+        let delta = if vertical { movement.y } else { movement.x };
         let anchor = response.ctx.input(|i| i.pointer.press_origin());
         return anchor.filter(|_| delta != 0.0).map(|pos| (pos, (f64::from(delta) / 250.0).exp()));
     }
     let pos = response.hover_pos()?;
     let (scroll, zoom) = scroll_zoom(response);
-    let delta = if scroll.x.abs() > scroll.y.abs() { scroll.x } else { scroll.y };
+    let delta = if !vertical && scroll.x.abs() > scroll.y.abs() { scroll.x } else { scroll.y };
     (delta != 0.0 || zoom != 1.0)
         .then(|| (pos, (-f64::from(delta) * 0.0025).exp() / zoom))
 }
@@ -652,6 +708,12 @@ fn draw_heatmap(
         spec.row_p * pixels_per_price,
         settings.price_filter_px,
     );
+    let depth = (!model.depth.is_empty()).then(|| {
+        let (xa, xb) = spec.x_range();
+        let total = model.axis.total();
+        let at = |x: f64| model.axis.to_ts(x.clamp(0.0, total));
+        model.depth_at(at(xa), at(xb) + 1)
+    });
     let key = HeatKey {
         spec,
         metric: settings.heat_metric,
@@ -661,12 +723,14 @@ fn draw_heatmap(
         low_pct: settings.heat_low_pct,
         high_pct: settings.heat_high_pct,
         replay_ns: model.replay_clock(),
+        depth_window: depth.and_then(|(_, window)| window),
     };
     if state.heat.as_ref().is_none_or(|h| h.key != key) {
-        let mut cells = if model.depth.is_empty() {
-            data::rasterize(&spec, &model.grid, &model.result.liquidity_heatmap.snapshots, settings.heat_metric)
-        } else {
-            market_history::rasterize_depth(&spec, &model.axis, &model.depth, settings.heat_metric, key.replay_ns)
+        let mut cells = match depth {
+            None => data::rasterize(&spec, &model.grid, &model.result.liquidity_heatmap.snapshots, settings.heat_metric),
+            Some((depth, _)) => {
+                market_history::rasterize_depth(&spec, &model.axis, depth, settings.heat_metric, key.replay_ns)
+            }
         };
         let groups = settings.heat_smooth.then(|| {
             liquidity_colors::column_groups(&spec, &model.axis, model.replay_cut_x())
@@ -815,7 +879,14 @@ fn with_alpha(color: Color32, alpha: u8) -> Color32 {
     Color32::from_rgba_unmultiplied(color.r(), color.g(), color.b(), alpha)
 }
 
-fn draw_bars(painter: &Painter, model: &Model, settings: &Settings, m: &Mapper) {
+fn draw_price_overlays(painter: &Painter, model: &Model, settings: &Settings, m: &Mapper, over_heat: bool) {
+    if settings.show_bars {
+        draw_bars(painter, model, settings, m, over_heat);
+    }
+    draw_overlays(painter, model, m, settings);
+}
+
+fn draw_bars(painter: &Painter, model: &Model, settings: &Settings, m: &Mapper, over_heat: bool) {
     let (up, down) = if settings.red_up { (RED, GREEN) } else { (GREEN, RED) };
     let fps = model.bars();
     let i0 = model.fp_x.partition_point(|f| f.1 < m.x0);
@@ -823,7 +894,6 @@ fn draw_bars(painter: &Painter, model: &Model, settings: &Settings, m: &Mapper) 
     if i1 <= i0 {
         return;
     }
-    let over_heat = settings.show_heat && model.has_heatmap() && model.book_visible();
 
     if (i1 - i0) as f32 > m.rect.width() / 3.0 {
         // More bars than pixels: one high-low line per pixel column.
@@ -871,13 +941,13 @@ fn draw_bars(painter: &Painter, model: &Model, settings: &Settings, m: &Mapper) 
         // A single visible bar: its own width.
         m.sx(model.fp_x[i0].1) - m.sx(model.fp_x[i0].0)
     });
-    if settings.show_footprint
-        && slot >= FOOTPRINT_MIN_SLOT
+    if slot >= FOOTPRINT_MIN_SLOT
         && draw_footprints(painter, model, settings, m, i0, i1, &center_px, slot)
     {
         return;
     }
     let half = (slot * 0.36).clamp(1.5, 30.0);
+    let fill_alpha = if over_heat { 255 } else { 200 };
     let tick = model.result.tick_size.abs().max(1e-9);
     for i in i0..i1 {
         let fp = &fps[i];
@@ -887,13 +957,6 @@ fn draw_bars(painter: &Painter, model: &Model, settings: &Settings, m: &Mapper) 
         if settings.show_bar_value_area {
             draw_bar_value_area(painter, m, fp, xa, xb, tick);
         }
-        // Over the heatmap a bar body is translucent, and just an outline once it is wide
-        // enough that a fill would tint the book levels behind it.
-        let fill_alpha = match (over_heat, xb - xa > 40.0) {
-            (false, _) => 200,
-            (true, false) => 70,
-            (true, true) => 0,
-        };
         painter.vline(center, m.sy(fp.high)..=m.sy(fp.low), Stroke::new(1.0, color));
         let top = m.sy(fp.open.max(fp.close));
         let bottom = m.sy(fp.open.min(fp.close)).max(top + 1.0);
@@ -1061,9 +1124,15 @@ fn draw_footprints(
     true
 }
 
-fn draw_boxes(painter: &Painter, model: &Model, m: &Mapper) {
+fn overlay_visible(settings: &Settings, group: Option<&str>, ungrouped: bool) -> bool {
+    group.map_or(ungrouped, |name| !settings.hidden_overlay_groups.contains(name))
+}
+
+fn draw_boxes(painter: &Painter, model: &Model, settings: &Settings, m: &Mapper) {
     for b in &model.overlays.boxes {
-        if b.x1 < m.x0 || b.x0 > m.x1 {
+        if b.x1 < m.x0 || b.x0 > m.x1
+            || !overlay_visible(settings, b.group.as_deref(), settings.show_overlays)
+        {
             continue;
         }
         let rect = Rect::from_min_max(m.pos(b.x0, b.high), m.pos(b.x1, b.low));
@@ -1086,10 +1155,71 @@ fn draw_boxes(painter: &Painter, model: &Model, m: &Mapper) {
     }
 }
 
-fn draw_overlays(painter: &Painter, model: &Model, m: &Mapper, show_markers: bool) {
+fn draw_big_trades(painter: &Painter, model: &Model, m: &Mapper, settings: &BigTradeSettings) {
+    let opacity = settings.opacity();
+    if opacity == 0 {
+        return;
+    }
+    let from = model.xmap.to_ts(m.x0);
+    let until = model.xmap.to_ts(m.x1);
+    let markers = model.big_trades.visible(from, until, model.replay_clock(), settings);
+    for marker in markers {
+        let pos = m.pos(model.xmap.to_x(marker.ts_ns), marker.price);
+        if !painter.clip_rect().contains(pos) {
+            continue;
+        }
+        let radius = settings.radius(marker.volume);
+        let color = with_alpha(settings.color(marker), opacity);
+        let value = settings.show_value.then(|| tooltip_size(marker.volume));
+        draw_big_trade_marker(painter, pos, radius, settings.shape, color, value);
+    }
+}
+
+fn draw_big_trade_marker(
+    painter: &Painter,
+    pos: Pos2,
+    radius: f32,
+    shape: MarkerShape,
+    color: Color32,
+    value: Option<String>,
+) {
+    let (label_pos, label_size) = match shape {
+        MarkerShape::Circle => {
+            painter.circle_filled(pos, radius, color);
+            (pos, egui::Vec2::splat(radius * 1.4))
+        }
+        MarkerShape::Square => {
+            painter.rect_filled(Rect::from_center_size(pos, egui::Vec2::splat(radius * 2.0)), 0.0, color);
+            (pos, egui::Vec2::splat(radius * 1.8))
+        }
+        MarkerShape::Triangle => {
+            painter.add(Shape::convex_polygon(
+                vec![pos + egui::vec2(0.0, -radius), pos + egui::vec2(-radius, radius), pos + egui::vec2(radius, radius)],
+                color,
+                Stroke::NONE,
+            ));
+            (pos + egui::vec2(0.0, radius * 0.48), egui::vec2(radius * 1.08, radius * 0.8))
+        }
+    };
+    if let Some(value) = value {
+        let font = FontId::proportional(11.0);
+        let label = painter.layout_no_wrap(value.clone(), font.clone(), Color32::WHITE);
+        let scale = (label_size.x / label.size().x).min(label_size.y / label.size().y).min(1.0);
+        let clip = Rect::from_center_size(label_pos, label_size);
+        painter.with_clip_rect(clip).text(
+            label_pos,
+            Align2::CENTER_CENTER,
+            value,
+            FontId::new(font.size * scale, font.family),
+            Color32::WHITE,
+        );
+    }
+}
+
+fn draw_overlays(painter: &Painter, model: &Model, m: &Mapper, settings: &Settings) {
     let overlays = &model.overlays;
     let max_points = (m.rect.width() * 4.0) as usize;
-    for line in &overlays.lines {
+    for line in overlays.lines.iter().filter(|_| settings.show_overlays) {
         let i0 = line.points.partition_point(|p| p.0 < m.x0).saturating_sub(1);
         let i1 = (line.points.partition_point(|p| p.0 <= m.x1) + 1).min(line.points.len());
         if i1 <= i0 + 1 {
@@ -1113,7 +1243,9 @@ fn draw_overlays(painter: &Painter, model: &Model, m: &Mapper, show_markers: boo
         }
     }
     for seg in &overlays.segments {
-        if seg.from.0.max(seg.to.0) < m.x0 || seg.from.0.min(seg.to.0) > m.x1 {
+        if seg.from.0.max(seg.to.0) < m.x0 || seg.from.0.min(seg.to.0) > m.x1
+            || !overlay_visible(settings, seg.group.as_deref(), settings.show_overlays)
+        {
             continue;
         }
         let (a, b) = (m.pos(seg.from.0, seg.from.1), m.pos(seg.to.0, seg.to.1));
@@ -1127,12 +1259,12 @@ fn draw_overlays(painter: &Painter, model: &Model, m: &Mapper, show_markers: boo
             painter.text(b, Align2::LEFT_BOTTOM, &seg.text, FontId::proportional(11.0), seg.color);
         }
     }
-    if !show_markers {
-        return;
-    }
     let i0 = overlays.markers.partition_point(|mk| mk.x < m.x0);
     let i1 = overlays.markers.partition_point(|mk| mk.x <= m.x1);
-    let visible = i1.saturating_sub(i0);
+    let markers = overlays.markers[i0..i1.max(i0)].iter().filter(|marker| {
+        overlay_visible(settings, marker.group.as_deref(), settings.show_markers)
+    });
+    let visible = markers.clone().count();
     let step = (visible / 4000).max(1);
     // Shrink markers as they crowd, so a zoomed-out view is not buried under them.
     let radius = match visible {
@@ -1140,7 +1272,7 @@ fn draw_overlays(painter: &Painter, model: &Model, m: &Mapper, show_markers: boo
         201..=1000 => 3.0,
         _ => 1.5,
     };
-    for marker in overlays.markers[i0..i1.max(i0)].iter().step_by(step) {
+    for marker in markers.step_by(step) {
         let pos = m.pos(marker.x, marker.price);
         draw_marker(painter, pos, &marker.shape, marker.color, radius);
         if visible <= 150 && !marker.text.is_empty() {
@@ -1270,7 +1402,7 @@ fn draw_trade_bubbles(
             // In Delta mode Bookmap cancels matched buy/sell size before sending the dot
             // to the renderer, while the cluster center still uses total executed volume.
             let volume = bubble.clustering_volume(options.delta);
-            if volume < 1.0 {
+            if volume <= 0.0 || volume < settings.bubble_min_displayed_volume {
                 continue;
             }
             let radius = data::bubble_radius(volume, largest, options.target, options.spherical);
@@ -1309,17 +1441,43 @@ fn draw_trade_bubbles(
     })
 }
 
-fn draw_bubble_tooltip(painter: &Painter, model: &Model, pointer: Pos2, dot: PlottedBubble, delta: bool) {
+fn bubble_tooltip(model: &Model, dot: PlottedBubble, delta: bool) -> String {
     let trade = dot.trade;
-    let size = |v: f64| format!("{v:.8}").trim_end_matches('0').trim_end_matches('.').to_owned();
     let mut info = format!(
         "Trade volume  {}\nBuy {}   Sell {}\nPrice {:.digits$}",
-        size(trade.total()), size(trade.buy), size(trade.sell), trade.price,
+        tooltip_size(trade.total()), tooltip_size(trade.buy), tooltip_size(trade.sell), trade.price,
         digits = model.price_decimals,
     );
     if delta {
-        info.push_str(&format!("   Δ {}", size(trade.buy - trade.sell)));
+        info.push_str(&format!("   Δ {}", tooltip_size(trade.buy - trade.sell)));
     }
+    info
+}
+
+fn resting_liquidity_tooltip(model: &Model, m: &Mapper, pointer: Pos2, metric: HeatMetric) -> Option<String> {
+    let (price, [bid, ask]) = model.resting_liquidity_at(m.x_at(pointer.x), m.p_at(pointer.y))?;
+    let visible_size = match metric {
+        HeatMetric::Total => bid + ask,
+        HeatMetric::Bid => bid,
+        HeatMetric::Ask => ask,
+    };
+    if visible_size <= 0.0 {
+        return None;
+    }
+    Some(format!(
+        "Resting liquidity @ {:.digits$}\nBid {}   Ask {}",
+        price,
+        tooltip_size(bid),
+        tooltip_size(ask),
+        digits = model.price_decimals,
+    ))
+}
+
+fn tooltip_size(value: f64) -> String {
+    format!("{value:.8}").trim_end_matches('0').trim_end_matches('.').to_owned()
+}
+
+fn draw_chart_tooltip(painter: &Painter, pointer: Pos2, info: String) {
     let font = FontId::monospace(12.0);
     let bounds = painter.clip_rect().shrink(4.0);
     let galley = painter.layout(info, font, Color32::WHITE, (bounds.width() - 16.0).max(1.0));
@@ -1688,8 +1846,13 @@ mod tests {
             modifiers: egui::Modifiers::NONE,
         };
         frame(vec![move_to(650.0, 100.0)]);
+        assert_eq!(
+            frame(vec![wheel(egui::vec2(120.0, 0.0), egui::TouchPhase::Move)]),
+            (50.0, 150.0, 90.0, 110.0, true, true),
+        );
+        frame(vec![wheel(egui::Vec2::ZERO, egui::TouchPhase::End)]);
         let (x0, x1, _, high, auto_y, follow) = frame(vec![
-            wheel(egui::vec2(120.0, 0.0), egui::TouchPhase::Move),
+            wheel(egui::vec2(0.0, 120.0), egui::TouchPhase::Move),
         ]);
         assert_eq!((x0, x1), (50.0, 150.0));
         assert!(!auto_y);
@@ -1698,11 +1861,12 @@ mod tests {
         frame(vec![wheel(egui::Vec2::ZERO, egui::TouchPhase::End)]);
 
         frame(vec![button(650.0, 100.0, true)]);
-        let (left, right, low, new_high, _, follow) = frame(vec![move_to(630.0, 100.0)]);
+        assert_eq!(frame(vec![move_to(630.0, 100.0)]).3, high);
+        let (left, right, low, new_high, _, follow) = frame(vec![move_to(630.0, 80.0)]);
         assert_eq!((left, right), (x0, x1));
         assert!(follow);
         assert!(new_high < high);
-        frame(vec![button(630.0, 100.0, false)]);
+        frame(vec![button(630.0, 80.0, false)]);
 
         frame(vec![move_to(300.0, 411.0)]);
         frame(vec![button(300.0, 411.0, true)]);
@@ -1753,6 +1917,83 @@ mod tests {
     }
 
     #[test]
+    fn big_trade_shapes_keep_the_optional_volume_label_inside() {
+        let pos = pos2(80.0, 80.0);
+        for shape in [MarkerShape::Circle, MarkerShape::Square, MarkerShape::Triangle] {
+            let ctx = egui::Context::default();
+            let input = egui::RawInput {
+                screen_rect: Some(Rect::from_min_size(Pos2::ZERO, egui::vec2(160.0, 160.0))),
+                ..Default::default()
+            };
+            let mut output = ctx.run_ui(input, |ui| {
+                draw_big_trade_marker(ui.painter(), pos, 20.0, shape, Color32::RED, Some("250".into()));
+            });
+            output.textures_delta.clear();
+            assert!(output.shapes.iter().any(|paint| match (&paint.shape, shape) {
+                (Shape::Circle(circle), MarkerShape::Circle) => circle.center == pos,
+                (Shape::Rect(rect), MarkerShape::Square) => rect.rect.center() == pos,
+                (Shape::Path(path), MarkerShape::Triangle) => path.points.len() == 3,
+                _ => false,
+            }));
+            assert!(output.shapes.iter().any(|paint| {
+                matches!(&paint.shape, Shape::Text(text) if text.galley.job.text == "250")
+                    && Rect::from_center_size(pos, egui::Vec2::splat(40.0)).contains_rect(paint.clip_rect)
+            }));
+        }
+    }
+
+    #[test]
+    fn viewer_enables_big_trades_and_redraws_at_the_current_threshold() {
+        let mut bar = accelerando_core::Footprint::seed(0, 100.0);
+        for (price, volume, color) in [(99.5, "505", "#ff6d6d"), (100.5, "510", "#6d6dff")] {
+            bar.plots.push(accelerando_core::Plot::Marker {
+                price,
+                shape: "circle".into(),
+                color: color.into(),
+                text: volume.into(),
+                text_dx: None,
+                text_dy: None,
+                group: Some("big_trades".into()),
+            });
+        }
+        let result = accelerando_core::BacktestResult {
+            metrics: Default::default(),
+            trades: Vec::new(),
+            equity: Vec::new(),
+            footprints: vec![bar],
+            liquidity_heatmap: Default::default(),
+            series: Vec::new(),
+            counters: Default::default(),
+            tick_size: 0.25,
+            multiplier: 50.0,
+        };
+        let mut viewer = crate::Viewer::new(result, Default::default(), &[], None, Default::default());
+        assert!(viewer.settings.big_trades.visible);
+        assert!(!viewer.settings.show_markers);
+        let mapper = Mapper {
+            rect: Rect::from_min_size(Pos2::ZERO, egui::vec2(400.0, 300.0)),
+            x0: -1.0,
+            x1: 1.0,
+            p0: 99.0,
+            p1: 101.0,
+        };
+        let drawn = |viewer: &crate::Viewer, mapper: &Mapper| {
+            let ctx = egui::Context::default();
+            let input = egui::RawInput { screen_rect: Some(mapper.rect), ..Default::default() };
+            let mut output = ctx.run_ui(input, |ui| {
+                draw_big_trades(ui.painter(), &viewer.model, mapper, &viewer.settings.big_trades);
+            });
+            output.textures_delta.clear();
+            output.shapes.iter().filter(|shape| matches!(shape.shape, Shape::Circle(_))).count()
+        };
+        assert_eq!(drawn(&viewer, &mapper), 2);
+        let zoomed = Mapper { x0: -0.5, x1: 0.5, ..mapper };
+        assert_eq!(drawn(&viewer, &zoomed), 2);
+        viewer.settings.big_trades.min_volume = 506.0;
+        assert_eq!(drawn(&viewer, &zoomed), 1);
+    }
+
+    #[test]
     fn bar_value_area_and_poc_are_independent() {
         let fp = accelerando_core::testkit::bar(0)
             .level(99.75, 1.0, 0.0)
@@ -1782,7 +2023,7 @@ mod tests {
             let ctx = egui::Context::default();
             let input = egui::RawInput { screen_rect: Some(m.rect), ..Default::default() };
             let mut output = ctx.run_ui(input, |ui| {
-                draw_bars(ui.painter(), &viewer.model, &viewer.settings, m);
+                draw_bars(ui.painter(), &viewer.model, &viewer.settings, m, false);
             });
             output.textures_delta.clear();
             let mut poc = false;
@@ -1811,6 +2052,47 @@ mod tests {
     }
 
     #[test]
+    fn liquidity_hover_reads_the_snapshot_at_the_cursor_tick_and_time() {
+        use accelerando_core::{BacktestResult, LiquidityHeatmap, LiquidityLevel, LiquiditySnapshot};
+
+        let levels = vec![LiquidityLevel { price: 100.25, bid_size: 0.0, ask_size: 48.0 }];
+        let result = BacktestResult {
+            metrics: Default::default(),
+            trades: Vec::new(),
+            equity: Vec::new(),
+            footprints: Vec::new(),
+            liquidity_heatmap: LiquidityHeatmap {
+                interval_ns: 0,
+                snapshots: vec![
+                    LiquiditySnapshot { ts_ns: 500_000_000, levels },
+                    LiquiditySnapshot { ts_ns: 1_500_000_000, levels: Vec::new() },
+                ],
+            },
+            series: Vec::new(),
+            counters: Default::default(),
+            tick_size: 0.25,
+            multiplier: 50.0,
+        };
+        let model = Model::new(result, &Default::default(), &[], None, Default::default());
+        let m = Mapper {
+            rect: Rect::from_min_max(pos2(0.0, 0.0), pos2(200.0, 200.0)),
+            x0: 0.0,
+            x1: 2.0,
+            p0: 99.0,
+            p1: 101.0,
+        };
+        let hover = |x, price, metric| resting_liquidity_tooltip(&model, &m, m.pos(x, price), metric);
+        assert_eq!(
+            hover(0.75, 100.21, HeatMetric::Total).as_deref(),
+            Some("Resting liquidity @ 100.25\nBid 0   Ask 48")
+        );
+        assert!(hover(0.75, 100.0, HeatMetric::Total).is_none());
+        assert!(hover(0.75, 100.21, HeatMetric::Bid).is_none());
+        assert!(hover(0.25, 100.21, HeatMetric::Total).is_none());
+        assert!(hover(1.75, 100.21, HeatMetric::Total).is_none());
+    }
+
+    #[test]
     fn hover_uses_the_rendered_bubble_radius() {
         let dot = PlottedBubble {
             trade: TradeBubble { x: 1.0, price: 7600.25, buy: 200.0, sell: 20.0 },
@@ -1819,6 +2101,53 @@ mod tests {
         };
         assert!(dot.hit_distance(pos2(52.0, 40.0), 5.0).is_some());
         assert!(dot.hit_distance(pos2(54.0, 54.0), 5.0).is_none());
+    }
+
+    #[test]
+    fn displayed_bubble_threshold_uses_clustered_total_or_absolute_delta() {
+        let result = accelerando_core::BacktestResult {
+            metrics: Default::default(),
+            trades: Vec::new(),
+            equity: Vec::new(),
+            footprints: Vec::new(),
+            liquidity_heatmap: Default::default(),
+            series: Vec::new(),
+            counters: Default::default(),
+            tick_size: 0.25,
+            multiplier: 50.0,
+        };
+        let mut viewer = crate::Viewer::new(result, Default::default(), &[], None, Default::default());
+        viewer.settings.bubble_min_displayed_volume = 100.0;
+        let m = Mapper {
+            rect: Rect::from_min_size(Pos2::ZERO, egui::vec2(400.0, 300.0)),
+            x0: 0.0, x1: 2.0, p0: 99.0, p1: 101.0,
+        };
+        let columns = [vec![
+            QuoteColumn {
+                x: 1.0, prices: [f64::NAN; 2],
+                bubble: Some(TradeBubble { x: 1.0, price: 100.0, buy: 30.0, sell: 0.0 }),
+            },
+            QuoteColumn {
+                x: 1.001, prices: [f64::NAN; 2],
+                bubble: Some(TradeBubble { x: 1.001, price: 100.0, buy: 0.0, sell: 70.0 }),
+            },
+        ]];
+        let hovered = |settings: &Settings| {
+            let ctx = egui::Context::default();
+            let input = egui::RawInput { screen_rect: Some(m.rect), ..Default::default() };
+            let mut dot = None;
+            let mut output = ctx.run_ui(input, |ui| {
+                dot = draw_trade_bubbles(ui.painter(), &m, &columns, settings, Some(m.pos(1.0, 100.0)));
+            });
+            output.textures_delta.clear();
+            dot
+        };
+        viewer.settings.bubble_delta = false;
+        assert_eq!(hovered(&viewer.settings).unwrap().trade.total(), 100.0);
+        viewer.settings.bubble_delta = true;
+        assert!(hovered(&viewer.settings).is_none());
+        viewer.settings.bubble_min_displayed_volume = 40.0;
+        assert_eq!(hovered(&viewer.settings).unwrap().trade.clustering_volume(true), 40.0);
     }
 
     #[test]

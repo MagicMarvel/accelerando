@@ -19,13 +19,14 @@ mod chart;
 pub mod data;
 mod liquidity_colors;
 mod market_history;
+mod big_trades;
 mod overlay;
 pub mod replay;
 mod vp;
 
-use std::sync::mpsc;
+use std::sync::{mpsc, Arc};
 
-use accelerando_core::{BacktestResult, Footprint};
+use accelerando_core::{BacktestResult, DepthHistory, DepthStore, DepthWindow, Footprint};
 use eframe::egui;
 
 use chart::ChartState;
@@ -102,19 +103,36 @@ pub fn view_with_trade_quotes(
     options: ViewerOptions,
     events: &[accelerando_core::OrderFlowEvent],
 ) -> std::io::Result<()> {
-    let tape = accelerando_core::PreparedEventData::from_events(events.to_vec()).ok().map(std::sync::Arc::new);
+    use accelerando_core::OrderFlowEvent;
+
+    let mut tape: Vec<_> = events
+        .iter()
+        .copied()
+        .filter(|event| matches!(event, OrderFlowEvent::Contract { .. } | OrderFlowEvent::Trade { .. }))
+        .collect();
+    if matches!(tape.first(), Some(OrderFlowEvent::Trade { .. })) {
+        tape.insert(0, OrderFlowEvent::Contract {
+            tick_size: result.tick_size,
+            multiplier: result.multiplier,
+        });
+    }
+    let tape = accelerando_core::PreparedEventData::from_events(tape).ok().map(Arc::new);
     open_viewer(result, options, data::trade_quotes(events), tape, Default::default())
 }
 
 /// Open the native viewer with original trade timestamps and sparse L2 history.
+///
+/// `depth` is a [`DepthHistory`] (all in memory) or a chunked [`DepthStore`]: then zoomed-out
+/// views draw the store's overview, and the exact depth of the visible stretch is loaded in
+/// the background whenever the view spans at most [`EXACT_DEPTH_SPAN_NS`].
 pub fn view_with_market_history(
     result: BacktestResult,
     options: ViewerOptions,
     trades: Option<std::sync::Arc<accelerando_core::PreparedEventData>>,
-    depth: accelerando_core::DepthHistory,
+    depth: impl Into<DepthStore>,
 ) -> std::io::Result<()> {
     let quotes = trades.as_ref().map_or_else(Vec::new, |tape| data::trade_quotes(tape.events()));
-    open_viewer(result, options, quotes, trades, depth)
+    open_viewer(result, options, quotes, trades, depth.into())
 }
 
 fn open_viewer(
@@ -122,7 +140,7 @@ fn open_viewer(
     options: ViewerOptions,
     quotes: Vec<data::TradeQuote>,
     trades: Option<std::sync::Arc<accelerando_core::PreparedEventData>>,
-    depth: accelerando_core::DepthHistory,
+    depth: DepthStore,
 ) -> std::io::Result<()> {
     let tape = trades.map(|trades| market_history::TradeTape::new(trades, &quotes));
     let native = eframe::NativeOptions {
@@ -166,6 +184,9 @@ fn install_cjk_font(ctx: &egui::Context) {
     ctx.set_fonts(fonts);
 }
 
+/// Views spanning at most this long load exact depth from a chunked [`DepthStore`].
+pub const EXACT_DEPTH_SPAN_NS: i64 = 12 * 3600 * SEC_NS;
+
 /// Bar-axis pauses longer than this become an empty spacer (overnight, weekend, lunch break).
 const BAR_GAP_SECS: i64 = 1800;
 /// Width of that spacer in bar slots.
@@ -201,10 +222,14 @@ pub(crate) struct Model {
     /// `(entry x, exit x)` per trade.
     pub trade_x: Vec<(f64, f64)>,
     pub overlays: Overlays,
+    pub big_trades: big_trades::BigTradeOverlay,
     pub has_trade_quotes: bool,
     pub trade_volume: Vec<data::TradeVolume>,
+    pub filtered_bubble_volume: Option<Vec<data::TradeVolume>>,
     pub tape: Option<market_history::TradeTape>,
-    pub depth: accelerando_core::DepthHistory,
+    pub depth: DepthStore,
+    /// Exact depth of the stretch last viewed closely (chunked stores only).
+    pub depth_window: Option<Arc<DepthWindow>>,
     /// Time zone of every time shown.
     pub tz: TimeZone,
     pub price_decimals: usize,
@@ -220,7 +245,7 @@ impl Model {
         options: &ViewerOptions,
         quotes: &[data::TradeQuote],
         tape: Option<market_history::TradeTape>,
-        depth: accelerando_core::DepthHistory,
+        depth: DepthStore,
     ) -> Self {
         let snapshots = &result.liquidity_heatmap.snapshots;
         let mut intervals: Vec<(i64, i64)> = Vec::with_capacity(
@@ -241,6 +266,7 @@ impl Model {
         }
         let has_trade_quotes = depth.is_empty() && snapshots.is_empty() && !quotes.is_empty();
         let trade_volume = grid.apply_trade_samples(&axis, &bounds, quotes, has_trade_quotes);
+        let big_trades = big_trades::BigTradeOverlay::build(tape.as_ref(), &result.footprints);
         let tick = result.tick_size;
         let price_decimals = if tick > 0.0 && tick < 1.0 {
             (1..=6)
@@ -272,14 +298,17 @@ impl Model {
             equity_x: Vec::new(),
             trade_x: Vec::new(),
             overlays: Overlays::default(),
+            big_trades,
             result,
             axis,
             bounds,
             grid,
             has_trade_quotes,
             trade_volume,
+            filtered_bubble_volume: None,
             tape,
             depth,
+            depth_window: None,
             tz: TimeZone::from_hours(options.utc_offset_hours),
             price_decimals,
             median_bar_secs: 60.0,
@@ -454,6 +483,17 @@ impl Model {
         (&self.bid_smooth[..len], &self.ask_smooth[..len])
     }
 
+    /// Exact depth for `[from, until)` when loaded (or the store is in memory), else the
+    /// overview; the second value identifies the window for heatmap caching.
+    pub fn depth_at(&self, from: i64, until: i64) -> (&DepthHistory, Option<(i64, i64)>) {
+        match &self.depth_window {
+            Some(window) if window.covers(from, until) => {
+                (&window.history, Some((window.from, window.until)))
+            }
+            _ => (self.depth.overview(), None),
+        }
+    }
+
     pub fn has_heatmap(&self) -> bool {
         !self.depth.is_empty() || !self.result.liquidity_heatmap.snapshots.is_empty()
     }
@@ -461,6 +501,35 @@ impl Model {
     /// The heatmap and bid/ask lines live on the per-second grid: time axis only.
     pub fn book_visible(&self) -> bool {
         (self.has_heatmap() || self.has_trade_quotes) && self.xmap.mode() == AxisMode::Time
+    }
+
+    /// Resting size at the hovered tick, within the visible part of the book.
+    fn resting_liquidity_at(&self, x: f64, price: f64) -> Option<(f64, [f64; 2])> {
+        if !self.book_visible() || !(0.0..self.axis.total()).contains(&x) {
+            return None;
+        }
+        let ts = self.axis.to_ts(x);
+        if self.replay_clock().is_some_and(|clock| ts > clock) {
+            return None;
+        }
+        if !self.depth.is_empty() {
+            return self.depth_at(ts, ts + 1).0.resting_size_at(price, ts);
+        }
+
+        let snapshots = &self.result.liquidity_heatmap.snapshots;
+        let i = snapshots.partition_point(|snapshot| snapshot.ts_ns <= ts).checked_sub(1)?;
+        let snapshot = &snapshots[i];
+        let segment = self.axis.segments.partition_point(|segment| segment.x0 <= x);
+        if snapshot.ts_ns < self.axis.segments[segment - 1].t0_ns {
+            return None;
+        }
+        let tick = self.result.tick_size;
+        if !tick.is_finite() || tick <= 0.0 {
+            return None;
+        }
+        let price = (price / tick).round() * tick;
+        let level = snapshot.levels.iter().find(|level| (level.price - price).abs() < tick * 0.5)?;
+        Some((level.price, [level.bid_size, level.ask_size]))
     }
 
     /// A time span expressed in x units of the current axis.
@@ -472,12 +541,14 @@ impl Model {
     }
 }
 
-/// User-facing display toggles.
+/// Chart display settings.
 pub(crate) struct Settings {
-    pub axis_mode: AxisMode,
+    pub big_trades: big_trades::BigTradeSettings,
     pub show_heat: bool,
     pub show_bbo: bool,
     pub show_trade_bubbles: bool,
+    pub bubble_min_trade_size: f64,
+    pub bubble_min_displayed_volume: f64,
     pub bubble_aggregation: u32,
     pub bubble_size: u32,
     pub bubble_3d: bool,
@@ -487,10 +558,9 @@ pub(crate) struct Settings {
     pub show_bars: bool,
     pub show_bar_poc: bool,
     pub show_bar_value_area: bool,
-    /// Draw bars as footprints once they are wide enough.
-    pub show_footprint: bool,
     pub show_trades: bool,
     pub show_overlays: bool,
+    pub hidden_overlay_groups: std::collections::BTreeSet<String>,
     /// Point markers strategies attach to bars (e.g. labelled entry dots).
     pub show_markers: bool,
     pub show_equity: bool,
@@ -505,14 +575,21 @@ pub(crate) struct Settings {
     pub red_up: bool,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ToolbarPopup {
+    Settings,
+    Heatmap,
+}
+
 struct Viewer {
     model: Model,
     settings: Settings,
     chart: ChartState,
     applied_smoothing: u32,
+    applied_bubble_min_trade_size: f64,
     metrics_rows: Vec<(String, String)>,
     selected_trade: Option<usize>,
-    settings_open: bool,
+    toolbar_popup: Option<ToolbarPopup>,
     metrics_open: bool,
     trades_open: bool,
     /// Bars the strategy ran on, and the host's bar builder.
@@ -529,6 +606,8 @@ struct Viewer {
     /// Tick-by-tick replay and the host's tick reader.
     replay: Replay,
     ticks: Option<TickSource>,
+    /// Background load of exact depth: the requested range and its result.
+    depth_loading: Option<((i64, i64), mpsc::Receiver<Result<DepthWindow, String>>)>,
 }
 
 impl Viewer {
@@ -537,17 +616,19 @@ impl Viewer {
         options: ViewerOptions,
         quotes: &[data::TradeQuote],
         tape: Option<market_history::TradeTape>,
-        depth: accelerando_core::DepthHistory,
+        depth: DepthStore,
     ) -> Self {
         let metrics_rows = metrics_rows(&result);
         let mut model = Model::new(result, &options, quotes, tape, depth);
         let smoothing_secs = if model.has_trade_quotes { 3 } else { options.smoothing_secs };
         model.set_smoothing(smoothing_secs as usize);
         let settings = Settings {
-            axis_mode: model.xmap.mode(),
+            big_trades: Default::default(),
             show_heat: model.has_heatmap(),
             show_bbo: model.has_heatmap(),
             show_trade_bubbles: !model.trade_volume.is_empty(),
+            bubble_min_trade_size: 0.0,
+            bubble_min_displayed_volume: 1.0,
             bubble_aggregation: 52,
             bubble_size: 40,
             bubble_3d: true,
@@ -557,11 +638,11 @@ impl Viewer {
             show_bars: true,
             show_bar_poc: false,
             show_bar_value_area: false,
-            show_footprint: true,
             show_trades: true,
             show_overlays: true,
+            hidden_overlay_groups: Default::default(),
             show_markers: false,
-            show_equity: !model.result.equity.is_empty(),
+            show_equity: false,
             heat_metric: HeatMetric::Total,
             heat_smooth: true,
             price_filter: PriceFilter::Auto,
@@ -591,9 +672,10 @@ impl Viewer {
             settings,
             chart,
             applied_smoothing: smoothing_secs,
+            applied_bubble_min_trade_size: 0.0,
             metrics_rows,
             selected_trade: None,
-            settings_open: false,
+            toolbar_popup: None,
             metrics_open: false,
             trades_open: false,
             strategy_spec: options.bar_spec,
@@ -606,12 +688,16 @@ impl Viewer {
             vp: VpTool::default(),
             replay: Replay::default(),
             ticks: options.ticks.clone(),
+            depth_loading: None,
         }
     }
 
     fn toolbar(&mut self, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
-            ui.toggle_value(&mut self.settings_open, "⚙ Settings");
+            let settings = ui.selectable_label(
+                self.toolbar_popup == Some(ToolbarPopup::Settings),
+                "⚙ Settings",
+            );
             ui.separator();
             let label = self.current_bar_label();
             if ui
@@ -622,7 +708,11 @@ impl Viewer {
             {
                 self.bar_dialog_open = !self.bar_dialog_open;
             }
-            ui.menu_button("Heatmap", |ui| self.heatmap_controls(ui));
+            let heatmap = ui.selectable_label(
+                self.toolbar_popup == Some(ToolbarPopup::Heatmap),
+                "Heatmap",
+            );
+            self.show_toolbar_popup(&settings, &heatmap);
             if let Some((spec, _)) = &self.pending {
                 ui.spinner();
                 ui.label(format!("building {} bars ...", spec.label()));
@@ -633,7 +723,7 @@ impl Viewer {
             ui.separator();
             ui.toggle_value(&mut self.vp.drawing, "📊 Draw VP").on_hover_text(
                 "Drag across bars to draw a volume profile. Right-click a profile to delete it, \
-                 Esc to stop drawing. Profile settings are in ⚙ Settings.",
+                 Esc to stop drawing. Use the gear next to Volume profile for its settings.",
             );
             ui.label("σ");
             ui.add(
@@ -797,34 +887,59 @@ impl Viewer {
         self.chart.show_range(xmap.to_x(t0), xmap.to_x(t1));
     }
 
+    fn show_toolbar_popup(&mut self, settings: &egui::Response, heatmap: &egui::Response) {
+        let clicked = if settings.clicked() {
+            Some(ToolbarPopup::Settings)
+        } else if heatmap.clicked() {
+            Some(ToolbarPopup::Heatmap)
+        } else {
+            None
+        };
+        if let Some(popup) = clicked {
+            self.toolbar_popup = (self.toolbar_popup != Some(popup)).then_some(popup);
+        }
+        let Some(popup) = self.toolbar_popup else {
+            return;
+        };
+        let anchor = match popup {
+            ToolbarPopup::Settings => settings,
+            ToolbarPopup::Heatmap => heatmap,
+        };
+        // The chart handles click dismissal so interacting with a ComboBox popup
+        // (which has its own layer) leaves the toolbar popup open.
+        let mut open = true;
+        egui::Popup::from_response(anchor)
+            .open_bool(&mut open)
+            .close_behavior(egui::PopupCloseBehavior::IgnoreClicks)
+            .show(|ui| match popup {
+                ToolbarPopup::Settings => self.settings_controls(ui),
+                ToolbarPopup::Heatmap => self.heatmap_controls(ui),
+            });
+        if !open {
+            self.toolbar_popup = None;
+        }
+    }
+
     fn heatmap_controls(&mut self, ui: &mut egui::Ui) {
         let has_heat = self.model.has_heatmap();
         let has_quotes = self.model.has_trade_quotes;
+        let book_visible = self.model.book_visible();
         let has_bubbles = !self.model.trade_volume.is_empty();
+        let has_tape = self.model.tape.is_some();
         let s = &mut self.settings;
-        let mut time_axis = s.axis_mode == AxisMode::Time;
-        if ui
-            .checkbox(&mut time_axis, "Time-proportional x axis")
-            .on_hover_text(
-                "Off: every bar has the same width. On: x is proportional to time, \
-                 which the heatmap and bid/ask lines need.",
-            )
-            .changed()
-        {
-            s.axis_mode = if time_axis { AxisMode::Time } else { AxisMode::Bars };
-        }
-        let time_axis = s.axis_mode == AxisMode::Time;
         if !has_heat && !has_quotes {
             ui.weak("No order-book or trade-derived quote data in this result.");
-        } else if !time_axis {
-            ui.weak("Turn on the time-proportional x axis to show the heatmap.");
+            return;
+        }
+        if !book_visible {
+            ui.weak("Heatmap requires a time-proportional x axis.");
         }
         if has_quotes {
-            ui.add_enabled_ui(time_axis, |ui| {
+            ui.add_enabled_ui(book_visible, |ui| {
                 ui.checkbox(&mut s.show_heat, "Heatmap (estimated Bid / Ask)")
                     .on_hover_text("Highest buy and lowest sell per visible time column. A missing side keeps its previous price.");
                 ui.add_enabled_ui(s.show_heat, |ui| {
-                    trade_bubble_controls(ui, s);
+                    trade_bubble_controls(ui, s, has_tape);
                     ui.add(
                         egui::Slider::new(&mut s.smoothing_secs, 0..=15)
                             .suffix(" s")
@@ -835,11 +950,11 @@ impl Viewer {
             });
             return;
         }
-        ui.add_enabled_ui(has_heat && time_axis, |ui| {
+        ui.add_enabled_ui(book_visible, |ui| {
             ui.checkbox(&mut s.show_heat, "Liquidity heatmap");
             ui.checkbox(&mut s.show_bbo, "Bid / Ask lines");
             if has_bubbles {
-                ui.add_enabled_ui(s.show_bbo, |ui| trade_bubble_controls(ui, s));
+                ui.add_enabled_ui(s.show_bbo, |ui| trade_bubble_controls(ui, s, has_tape));
             }
             ui.add(
                 egui::Slider::new(&mut s.smoothing_secs, 0..=300)
@@ -883,41 +998,25 @@ impl Viewer {
         });
     }
 
-    fn settings_window(&mut self, ctx: &egui::Context) {
-        let mut open = self.settings_open;
+    fn settings_controls(&mut self, ui: &mut egui::Ui) {
         let has_equity = !self.model.result.equity.is_empty();
         let trade_count = self.model.result.trades.len();
-        egui::Window::new("Settings")
-            .open(&mut open)
-            .collapsible(false)
-            .resizable(false)
-            .default_pos(egui::pos2(10.0, 44.0))
-            .show(ctx, |ui| {
-                let s = &mut self.settings;
-                ui.strong("Panels");
-                ui.add_enabled_ui(has_equity, |ui| {
-                    ui.checkbox(&mut s.show_equity, "Equity curve");
-                });
-                ui.checkbox(&mut self.metrics_open, "Metrics");
-                ui.checkbox(&mut self.trades_open, format!("Trade list ({trade_count})"));
+        let s = &mut self.settings;
+        ui.strong("Panels");
+        ui.add_enabled_ui(has_equity, |ui| {
+            ui.checkbox(&mut s.show_equity, "Equity curve");
+        });
+        ui.checkbox(&mut self.metrics_open, "Metrics");
+        ui.checkbox(&mut self.trades_open, format!("Trade list ({trade_count})"));
 
-                ui.separator();
-                ui.strong("Chart");
-                ui.checkbox(&mut s.show_bars, "Bars");
-                ui.add_enabled_ui(s.show_bars, |ui| {
-                    ui.checkbox(&mut s.show_footprint, "Footprint when zoomed in");
-                });
-                ui.checkbox(&mut s.show_bar_poc, "Show POC")
-                    .on_hover_text("Outline the highest-volume row in each footprint.");
-                ui.checkbox(&mut s.show_bar_value_area, "Show Value Area")
-                    .on_hover_text("Shade the price range containing at least 70% of each bar's traded volume.");
-                ui.checkbox(&mut s.show_trades, "Trades");
-                ui.checkbox(&mut s.red_up, "Red up");
-
-                ui.weak("Indicators (overlays, markers, volume profile) are listed
-in the chart's top-left corner.");
-            });
-        self.settings_open = open;
+        ui.separator();
+        ui.strong("Chart");
+        ui.checkbox(&mut s.show_bars, "Bars");
+        ui.checkbox(&mut s.show_bar_poc, "Show POC")
+            .on_hover_text("Outline the highest-volume row in each footprint.");
+        ui.checkbox(&mut s.show_bar_value_area, "Show Value Area")
+            .on_hover_text("Shade the price range containing at least 70% of each bar's traded volume.");
+        ui.checkbox(&mut s.show_trades, "Trades");
     }
 
     fn metrics_window(&mut self, ctx: &egui::Context) {
@@ -982,27 +1081,89 @@ in the chart's top-left corner.");
     }
 
     /// Apply settings that require rebuilding derived data.
+    /// Keep exact depth loaded for the visible stretch of a chunked store. Zoomed out beyond
+    /// [`EXACT_DEPTH_SPAN_NS`] the overview is drawn and the window is released.
+    fn sync_depth(&mut self, ctx: &egui::Context) {
+        let model = &mut self.model;
+        if model.depth.is_exact() {
+            return;
+        }
+        if let Some((_, rx)) = &self.depth_loading {
+            match rx.try_recv() {
+                Ok(Ok(window)) => {
+                    model.depth_window = Some(Arc::new(window));
+                    self.depth_loading = None;
+                }
+                Ok(Err(error)) => {
+                    eprintln!("depth: {error}");
+                    self.depth_loading = None;
+                }
+                Err(mpsc::TryRecvError::Empty) => {}
+                Err(mpsc::TryRecvError::Disconnected) => self.depth_loading = None,
+            }
+        }
+        if model.xmap.mode() != AxisMode::Time || model.axis.total() <= 0.0 {
+            return;
+        }
+        let total = model.axis.total();
+        let from = model.axis.to_ts(self.chart.x0.clamp(0.0, total));
+        let until = model.axis.to_ts(self.chart.x1.clamp(0.0, total)) + 1;
+        let span = until - from;
+        if span > EXACT_DEPTH_SPAN_NS {
+            if span > 2 * EXACT_DEPTH_SPAN_NS {
+                model.depth_window = None;
+            }
+            return;
+        }
+        let covered = |range: (i64, i64)| range.0 <= from && until <= range.1;
+        if model.depth_window.as_ref().is_some_and(|w| w.covers(from, until))
+            || self.depth_loading.as_ref().is_some_and(|(range, _)| covered(*range))
+        {
+            return;
+        }
+        // Load some margin so panning does not reload at once.
+        let range = (from - span / 2, until + span / 2);
+        let (tx, rx) = mpsc::channel();
+        let (store, ctx) = (model.depth.clone(), ctx.clone());
+        std::thread::spawn(move || {
+            let _ = tx.send(store.load_window(range.0, range.1));
+            ctx.request_repaint();
+        });
+        self.depth_loading = Some((range, rx));
+    }
+
     fn sync(&mut self) {
         if self.settings.smoothing_secs != self.applied_smoothing {
             self.applied_smoothing = self.settings.smoothing_secs;
             self.model.set_smoothing(self.applied_smoothing as usize);
         }
-        if self.settings.axis_mode != self.model.xmap.mode() {
-            // Keep the same stretch of time in view across the switch.
-            let xmap = &self.model.xmap;
-            let (t0, t1) = (xmap.to_ts(self.chart.x0), xmap.to_ts(self.chart.x1));
-            self.model.set_axis_mode(self.settings.axis_mode);
-            self.chart.auto_y = true;
-            let xmap = &self.model.xmap;
-            self.chart.set_total(xmap.total(), xmap.mode());
-            self.chart.show_range(xmap.to_x(t0), xmap.to_x(t1));
+        let min_size = self.settings.bubble_min_trade_size;
+        if self.applied_bubble_min_trade_size != min_size {
+            self.applied_bubble_min_trade_size = min_size;
+            self.model.filtered_bubble_volume = self.model.tape.as_ref()
+                .filter(|_| min_size > 0.0)
+                .map(|tape| tape.filtered_volume(&self.model.axis, self.model.trade_volume.len(), min_size));
         }
     }
 }
 
-fn trade_bubble_controls(ui: &mut egui::Ui, settings: &mut Settings) {
+fn trade_bubble_controls(ui: &mut egui::Ui, settings: &mut Settings, has_tape: bool) {
     ui.checkbox(&mut settings.show_trade_bubbles, "Trade bubbles");
     ui.add_enabled_ui(settings.show_trade_bubbles, |ui| {
+        ui.add_enabled(
+            has_tape,
+            egui::DragValue::new(&mut settings.bubble_min_trade_size)
+                .range(0.0..=f64::MAX)
+                .prefix("Min trade size "),
+        )
+        .on_hover_text("Minimum size of each trade included in a bubble. 0 includes all trades.")
+        .on_disabled_hover_text("Single-trade filtering requires raw trades.");
+        ui.add(
+            egui::DragValue::new(&mut settings.bubble_min_displayed_volume)
+                .range(0.0..=f64::MAX)
+                .prefix("Min displayed volume "),
+        )
+        .on_hover_text("Minimum total volume or absolute Delta of the final bubble.");
         ui.add(egui::Slider::new(&mut settings.bubble_aggregation, 0..=100).text("Smart aggregation"))
             .on_hover_text("Higher values merge dots farther apart on screen. 0 shows the base dots.");
         ui.add(egui::Slider::new(&mut settings.bubble_size, 0..=100).text("Dot size"));
@@ -1023,7 +1184,6 @@ impl eframe::App for Viewer {
             self.request_bars(spec, &ctx);
         }
         self.poll_bars();
-        self.settings_window(&ctx);
         self.bar_dialog(&ctx);
         self.metrics_window(&ctx);
         self.trades_window(&ctx);
@@ -1036,13 +1196,14 @@ impl eframe::App for Viewer {
             self.replay.update(&mut self.model, &source, &ctx);
         }
         self.chart.sync_replay(self.model.replay_cut_x());
+        self.sync_depth(&ctx);
         if self.settings.show_equity && !self.model.result.equity.is_empty() {
             egui::Panel::bottom("equity")
                 .resizable(true)
                 .default_size(150.0)
                 .show(ui, |ui| chart::equity_panel(ui, &self.model, &self.chart));
         }
-        let picked = egui::CentralPanel::default()
+        let chart = egui::CentralPanel::default()
             .show(ui, |ui| {
                 chart::price_panel(
                     ui,
@@ -1055,7 +1216,10 @@ impl eframe::App for Viewer {
                 )
             })
             .inner;
-        if let Some(index) = picked {
+        if chart.response.clicked() && self.toolbar_popup.take().is_some() {
+            ctx.request_repaint();
+        }
+        if let Some(index) = chart.inner {
             self.replay.start(&mut self.model, index);
             self.chart.follow_replay = true;
             ctx.request_repaint();

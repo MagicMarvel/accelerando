@@ -67,18 +67,17 @@ impl PreparedEventData {
     }
 }
 
-pub fn prepare_event_data(mut source: Box<dyn DataSource>) -> Result<PreparedEventData, String> {
-    source.set_event_interest(EventInterest::CONTRACT.union(EventInterest::TRADE));
-    PreparedEventData::from_events(
-        source
-            .events()
-            .filter(|e| {
-                EventInterest::CONTRACT
-                    .union(EventInterest::TRADE)
-                    .matches(e)
-            })
-            .collect(),
-    )
+pub fn prepare_event_data(source: Box<dyn DataSource>) -> Result<PreparedEventData, String> {
+    PreparedEventData::from_events(trade_events(source).collect::<Result<_, _>>()?)
+}
+
+fn trade_events(mut source: Box<dyn DataSource>) -> impl Iterator<Item = Result<OrderFlowEvent, String>> {
+    let interest = EventInterest::CONTRACT.union(EventInterest::TRADE);
+    source.set_event_interest(interest);
+    source.try_events().filter(move |event| match event {
+        Ok(event) => interest.matches(event),
+        Err(_) => true,
+    })
 }
 
 fn diagnostics(
@@ -143,7 +142,7 @@ pub fn run_prepared_event_backtest(
     sink: Option<&mut dyn Write>,
 ) -> Result<BacktestResult, String> {
     run_event_iterator(
-        data.events().iter().copied(),
+        data.events().iter().copied().map(Ok),
         aggregator,
         indicators,
         strategy,
@@ -156,7 +155,7 @@ pub fn run_prepared_event_backtest(
 /// Low-memory equivalent of the prepared event API. For single runs, consume the source
 /// incrementally instead of retaining its trade tape. Signal and fill logic are identical.
 pub fn run_event_backtest(
-    mut source: Box<dyn DataSource>,
+    source: Box<dyn DataSource>,
     aggregator: Box<dyn FootprintAggregator>,
     indicators: Vec<Box<dyn Indicator>>,
     strategy: Box<dyn Strategy>,
@@ -164,17 +163,11 @@ pub fn run_event_backtest(
     keep: bool,
     sink: Option<&mut dyn Write>,
 ) -> Result<BacktestResult, String> {
-    source.set_event_interest(EventInterest::CONTRACT.union(EventInterest::TRADE));
-    let events = source.events().filter(|e| {
-        EventInterest::CONTRACT
-            .union(EventInterest::TRADE)
-            .matches(e)
-    });
-    run_event_iterator(events, aggregator, indicators, strategy, cfg, keep, sink)
+    run_event_iterator(trade_events(source), aggregator, indicators, strategy, cfg, keep, sink)
 }
 
 fn run_event_iterator(
-    events: impl IntoIterator<Item = OrderFlowEvent>,
+    events: impl IntoIterator<Item = Result<OrderFlowEvent, String>>,
     mut aggregator: Box<dyn FootprintAggregator>,
     mut indicators: Vec<Box<dyn Indicator>>,
     mut strategy: Box<dyn Strategy>,
@@ -186,6 +179,14 @@ fn run_event_iterator(
         return Err("event runner requires a trade-event strategy".into());
     }
     let mut broker = Broker::new(cfg);
+    let includes_closing_trade = aggregator.includes_closing_trade();
+    let feed_trade = |indicators: &mut [Box<dyn Indicator>], event: &OrderFlowEvent| {
+        for ind in indicators {
+            if ind.event_interest().matches(event) {
+                ind.on_event(event);
+            }
+        }
+    };
     let mut display = Display::default();
     let mut indicator_history = Vec::new();
     let mut last_trade = None;
@@ -193,6 +194,7 @@ fn run_event_iterator(
     let mut contract_seen = false;
     let mut validation_last = None;
     for event in events {
+        let event = event?;
         let ev = &event;
         match *ev {
             OrderFlowEvent::Contract {
@@ -252,6 +254,9 @@ fn run_event_iterator(
                 contract_seen = true;
             }
             OrderFlowEvent::Trade { ts_ns, price, .. } => {
+                if includes_closing_trade {
+                    feed_trade(&mut indicators, ev);
+                }
                 if let Some(mut fp) = aggregator.on_event(ev) {
                     broker.sample_event_equity(fp.ts_last_ns, fp.close);
                     fp.tags.insert("minute_complete".into(), "true".into());
@@ -276,10 +281,8 @@ fn run_event_iterator(
                 for trade in &broker.trades[before..] {
                     strategy.on_trade_closed(trade);
                 }
-                for ind in &mut indicators {
-                    if ind.event_interest().matches(ev) {
-                        ind.on_event(ev);
-                    }
+                if !includes_closing_trade {
+                    feed_trade(&mut indicators, ev);
                 }
                 if let Some(output) = deferred.take() {
                     let (plots, points) = broker.apply_event_output(output, ts_ns, price)?;

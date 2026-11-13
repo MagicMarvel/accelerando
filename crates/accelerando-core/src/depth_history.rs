@@ -9,9 +9,9 @@ pub type DepthChange = (i64, [f64; 2]);
 
 /// One time series per price, plus a best-bid/ask series. No samples are generated between events.
 pub struct DepthHistory {
-    tick: f64,
-    levels: BTreeMap<i64, DepthLevelHistory>,
-    quotes: Vec<(i64, Prices)>,
+    pub(crate) tick: f64,
+    pub(crate) levels: BTreeMap<i64, DepthLevelHistory>,
+    pub(crate) quotes: Vec<(i64, Prices)>,
 }
 
 impl Default for DepthHistory {
@@ -31,6 +31,14 @@ impl DepthHistory {
 
     pub fn quote_changes(&self) -> &[(i64, [f64; 2])] {
         &self.quotes
+    }
+
+    /// Resting bid and ask at the nearest tick, after updates through the given timestamp.
+    pub fn resting_size_at(&self, price: f64, ts_ns: i64) -> Option<(f64, [f64; 2])> {
+        let key = (price / self.tick).round() as i64;
+        let changes = self.levels.get(&key)?.changes();
+        let i = changes.partition_point(|change| change.0 <= ts_ns).checked_sub(1)?;
+        Some((key as f64 * self.tick, changes[i].1))
     }
 
     pub fn levels_between(
@@ -61,7 +69,7 @@ impl DepthLevelHistory {
         &self.changes
     }
 
-    fn push(&mut self, ts: i64, size: [f64; 2]) {
+    pub(crate) fn push(&mut self, ts: i64, size: [f64; 2]) {
         if self.changes.last().is_some_and(|point| point.0 == ts) {
             self.changes.last_mut().unwrap().1 = size;
             return;
@@ -128,7 +136,7 @@ impl DepthLevelHistory {
     }
 }
 
-fn add_area(area: &mut [f64; 2], size: [f64; 2], duration_ns: i64) {
+pub(crate) fn add_area(area: &mut [f64; 2], size: [f64; 2], duration_ns: i64) {
     for (area, size) in area.iter_mut().zip(size) {
         *area += size * duration_ns as f64;
     }
@@ -141,7 +149,11 @@ pub fn prepare_market_history(
     source.set_event_interest(EventInterest::ALL);
     let mut trades = Vec::new();
     let mut depth = DepthBuilder::default();
-    for event in source.events() {
+    for event in source.try_events() {
+        let event = match event {
+            Ok(event) => event,
+            Err(error) => return (Err(error), DepthHistory::default()),
+        };
         match event {
             OrderFlowEvent::Contract { .. } => {
                 depth.update(event);
@@ -236,7 +248,7 @@ impl DepthBuilder {
     }
 }
 
-fn append_at_time<T>(points: &mut Vec<(i64, T)>, ts: i64, value: T) {
+pub(crate) fn append_at_time<T>(points: &mut Vec<(i64, T)>, ts: i64, value: T) {
     if let Some(last) = points.last_mut().filter(|point| point.0 == ts) {
         last.1 = value;
     } else {
@@ -247,6 +259,21 @@ fn append_at_time<T>(points: &mut Vec<(i64, T)>, ts: i64, value: T) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn resting_size_uses_the_nearest_tick_and_latest_update() {
+        let mut depth = DepthHistory::default();
+        let level = depth.levels.entry(401).or_default();
+        level.push(10, [2.0, 0.0]);
+        level.push(15, [3.0, 4.0]);
+        level.push(20, [0.0, 0.0]);
+
+        assert_eq!(depth.resting_size_at(100.21, 9), None);
+        assert_eq!(depth.resting_size_at(100.21, 14), Some((100.25, [2.0, 0.0])));
+        assert_eq!(depth.resting_size_at(100.21, 15), Some((100.25, [3.0, 4.0])));
+        assert_eq!(depth.resting_size_at(100.21, 20), Some((100.25, [0.0, 0.0])));
+        assert_eq!(depth.resting_size_at(100.0, 15), None);
+    }
 
     #[test]
     fn depth_integrates_short_and_wide_windows_without_losing_clears() {

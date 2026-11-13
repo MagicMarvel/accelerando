@@ -8,6 +8,7 @@ description = "Native egui/eframe result viewer for Accelerando: 1s liquidity he
 [dependencies]
 accelerando-core = { workspace = true }
 accelerando-example-aggregators = { workspace = true }
+accelerando-example-indicators = { workspace = true }
 serde_json = { workspace = true }
 eframe = "0.37"
 chrono = { version = "0.4.45", default-features = false, features = ["clock"] }

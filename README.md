@@ -35,7 +35,7 @@ wire the pipeline directly in code.
 | `accelerando-core` | event/footprint model, traits, engine, broker, metrics |
 | `accelerando` | facade crate that registers the built-in example adapters |
 | `accelerando-web` | browser workbench: result viewer, experiment comparison, manual bar replay |
-| `accelerando-example-sources` | example data sources: `csv` (Bookmap-style feed) |
+| `accelerando-example-sources` | example data sources: `parquet` (ATAS Replay with ZSTD support), `numcat_l2` (NumCat L2) |
 | `accelerando-example-aggregators` | example aggregators: `range`, `time` |
 | `accelerando-example-indicators` | example indicators: `technical`, `regime`, `stacked_imbalance`, `adaptive_imbalance`, `big_trades`, `economic_calendar` |
 | `accelerando-example-strategy` | example strategy: `indicator_cross` |
@@ -70,14 +70,13 @@ fn main() {
     let registry = default_registry(); // built-in example adapters
 
     let mut source_params = Params::default();
-    source_params.set("path", ParamValue::Str("C:/data/feed.csv".into()));
-    source_params.set("buy_aggressor_code", ParamValue::Int(2));
+    source_params.set("path", ParamValue::Str("C:/data/feed.parquet".into()));
 
     let mut agg_params = Params::default();
     agg_params.set("range_ticks", ParamValue::Int(30));
 
     let pipeline = Pipeline {
-        source: registry.build_source("csv", &source_params).unwrap(),
+        source: registry.build_source("parquet", &source_params).unwrap(),
         aggregator: registry.build_aggregator("range", &agg_params).unwrap(),
         indicators: vec![registry.build_indicator("technical", &Params::default()).unwrap()],
         strategy: registry.build_strategy("indicator_cross", &Params::default()).unwrap(),
@@ -147,10 +146,22 @@ fn main() {                                            // 4
 ```
 
 ```text
-cargo run --release -- data.csv --strategy my_strategy --param stop_ticks=12 --serve
-cargo run --release -- data.csv --strategy my_strategy --grid --max-evals 200 --validate
+cargo run --release -- data.parquet --strategy my_strategy --param stop_ticks=12 --serve
+cargo run --release -- data.parquet --strategy my_strategy --grid --max-evals 200 --validate
 cargo run --release -- --list
 ```
+
+The runner defaults to ATAS Replay Parquet exports with ZSTD compression. Use `--source NAME` to select another registered adapter.
+
+The default registry includes **Big Trades**. Add it with `--indicator big_trades:min_trade_size=50` or declare it in the strategy's `requirements()`. The defaults are cumulative mode, a 1 ms grouping window, the last execution price, and a fixed minimum volume of 25. Use `mode=single` for individual prints. Cumulative mode supports `execution_price=start|last|weighted_average` and `price_location` filters against the bar. In either mode, `max_volume=0` leaves the upper volume limit open.
+
+The native GUI displays Big Trades by default. Its settings gear in the chart legend opens volume limits, base and minimum/maximum bubble diameters, fixed sizing, buy/sell colors, and transparency. When opening a saved result without the original trades, the volume limits filter the Big Trades markers in that result.
+
+Within each footprint, cumulative mode groups consecutive prints by elapsed time from the first print, aggressor side, and sweep direction. The installed ATAS X 8.0.15.656 uses a window under 1 ms for traditional markets and under 1 second for crypto. Set `cumulative_window_ms=1000` for the latter. Accelerando assumes a single market per normalized trade stream. Its optional `threshold_mode=adaptive` uses completed footprints. ATAS Auto Filter uses historical cumulative trades returned by its provider. [ATAS Big Trades documentation](https://help.atas.net/en/support/solutions/articles/72000602332)
+
+For large files, `--from 2026-09-02 --to 2026-09-03` (UTC; also `2026-09-02T13:30` or nanoseconds) reads only that range: row groups outside it are skipped using the Parquet footer statistics. When no component needs depth, only trade rows are decoded. If depth is needed, the rows before `--from` are still scanned to rebuild the book, which is emitted as `SetLevel` events at `--from`.
+
+`--gui` needs no slicing: the order book is read once into a chunked on-disk store under the cache directory (`depth_<hash>/`, about 2x the Parquet size). The viewer keeps a 30-second overview in memory and loads exact depth for whatever stretch you zoom into (12 hours or less) in the background. The next `--gui` run on the same file opens from the cache.
 
 1. **`#[derive(Configurable)]`** generates `param_spec()` + `from_params()` from field attributes;
    it is the only way to implement `Configurable` (the trait is sealed, so a parameter's name,
@@ -372,13 +383,10 @@ in current rustc. This workspace's `.cargo/config.toml` sets the scoped escape h
 `RUSTC_BOOTSTRAP = "perpetual"` so exactly that crate compiles on the stable toolchain; downstream
 applications depending on `accelerando-ml` need the same entry in their own `.cargo/config.toml`.
 
-## Data format (Bookmap-style CSV)
+## Data format (ATAS Replay Parquet)
 
-- `T` rows: `T,ts_ns,id,price,size,side,flag` — aggressor side is column 5 (0-indexed), value
-  `1`/`2`. Which value means buy aggressor is feed-dependent; set it via the source's
-  `buy_aggressor_code` param instead of editing code.
-- `c` rows carry `tick_size` (index 6) and `multiplier` (index 7); the broker uses them for tick
-  rounding and currency PnL.
+- ATAS Replay schema version 1 stores trades and absolute depth updates in file order.
+- File metadata supplies `tick_size` and `multiplier` for tick rounding and currency PnL.
 - Timestamps are nanosecond `i64` values (larger than JS `Number.MAX_SAFE_INTEGER`); browser code
   tolerates sub-millisecond precision loss for display only.
 

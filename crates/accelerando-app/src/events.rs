@@ -1,6 +1,5 @@
 //! Raw trades (contract + trade events) for the viewer's bar switch / tick replay and for custom
-//! modes, with a compact binary disk cache next to the prepared-footprint cache. Re-parsing a
-//! 1 GB CSV takes tens of seconds; reading the cache takes about one.
+//! modes, with a compact binary disk cache next to the prepared-footprint cache.
 
 use std::path::Path;
 
@@ -11,17 +10,29 @@ use crate::RunOptions;
 const MAGIC: &[u8; 8] = b"ACEVT001";
 const RECORD: usize = 1 + 8 + 8 + 8 + 1;
 
-/// Load raw trades for `path`, from the cache when `o.cache_dir` holds a matching one.
-pub(crate) fn load(registry: &Registry, o: &RunOptions, path: &str) -> Result<PreparedEventData, String> {
-    let cache = o.cache_dir.as_ref().map(|dir| {
+fn cache_path(o: &RunOptions, path: &str) -> Option<std::path::PathBuf> {
+    o.cache_dir.as_ref().map(|dir| {
         let key = serde_json::json!({
             "v": 1,
             "file": crate::file_identity(path),
             "source": o.source,
-            "buy_aggressor_code": o.buy_aggressor_code,
+            "from": o.from,
+            "to": o.to,
         });
         dir.join(format!("events_{:016x}.bin", crate::hash_json(&key)))
-    });
+    })
+}
+
+/// Store trades read some other way (e.g. while building the depth store) in the cache.
+pub(crate) fn save(o: &RunOptions, path: &str, data: &PreparedEventData) {
+    if let Some(cp) = cache_path(o, path).filter(|cp| !cp.exists()) {
+        write_atomic(&cp, &encode(data.events()));
+    }
+}
+
+/// Load raw trades for `path`, from the cache when `o.cache_dir` holds a matching one.
+pub(crate) fn load(registry: &Registry, o: &RunOptions, path: &str) -> Result<PreparedEventData, String> {
+    let cache = cache_path(o, path);
     if let Some(cp) = &cache {
         if let Ok(bytes) = std::fs::read(cp) {
             match decode(&bytes) {

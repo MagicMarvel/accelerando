@@ -258,6 +258,15 @@ pub(crate) struct TradeVolume {
 }
 
 impl TradeVolume {
+    pub(crate) fn add(&mut self, price: f64, size: f64, side: Side) {
+        match side {
+            Side::Buy => self.buy += size as f32,
+            Side::Sell => self.sell += size as f32,
+            Side::Unknown => return,
+        }
+        self.notional += price * size;
+    }
+
     fn total(self) -> f64 {
         f64::from(self.buy) + f64::from(self.sell)
     }
@@ -282,16 +291,14 @@ pub(crate) fn trade_quotes(events: &[OrderFlowEvent]) -> Vec<TradeQuote> {
             });
         }
         let quote = quotes.last_mut().expect("current trade bucket");
-        quote.volume.notional += price * size;
+        quote.volume.add(price, size, aggressor);
         match aggressor {
             Side::Buy => {
                 quote.ask = quote.ask.max(price as f32);
-                quote.volume.buy += size as f32;
                 quote.last_trade_ns[1] = Some(ts_ns);
             }
             Side::Sell => {
                 quote.bid = quote.bid.min(price as f32);
-                quote.volume.sell += size as f32;
                 quote.last_trade_ns[0] = Some(ts_ns);
             }
             Side::Unknown => unreachable!("unknown trades are skipped"),

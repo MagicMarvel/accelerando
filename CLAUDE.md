@@ -106,6 +106,14 @@ Pipeline assembly lives in the embedding application:
   `smooth` (zero-lag, i.e. centered — display only, never feed it to a strategy), `rasterize`.
 - `Pipeline.keep_liquidity_heatmap = true` now records one book snapshot per second in which the
   book changed (`engine::LIQUIDITY_HEATMAP_INTERVAL_NS`), not one per footprint close.
+- Depth for the viewer is a `DepthStore` (`accelerando-core/src/depth_store.rs`): one pass writes
+  exact 4-hour chunks (each seeded with the full book at its start) to disk and keeps only exact
+  BBO changes + a 30 s time-weighted overview in memory. The viewer draws the overview when zoomed
+  out and loads the exact chunks of the visible stretch on a background thread when the view
+  spans <= `EXACT_DEPTH_SPAN_NS` (12 h). `accelerando-app` (`market.rs`) caches it as
+  `<cache-dir>/depth_<hash>/` (bump `STORE_VERSION` on format changes); `--no-cache` uses a
+  temporary directory. ESU6 (5 weeks, 234 M depth changes): 1.7 GB peak instead of 6.3 GB.
+  `view_with_market_history` still accepts a plain `DepthHistory`. Strategies never read it.
 - `cargo run --release -p accelerando --bin serve_numcat` opens it on the NumCat sample
   (`--span <secs>` initial zoom, `--web` for the old browser viewer).
 
@@ -125,11 +133,12 @@ OOS R² and hit rate.
   `accelerando-ml` need the same entry in their own `.cargo/config.toml`.
 - `panic = "abort"` in release means `catch_unwind` cannot recover. App entry points should validate
   inputs before spawning long jobs.
-- CSV `T` rows are `T,ts_ns,id,price,size,side,flag`; aggressor side is column 5 (0-indexed),
-  value `1`/`2`. Which value means buy aggressor is feed-dependent and exposed as
-  `buy_aggressor_code`.
-- The CSV `c` row carries `tick_size` at index 6 and `multiplier` at index 7; the broker uses
-  those for tick rounding and currency PnL.
+- ATAS Replay Parquet v1 is the default market data format and supports ZSTD compression.
+  `ParquetSource` params `start`/`end` (app: `--from`/`--to`, part of the cache keys) prune row
+  groups by footer timestamp stats; without L2 interest a row filter decodes trade rows only. With
+  L2 and `start`, depth before `start` is replayed to seed the book (files carry one snapshot).
+  `cargo run --release -p accelerando-example-sources --example parquet_scan -- <file> trades` benchmarks reads.
+  File metadata supplies `tick_size` and `multiplier` for tick rounding and currency PnL.
 - Timestamps are nanosecond `i64` values. Browser display code may lose sub-millisecond precision
   when converting to JavaScript numbers; do not rely on exact nanosecond equality in frontend code.
 - For charting, `BacktestResult.footprints` must be populated. Set `Pipeline.keep_footprints = true`
@@ -140,7 +149,7 @@ OOS R² and hit rate.
 
 - Build the workspace with `cargo build`.
 - Verify downstream integration with a runner crate such as `accel-consumer`.
-- For indicator/strategy changes, run a downstream runner on a known CSV slice and compare metrics,
+- For indicator/strategy changes, run a downstream runner on a known Parquet sample and compare metrics,
   trades and rendered plots.
 - For viewer changes, serve a `BacktestResult` from a runner and open the localhost URL.
 

@@ -2,9 +2,9 @@
 
 use std::sync::Arc;
 
-use accelerando_core::{BacktestResult, DepthHistory, PreparedEventData, Registry};
+use accelerando_core::{BacktestResult, DepthStore, PreparedEventData, Registry};
 
-type MarketHistory = (Arc<PreparedEventData>, DepthHistory);
+type MarketHistory = (Arc<PreparedEventData>, DepthStore);
 
 use crate::RunOptions;
 
@@ -28,16 +28,9 @@ pub(crate) fn view(
 ) -> Result<(), String> {
     use accelerando_gui::{aggregate, ticks_from, BarSpec, ViewerOptions};
 
-    let (events, depth) = if let Some((events, depth)) = prepared_events {
-        (Ok(events), depth)
-    } else {
-        match crate::build_source(&registry, o, data_path) {
-            Ok(source) => {
-                let (events, depth) = accelerando_core::prepare_market_history(source);
-                (events.map(Arc::new), depth)
-            }
-            Err(err) => (Err(err), DepthHistory::default()),
-        }
+    let (events, depth) = match prepared_events.map_or_else(|| crate::market::load(&registry, o, data_path), Ok) {
+        Ok((events, depth)) => (Ok(events), depth),
+        Err(err) => (Err(err), DepthStore::default()),
     };
     if let Err(err) = &events {
         eprintln!("Trade data unavailable: {err}");

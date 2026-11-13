@@ -1,8 +1,8 @@
 //! A complete strategy project in one file.
 //!
 //! ```text
-//! cargo run --release -p accelerando-app --example quickstart -- data.csv --strategy vwap_pullback
-//! cargo run --release -p accelerando-app --example quickstart -- data.csv --strategy vwap_pullback --grid --max-evals 64 --validate
+//! cargo run --release -p accelerando-app --example quickstart -- data.parquet --strategy vwap_pullback
+//! cargo run --release -p accelerando-app --example quickstart -- data.parquet --strategy vwap_pullback --grid --max-evals 64 --validate
 //! cargo run --release -p accelerando-app --example quickstart -- --list
 //! ```
 

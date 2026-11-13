@@ -1,7 +1,7 @@
 //! Strategy / indicator overlays (`Footprint::plots` and `BacktestResult::series`) resolved to
 //! chart coordinates once at startup.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use accelerando_core::result::Series;
 use accelerando_core::{Footprint, Plot, VpLevel};
@@ -14,6 +14,7 @@ pub(crate) struct OverlayLine {
 }
 
 pub(crate) struct OverlayMarker {
+    pub group: Option<String>,
     pub x: f64,
     pub price: f64,
     pub shape: String,
@@ -22,6 +23,7 @@ pub(crate) struct OverlayMarker {
 }
 
 pub(crate) struct OverlaySegment {
+    pub group: Option<String>,
     pub from: (f64, f64),
     pub to: (f64, f64),
     pub color: Color32,
@@ -30,6 +32,7 @@ pub(crate) struct OverlaySegment {
 }
 
 pub(crate) struct OverlayBox {
+    pub group: Option<String>,
     pub x0: f64,
     pub x1: f64,
     pub low: f64,
@@ -49,6 +52,7 @@ pub(crate) struct OverlayProfile {
 
 #[derive(Default)]
 pub(crate) struct Overlays {
+    pub groups: BTreeSet<String>,
     /// Volume profiles, one per id (the last emission wins), sorted by `x0`.
     pub profiles: Vec<OverlayProfile>,
     pub lines: Vec<OverlayLine>,
@@ -81,7 +85,14 @@ impl Overlays {
         let mut out = Self::default();
         let mut lines: BTreeMap<&str, OverlayLine> = BTreeMap::new();
         // The same box id is re-emitted while a box grows; only its last emission is drawn.
-        let mut boxes: BTreeMap<&str, OverlayBox> = BTreeMap::new();
+        let mut boxes: BTreeMap<(Option<&str>, &str), OverlayBox> = BTreeMap::new();
+        let group_name = |group: &Option<String>| {
+            group
+                .as_deref()
+                .map(str::trim)
+                .filter(|name| !name.is_empty())
+                .map(str::to_owned)
+        };
         // Profiles may also grow under one id; anonymous ones get a unique key.
         let mut profiles: BTreeMap<String, OverlayProfile> = BTreeMap::new();
 
@@ -108,16 +119,28 @@ impl Overlays {
                         color,
                         dashed,
                         text,
-                        ..
+                        group,
                     } => out.segments.push(OverlaySegment {
+                        group: group_name(group),
                         from: (mid(back(i, *from_bars_back)), *from_price),
                         to: (mid(back(i, *to_bars_back)), *to_price),
                         color: parse_color(color).unwrap_or(PALETTE[1]),
                         dashed: *dashed,
                         text: text.clone(),
                     }),
-                    Plot::Marker { price, shape, color, text, .. } => {
+                    Plot::Marker {
+                        price,
+                        shape,
+                        color,
+                        text,
+                        group,
+                        ..
+                    } => {
+                        if group.as_deref() == Some("big_trades") {
+                            continue;
+                        }
                         out.markers.push(OverlayMarker {
+                            group: group_name(group),
                             x: mid(i),
                             price: *price,
                             shape: shape.clone(),
@@ -125,19 +148,35 @@ impl Overlays {
                             text: text.clone(),
                         })
                     }
-                    Plot::MarkerAt { bars_back, price, shape, color, text, .. } => {
-                        out.markers.push(OverlayMarker {
-                            x: mid(back(i, *bars_back)),
-                            price: *price,
-                            shape: shape.clone(),
-                            color: parse_color(color).unwrap_or(PALETTE[0]),
-                            text: text.clone(),
-                        })
-                    }
-                    Plot::PriceBox { id, low, high, span, color, text, .. } => {
+                    Plot::MarkerAt {
+                        bars_back,
+                        price,
+                        shape,
+                        color,
+                        text,
+                        group,
+                        ..
+                    } => out.markers.push(OverlayMarker {
+                        group: group_name(group),
+                        x: mid(back(i, *bars_back)),
+                        price: *price,
+                        shape: shape.clone(),
+                        color: parse_color(color).unwrap_or(PALETTE[0]),
+                        text: text.clone(),
+                    }),
+                    Plot::PriceBox {
+                        id,
+                        low,
+                        high,
+                        span,
+                        color,
+                        text,
+                        group,
+                    } => {
                         boxes.insert(
-                            id.as_str(),
+                            (group.as_deref(), id.as_str()),
                             OverlayBox {
+                                group: group_name(group),
                                 x0: fp_x[back(i, *span)].0,
                                 x1: fp_x[i].1,
                                 low: *low,
@@ -147,11 +186,21 @@ impl Overlays {
                             },
                         );
                     }
-                    Plot::PriceBoxAt { bars_back, id, low, high, span, color, text, .. } => {
+                    Plot::PriceBoxAt {
+                        bars_back,
+                        id,
+                        low,
+                        high,
+                        span,
+                        color,
+                        text,
+                        group,
+                    } => {
                         let end = back(i, *bars_back);
                         boxes.insert(
-                            id.as_str(),
+                            (group.as_deref(), id.as_str()),
                             OverlayBox {
+                                group: group_name(group),
                                 x0: fp_x[back(end, *span)].0,
                                 x1: fp_x[end].1,
                                 low: *low,
@@ -162,7 +211,11 @@ impl Overlays {
                         );
                     }
                     Plot::VolumeProfile { id, levels, span } => {
-                        let key = if id.is_empty() { format!("__vp_{i}") } else { id.clone() };
+                        let key = if id.is_empty() {
+                            format!("__vp_{i}")
+                        } else {
+                            id.clone()
+                        };
                         let start = back(i, span.saturating_sub(1));
                         profiles.insert(
                             key,
@@ -175,8 +228,19 @@ impl Overlays {
                             },
                         );
                     }
-                    Plot::VolumeProfileAt { bars_back, id, levels, span, text, color } => {
-                        let key = if id.is_empty() { format!("__vp_{i}") } else { id.clone() };
+                    Plot::VolumeProfileAt {
+                        bars_back,
+                        id,
+                        levels,
+                        span,
+                        text,
+                        color,
+                    } => {
+                        let key = if id.is_empty() {
+                            format!("__vp_{i}")
+                        } else {
+                            id.clone()
+                        };
                         let end = back(i, *bars_back);
                         let start = back(end, span.saturating_sub(1));
                         profiles.insert(
@@ -197,7 +261,8 @@ impl Overlays {
         }
         out.lines.extend(lines.into_values());
         out.boxes.extend(boxes.into_values());
-        out.profiles.extend(profiles.into_values().filter(|p| !p.levels.is_empty()));
+        out.profiles
+            .extend(profiles.into_values().filter(|p| !p.levels.is_empty()));
         out.profiles.sort_by(|a, b| a.x0.total_cmp(&b.x0));
 
         for (n, series) in series.iter().enumerate() {
@@ -215,6 +280,15 @@ impl Overlays {
             }
         }
         out.markers.sort_by(|a, b| a.x.total_cmp(&b.x));
+        out.groups.extend(
+            out.boxes
+                .iter()
+                .map(|plot| &plot.group)
+                .chain(out.segments.iter().map(|plot| &plot.group))
+                .chain(out.markers.iter().map(|plot| &plot.group))
+                .flatten()
+                .cloned(),
+        );
         out
     }
 }
@@ -227,9 +301,18 @@ pub(crate) fn parse_color(s: &str) -> Option<Color32> {
         let digit = |i: usize| u8::from_str_radix(hex.get(i..i + 1)?, 16).ok();
         let byte = |i: usize| u8::from_str_radix(hex.get(i..i + 2)?, 16).ok();
         return match hex.len() {
-            3 => Some(Color32::from_rgb(digit(0)? * 17, digit(1)? * 17, digit(2)? * 17)),
+            3 => Some(Color32::from_rgb(
+                digit(0)? * 17,
+                digit(1)? * 17,
+                digit(2)? * 17,
+            )),
             6 => Some(Color32::from_rgb(byte(0)?, byte(2)?, byte(4)?)),
-            8 => Some(Color32::from_rgba_unmultiplied(byte(0)?, byte(2)?, byte(4)?, byte(6)?)),
+            8 => Some(Color32::from_rgba_unmultiplied(
+                byte(0)?,
+                byte(2)?,
+                byte(4)?,
+                byte(6)?,
+            )),
             _ => None,
         };
     }
@@ -243,7 +326,9 @@ pub(crate) fn parse_color(s: &str) -> Option<Color32> {
             return None;
         }
         let channel = |v: f32| v.clamp(0.0, 255.0) as u8;
-        let alpha = parts.get(3).map_or(255, |a| (a.clamp(0.0, 1.0) * 255.0) as u8);
+        let alpha = parts
+            .get(3)
+            .map_or(255, |a| (a.clamp(0.0, 1.0) * 255.0) as u8);
         return Some(Color32::from_rgba_unmultiplied(
             channel(parts[0]),
             channel(parts[1]),
@@ -270,6 +355,46 @@ pub(crate) fn parse_color(s: &str) -> Option<Color32> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn mixed_plot_types_share_one_named_legend_entry() {
+        let mut bar = Footprint::seed(0, 100.0);
+        let group = Some("POC 回踩".to_owned());
+        bar.plots.push(Plot::PriceBox {
+            id: "peak".into(),
+            low: 99.0,
+            high: 101.0,
+            span: 0,
+            color: "#fff".into(),
+            text: String::new(),
+            group: group.clone(),
+        });
+        bar.plots.push(Plot::MarkerAt {
+            bars_back: 0,
+            price: 100.0,
+            shape: "circle".into(),
+            color: "#fff".into(),
+            text: String::new(),
+            text_dx: None,
+            text_dy: None,
+            group: group.clone(),
+        });
+        bar.plots.push(Plot::LineSegment {
+            from_bars_back: 0,
+            from_price: 99.0,
+            to_bars_back: 0,
+            to_price: 101.0,
+            color: "#fff".into(),
+            dashed: false,
+            text: String::new(),
+            group: group.clone(),
+        });
+        let overlays = Overlays::build(&[bar], &[], &|_| (0.0, 1.0));
+        assert_eq!(overlays.groups, BTreeSet::from(["POC 回踩".to_owned()]));
+        assert_eq!(overlays.boxes[0].group, group);
+        assert_eq!(overlays.markers[0].group, group);
+        assert_eq!(overlays.segments[0].group, group);
+    }
 
     #[test]
     fn parses_css_colors() {

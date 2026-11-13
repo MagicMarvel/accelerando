@@ -24,6 +24,10 @@ impl RangeAggregator {
 }
 
 impl FootprintAggregator for RangeAggregator {
+    fn includes_closing_trade(&self) -> bool {
+        true
+    }
+
     fn event_interest(&self) -> EventInterest {
         EventInterest::CONTRACT.union(EventInterest::TRADE)
     }
