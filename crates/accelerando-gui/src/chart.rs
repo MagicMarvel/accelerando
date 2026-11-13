@@ -1081,7 +1081,7 @@ fn draw_footprints(
             painter.rect_filled(
                 Rect::from_min_max(pos2(mid, ya), pos2(mid + vw, yb)),
                 0.0,
-                Color32::from_rgba_unmultiplied(140, 152, 175, 120),
+                crate::TOTAL_VOLUME_COLOR,
             );
             if text {
                 let y = (ya + yb) * 0.5;

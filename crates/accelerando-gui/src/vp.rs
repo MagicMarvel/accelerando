@@ -7,14 +7,13 @@
 
 use accelerando_core::volume_profile::{self, ProfileStats};
 use accelerando_core::{Footprint, VpLevel};
-use eframe::egui::{self, pos2, Align2, Color32, FontId, Painter, Rect, Shape, Stroke, StrokeKind};
+use eframe::egui::{self, pos2, Align2, Color32, FontId, Painter, Pos2, Rect, Stroke, StrokeKind};
 
 use crate::chart::Mapper;
 use crate::{data, Model};
 
 const BUY: Color32 = Color32::from_rgb(0x26, 0xa6, 0x9a);
 const SELL: Color32 = Color32::from_rgb(0xef, 0x53, 0x50);
-const VOLUME: Color32 = Color32::from_rgb(0x64, 0x74, 0x8b);
 const POC: Color32 = Color32::from_rgb(0xf5, 0x9e, 0x0b);
 const VAH: Color32 = Color32::from_rgb(0x22, 0xc5, 0x5e);
 const VAL: Color32 = Color32::from_rgb(0xef, 0x44, 0x44);
@@ -205,18 +204,64 @@ impl VpTool {
 /// POC / VAH / VAL of a drawn profile, optionally extended to the right edge of the chart.
 fn draw_levels(painter: &Painter, m: &Mapper, sx0: f32, sx1: f32, s: ProfileStats, extend: bool, d: usize) {
     let right = if extend { m.rect.right() } else { sx1 };
+    let clip = painter.clip_rect();
     for (price, color, name, dashed) in
         [(s.poc, POC, "POC", false), (s.vah, VAH, "VAH", true), (s.val, VAL, "VAL", true)]
     {
         let y = m.sy(price);
+        if y < clip.top() || y > clip.bottom() {
+            continue;
+        }
         let stroke = Stroke::new(1.3, color);
         if dashed {
-            painter.extend(Shape::dashed_line(&[pos2(sx0, y), pos2(right, y)], stroke, 6.0, 4.0));
-        } else {
-            painter.line_segment([pos2(sx0, y), pos2(right, y)], stroke);
+            draw_dashes(painter, &[pos2(sx0, y), pos2(right, y)], stroke, 6.0, 4.0);
+        } else if sx0.max(clip.left()) <= right.min(clip.right()) {
+            painter.line_segment([pos2(sx0.max(clip.left()), y), pos2(right.min(clip.right()), y)], stroke);
         }
         let x = sx1.max(m.rect.left()).min(m.rect.right() - 90.0);
         painter.text(pos2(x + 4.0, y - 1.0), Align2::LEFT_BOTTOM, format!("{name} {price:.d$}"), FontId::proportional(11.0), color);
+    }
+}
+
+/// Clip each axis-aligned edge before emitting dashes. Keep the phase measured from the
+/// original path so the dash pattern stays anchored when panning or zooming.
+fn draw_dashes(painter: &Painter, points: &[Pos2], stroke: Stroke, dash: f32, gap: f32) {
+    let clip = painter.clip_rect().expand(stroke.width);
+    let period = dash + gap;
+    let mut phase = 0.0;
+    for edge in points.windows(2) {
+        let (from, to) = (edge[0], edge[1]);
+        let horizontal = from.y == to.y;
+        let (start, end, fixed, low, high, fixed_range) = if horizontal {
+            (from.x, to.x, from.y, clip.left(), clip.right(), clip.y_range())
+        } else {
+            (from.y, to.y, from.x, clip.top(), clip.bottom(), clip.x_range())
+        };
+        let length = (end - start).abs();
+        if !length.is_finite() {
+            continue;
+        }
+        let dir = if end >= start { 1.0 } else { -1.0 };
+        let visible_start = start.min(end).max(low);
+        let visible_end = start.max(end).min(high);
+        if visible_start < visible_end && fixed_range.contains(fixed) {
+            let first = if dir > 0.0 { visible_start } else { visible_end };
+            let span = visible_end - visible_start;
+            let mut offset = -(phase + (first - start).abs().rem_euclid(period)).rem_euclid(period);
+            let point = |offset: f32| {
+                let along = first + dir * offset;
+                if horizontal { pos2(along, fixed) } else { pos2(fixed, along) }
+            };
+            while offset < span {
+                let left = offset.max(0.0);
+                let right = (offset + dash).min(span);
+                if left < right {
+                    painter.line_segment([point(left), point(right)], stroke);
+                }
+                offset += period;
+            }
+        }
+        phase = (phase + length.rem_euclid(period)).rem_euclid(period);
     }
 }
 
@@ -234,7 +279,7 @@ fn draw_profile(
     text: &str,
 ) {
     let (sx0, sx1) = (m.sx(x0), m.sx(x1));
-    if sx1 - sx0 < 4.0 || levels.is_empty() {
+    if !sx0.is_finite() || !sx1.is_finite() || sx1 - sx0 < 4.0 || levels.is_empty() {
         return;
     }
     let (mut max_total, mut max_delta, mut poc) = (0f64, 0f64, 0usize);
@@ -251,10 +296,11 @@ fn draw_profile(
     }
     let width = sx1 - sx0;
     let (half, mid) = (width * 0.5, sx0 + width * 0.5);
+    let clip = painter.clip_rect();
     let (mut min_y, mut max_y) = (f32::INFINITY, f32::NEG_INFINITY);
     for (j, lv) in levels.iter().enumerate() {
         let (ya, yb) = (m.sy(lv.price + tick * 0.5), m.sy(lv.price - tick * 0.5));
-        if yb < m.rect.top() || ya > m.rect.bottom() {
+        if yb < clip.top() || ya > clip.bottom() {
             continue;
         }
         let yb = yb.max(ya + 1.0);
@@ -264,22 +310,28 @@ fn draw_profile(
         let delta = lv.buy_vol - lv.sell_vol;
         if max_delta > 0.0 {
             let dw = half * (delta.abs() / max_delta) as f32;
-            if dw >= 0.5 {
+            let rect = Rect::from_min_max(pos2(mid - dw, ya), pos2(mid, yb)).intersect(clip);
+            if dw >= 0.5 && rect.is_positive() {
                 let c = if delta >= 0.0 { BUY } else { SELL };
                 painter.rect_filled(
-                    Rect::from_min_max(pos2(mid - dw, ya), pos2(mid, yb)),
+                    rect,
                     0.0,
                     Color32::from_rgba_unmultiplied(c.r(), c.g(), c.b(), 120),
                 );
             }
         }
         let vw = half * (total / max_total) as f32;
-        if vw >= 0.5 {
-            let c = if j == poc { POC } else { VOLUME };
+        let rect = Rect::from_min_max(pos2(mid, ya), pos2(mid + vw, yb)).intersect(clip);
+        if vw >= 0.5 && rect.is_positive() {
+            let fill = if j == poc {
+                Color32::from_rgba_unmultiplied(POC.r(), POC.g(), POC.b(), 200)
+            } else {
+                crate::TOTAL_VOLUME_COLOR
+            };
             painter.rect_filled(
-                Rect::from_min_max(pos2(mid, ya), pos2(mid + vw, yb)),
+                rect,
                 0.0,
-                Color32::from_rgba_unmultiplied(c.r(), c.g(), c.b(), if j == poc { 200 } else { 130 }),
+                fill,
             );
         }
     }
@@ -290,7 +342,7 @@ fn draw_profile(
     let rect = Rect::from_min_max(pos2(sx0, min_y), pos2(sx1, max_y));
     let stroke = Stroke::new(1.2, Color32::from_rgba_unmultiplied(edge.r(), edge.g(), edge.b(), 200));
     let corners = [rect.left_top(), rect.right_top(), rect.right_bottom(), rect.left_bottom(), rect.left_top()];
-    painter.extend(Shape::dashed_line(&corners, stroke, 4.0, 3.0));
+    draw_dashes(painter, &corners, stroke, 4.0, 3.0);
     if !text.is_empty() && width >= 24.0 {
         painter.text(
             pos2(mid, (min_y - 3.0).max(m.rect.top() + 12.0)),
@@ -299,5 +351,33 @@ fn draw_profile(
             FontId::proportional(11.0),
             edge,
         );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use eframe::egui::Shape;
+
+    #[test]
+    fn zoomed_profile_border_only_emits_visible_dashes() {
+        let clip = Rect::from_min_max(pos2(0.0, 0.0), pos2(700.0, 100.0));
+        let ctx = egui::Context::default();
+        let input = egui::RawInput { screen_rect: Some(clip), ..Default::default() };
+        let mut output = ctx.run_ui(input, |ui| {
+            let painter = ui.painter().with_clip_rect(clip);
+            let m = Mapper { rect: clip, x0: 0.0, x1: 1.0, p0: 99.0, p1: 101.0 };
+            let levels = [VpLevel { price: 100.0, buy_vol: 10.0, sell_vol: 2.0 }];
+            draw_profile(&painter, &m, -10_000.0, 10_001.0, &levels, 0.25, None, "");
+        });
+        output.textures_delta.clear();
+        let dashes: Vec<_> = output.shapes.iter().filter_map(|entry| {
+            match entry.shape {
+                Shape::LineSegment { points, .. } => Some(points),
+                _ => None,
+            }
+        }).collect();
+        assert!((190..=204).contains(&dashes.len()));
+        assert!(dashes.into_iter().flatten().all(|point| clip.expand(1.3).contains(point)));
     }
 }

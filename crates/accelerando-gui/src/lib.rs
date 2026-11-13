@@ -29,6 +29,10 @@ use std::sync::{mpsc, Arc};
 use accelerando_core::{BacktestResult, DepthHistory, DepthStore, DepthWindow, Footprint};
 use eframe::egui;
 
+/// Total executed volume in footprint and volume-profile histograms.
+const TOTAL_VOLUME_COLOR: egui::Color32 =
+    egui::Color32::from_rgba_unmultiplied_const(181, 143, 235, 145);
+
 use chart::ChartState;
 pub use bars::{aggregate, BarKind, BarSpec, Rebar};
 pub use data::{AxisMode, TimeZone};
