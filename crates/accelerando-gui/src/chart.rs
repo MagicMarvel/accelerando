@@ -1,5 +1,6 @@
 //! Painting and interaction for the price panel and the equity panel.
 
+use accelerando_core::{volume_profile, Footprint, VpLevel};
 use eframe::egui::{
     self, pos2, Align2, Color32, ColorImage, FontId, Painter, Pos2, Rect, Sense, Shape, Stroke,
     StrokeKind, TextureHandle, TextureOptions,
@@ -13,6 +14,7 @@ use crate::{Model, Settings};
 
 const AXIS_W: f32 = 72.0;
 const AXIS_H: f32 = 22.0;
+const REPLAY_FRACTION: f64 = 0.85;
 
 const BACKGROUND: Color32 = Color32::from_rgb(8, 12, 24);
 const GRID: Color32 = Color32::from_rgba_premultiplied(40, 46, 60, 110);
@@ -47,6 +49,7 @@ pub(crate) struct ChartState {
     pub p0: f64,
     pub p1: f64,
     pub auto_y: bool,
+    pub follow_replay: bool,
     total: f64,
     mode: AxisMode,
     heat: Option<HeatCache>,
@@ -77,6 +80,7 @@ impl ChartState {
             p0: 0.0,
             p1: 1.0,
             auto_y: true,
+            follow_replay: false,
             total: total.max(1.0),
             mode,
             heat: None,
@@ -117,7 +121,32 @@ impl ChartState {
         self.x0 = center - span * 0.5;
         self.x1 = center + span * 0.5;
         self.auto_y = true;
+        self.follow_replay = false;
         self.clamp_x();
+    }
+
+    pub fn sync_replay(&mut self, replay_x: Option<f64>) {
+        if let Some(x) = replay_x.filter(|_| self.follow_replay) {
+            self.place_replay(x, self.x1 - self.x0);
+        }
+    }
+
+    fn place_replay(&mut self, x: f64, span: f64) {
+        self.x0 = x - REPLAY_FRACTION * span;
+        self.x1 = x + (1.0 - REPLAY_FRACTION) * span;
+    }
+
+    fn zoom_time(&mut self, fraction: f64, factor: f64, replay_x: Option<f64>) {
+        let span = self.x1 - self.x0;
+        let next_span = self.clamp_span(span * factor);
+        if let Some(x) = replay_x.filter(|_| self.follow_replay) {
+            self.place_replay(x, next_span);
+        } else {
+            let anchor = self.x0 + fraction * span;
+            self.x0 = anchor - fraction * next_span;
+            self.x1 = self.x0 + next_span;
+            self.clamp_x_with_replay_margin(replay_x.is_some());
+        }
     }
 
     fn zoom_price(&mut self, fraction: f64, factor: f64, tick: f64) {
@@ -142,20 +171,24 @@ impl ChartState {
     }
 
     fn clamp_x(&mut self) {
+        self.clamp_x_with_replay_margin(false);
+    }
+
+    fn clamp_span(&self, span: f64) -> f64 {
         let min_span = self.min_span();
-        let span = (self.x1 - self.x0).clamp(min_span, self.total.max(min_span) * 1.1);
+        span.clamp(min_span, self.total.max(min_span) * 1.1)
+    }
+
+    fn clamp_x_with_replay_margin(&mut self, replaying: bool) {
+        let span = self.clamp_span(self.x1 - self.x0);
         let center = (self.x0 + self.x1) * 0.5;
-        self.x0 = center - span * 0.5;
-        self.x1 = center + span * 0.5;
-        let pad = span * 0.1;
-        if self.x0 < -pad {
-            self.x1 += -pad - self.x0;
-            self.x0 = -pad;
-        }
-        if self.x1 > self.total + pad {
-            self.x0 -= self.x1 - (self.total + pad);
-            self.x1 = self.total + pad;
-        }
+        let (left, right) = if replaying {
+            (-REPLAY_FRACTION * span, self.total + (1.0 - REPLAY_FRACTION) * span)
+        } else {
+            (-0.1 * span, self.total + 0.1 * span)
+        };
+        self.x0 = (center - span * 0.5).max(left).min(right - span);
+        self.x1 = self.x0 + span;
     }
 }
 
@@ -197,7 +230,7 @@ pub(crate) fn price_panel(
     pick_bar: bool,
 ) -> Option<usize> {
     let outer = ui.available_rect_before_wrap();
-    let response = ui.allocate_rect(outer, Sense::click_and_drag());
+    let area = ui.allocate_rect(outer, Sense::hover());
     let plot = Rect::from_min_max(
         outer.min,
         pos2(outer.right() - AXIS_W, outer.bottom() - AXIS_H),
@@ -206,9 +239,21 @@ pub(crate) fn price_panel(
         return None;
     }
 
+    let response = ui.interact(plot, area.id.with("plot"), Sense::click_and_drag());
+    let price_axis = Rect::from_min_max(plot.right_top(), pos2(outer.right(), plot.bottom()));
+    let time_axis = Rect::from_min_max(plot.left_bottom(), pos2(plot.right(), outer.bottom()));
+    let price_axis = ui.interact(price_axis, area.id.with("price axis"), Sense::drag());
+    let time_axis = ui.interact(time_axis, area.id.with("time axis"), Sense::drag());
+    let replay_x = model.replay_cut_x();
+    if let Some(x) = replay_x {
+        let corner = Rect::from_min_max(plot.right_bottom(), outer.right_bottom());
+        replay_follow_button(ui, corner, state, x);
+    }
+
     let before = Mapper { rect: plot, x0: state.x0, x1: state.x1, p0: state.p0, p1: state.p1 };
     let drawing_vp = !pick_bar && vp.handle_input(ui, &response, &before, model);
-    handle_input(ui, &response, plot, state, !drawing_vp, model.result.tick_size);
+    handle_input(&response, state, !drawing_vp, model.result.tick_size, replay_x);
+    handle_axis_input(&price_axis, &time_axis, plot, state, model.result.tick_size, replay_x);
     let book_visible = model.book_visible();
     let show_quotes = book_visible && (settings.show_bbo || (model.has_trade_quotes && settings.show_heat));
     let pixels = f64::from(plot.width());
@@ -269,11 +314,11 @@ pub(crate) fn price_panel(
     }
     draw_axes(&axis_painter, &painter, model, &m);
     // During a replay nothing is drawn to the right of the replay position.
-    let cut_px = model.replay_cut_x().map(|x| m.sx(x).clamp(plot.left(), plot.right()) + 1.0);
+    let cut_px = replay_x.map(|x| m.sx(x) + 1.0);
     let full_painter = painter;
     let painter = match cut_px {
         Some(px) => full_painter
-            .with_clip_rect(Rect::from_min_max(plot.min, pos2(px, plot.bottom()))),
+            .with_clip_rect(Rect::from_min_max(plot.min, pos2(px.clamp(plot.left(), plot.right()), plot.bottom()))),
         None => full_painter.clone(),
     };
     if settings.show_overlays {
@@ -316,7 +361,7 @@ pub(crate) fn price_panel(
         .map(|p| m.x_at(p.x));
     vp.draw_manual(&painter, model, &m, pointer_x);
     let painter = full_painter;
-    if let Some(px) = cut_px {
+    if let Some(px) = cut_px.filter(|px| plot.x_range().contains(*px)) {
         painter.vline(px, plot.y_range(), Stroke::new(1.0, REPLAY));
     }
     // Choosing the bar a replay starts from: highlight the bar under the pointer.
@@ -450,31 +495,30 @@ fn legend_row(
         .inner
 }
 
+fn replay_follow_button(ui: &mut egui::Ui, corner: Rect, state: &mut ChartState, x: f64) {
+    let button = egui::Button::new("▶ Follow").selected(state.follow_replay);
+    if ui.place(corner.shrink(2.0), button)
+        .on_hover_text("Follow replay · Drag the chart to explore")
+        .clicked()
+    {
+        state.follow_replay = true;
+        state.sync_replay(Some(x));
+        ui.ctx().request_repaint();
+    }
+}
+
 fn handle_input(
-    ui: &egui::Ui,
     response: &egui::Response,
-    plot: Rect,
     state: &mut ChartState,
     pan: bool,
     tick: f64,
+    replay_x: Option<f64>,
 ) {
-    let hover = response.hover_pos();
-    let (scroll, zoom) = ui.input(|i| (i.smooth_scroll_delta(), i.zoom_delta()));
-    let zoom = if zoom.is_finite() && zoom > 0.0 { f64::from(zoom) } else { 1.0 };
-    if let Some(pos) = hover.filter(|p| p.x >= plot.right() && plot.y_range().contains(p.y)) {
-        ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeVertical);
-        if scroll.y != 0.0 || zoom != 1.0 {
-            let fraction = f64::from((pos.y - plot.top()) / plot.height());
-            let factor = (-f64::from(scroll.y) * 0.0025).exp() / zoom;
-            state.zoom_price(fraction, factor, tick);
-            return;
-        }
-    }
-    let per_px = (state.x1 - state.x0) / plot.width() as f64;
+    let plot = response.rect;
     if pan && response.dragged() {
+        state.follow_replay = false;
         let delta = response.drag_delta();
-        state.x0 -= delta.x as f64 * per_px;
-        state.x1 -= delta.x as f64 * per_px;
+        pan_time(state, -delta.x, plot.width(), replay_x);
         if !state.auto_y {
             let price_per_px = (state.p1 - state.p0) / plot.height() as f64;
             state.p0 += delta.y as f64 * price_per_px;
@@ -482,28 +526,73 @@ fn handle_input(
         }
     }
     if response.double_clicked() {
+        state.follow_replay = false;
         state.fit_all();
     }
-    if let Some(pos) = hover {
+    if let Some(pos) = response.hover_pos() {
+        let (scroll, zoom) = scroll_zoom(response);
         if scroll.y != 0.0 {
-            // Wheel: zoom the time axis around the cursor.
-            let factor = (-scroll.y as f64 * 0.0025).exp();
-            let anchor = state.x0 + (pos.x - plot.left()) as f64 * per_px;
-            state.x0 = anchor - (anchor - state.x0) * factor;
-            state.x1 = anchor + (state.x1 - anchor) * factor;
+            let fraction = f64::from((pos.x - plot.left()) / plot.width());
+            state.zoom_time(fraction, (-f64::from(scroll.y) * 0.0025).exp(), replay_x);
         }
         if scroll.x != 0.0 {
-            // Shift + wheel / horizontal wheel: pan.
-            state.x0 -= scroll.x as f64 * per_px;
-            state.x1 -= scroll.x as f64 * per_px;
+            state.follow_replay = false;
+            pan_time(state, -scroll.x, plot.width(), replay_x);
         }
         if zoom != 1.0 {
-            // Ctrl + wheel / pinch: zoom the price axis around the cursor.
             let fraction = f64::from(((pos.y - plot.top()) / plot.height()).clamp(0.0, 1.0));
             state.zoom_price(fraction, 1.0 / zoom, tick);
         }
     }
-    state.clamp_x();
+}
+
+fn pan_time(state: &mut ChartState, delta: f32, width: f32, replay_x: Option<f64>) {
+    if delta != 0.0 {
+        let shift = f64::from(delta / width) * (state.x1 - state.x0);
+        state.x0 += shift;
+        state.x1 += shift;
+        state.clamp_x_with_replay_margin(replay_x.is_some());
+    }
+}
+
+fn scroll_zoom(response: &egui::Response) -> (egui::Vec2, f64) {
+    let (scroll, zoom) = response.ctx.input(|i| (i.smooth_scroll_delta(), i.zoom_delta()));
+    (scroll, if zoom.is_finite() && zoom > 0.0 { f64::from(zoom) } else { 1.0 })
+}
+
+fn handle_axis_input(
+    price_axis: &egui::Response,
+    time_axis: &egui::Response,
+    plot: Rect,
+    state: &mut ChartState,
+    tick: f64,
+    replay_x: Option<f64>,
+) {
+    if let Some((pos, factor)) = axis_zoom(price_axis) {
+        let fraction = f64::from(((pos.y - plot.top()) / plot.height()).clamp(0.0, 1.0));
+        state.zoom_price(fraction, factor, tick);
+    }
+    if let Some((pos, factor)) = axis_zoom(time_axis) {
+        let fraction = f64::from(((pos.x - plot.left()) / plot.width()).clamp(0.0, 1.0));
+        state.zoom_time(fraction, factor, replay_x);
+    }
+}
+
+fn axis_zoom(response: &egui::Response) -> Option<(Pos2, f64)> {
+    let dragging = response.dragged_by(egui::PointerButton::Primary);
+    if dragging || response.hovered() {
+        response.ctx.set_cursor_icon(egui::CursorIcon::ResizeHorizontal);
+    }
+    if dragging {
+        let delta = response.drag_delta().x;
+        let anchor = response.ctx.input(|i| i.pointer.press_origin());
+        return anchor.filter(|_| delta != 0.0).map(|pos| (pos, (f64::from(delta) / 250.0).exp()));
+    }
+    let pos = response.hover_pos()?;
+    let (scroll, zoom) = scroll_zoom(response);
+    let delta = if scroll.x.abs() > scroll.y.abs() { scroll.x } else { scroll.y };
+    (delta != 0.0 || zoom != 1.0)
+        .then(|| (pos, (-f64::from(delta) * 0.0025).exp() / zoom))
 }
 
 /// Low/high of everything price-like that is visible in `[x0, x1]`.
@@ -789,11 +878,15 @@ fn draw_bars(painter: &Painter, model: &Model, settings: &Settings, m: &Mapper) 
         return;
     }
     let half = (slot * 0.36).clamp(1.5, 30.0);
+    let tick = model.result.tick_size.abs().max(1e-9);
     for i in i0..i1 {
         let fp = &fps[i];
         let color = if fp.close >= fp.open { up } else { down };
         let center = center_px(i);
         let (xa, xb) = (center - half, center + half);
+        if settings.show_bar_value_area {
+            draw_bar_value_area(painter, m, fp, xa, xb, tick);
+        }
         // Over the heatmap a bar body is translucent, and just an outline once it is wide
         // enough that a fill would tint the book levels behind it.
         let fill_alpha = match (over_heat, xb - xa > 40.0) {
@@ -817,12 +910,35 @@ fn draw_bars(painter: &Painter, model: &Model, settings: &Settings, m: &Mapper) 
 /// Bars at least this many pixels apart are drawn as footprints (as in the web studio).
 pub(crate) const FOOTPRINT_MIN_SLOT: f32 = 32.0;
 const FOOTPRINT_TEXT: Color32 = Color32::from_rgb(225, 230, 240);
+const BAR_POC: Color32 = Color32::from_rgb(240, 200, 80);
+const BAR_VALUE_AREA: Color32 = Color32::from_rgb(110, 164, 235);
+const BAR_VALUE_AREA_FRACTION: f64 = 0.70;
+
+fn draw_bar_value_area(painter: &Painter, m: &Mapper, fp: &Footprint, left: f32, right: f32, tick: f64) {
+    let levels: Vec<_> = fp.ladder.iter().map(|level| VpLevel {
+        price: level.price,
+        buy_vol: level.buy_vol,
+        sell_vol: level.sell_vol,
+    }).collect();
+    if let Some(area) = volume_profile::value_area(&levels, BAR_VALUE_AREA_FRACTION) {
+        let top = m.sy(area.vah + tick * 0.5);
+        let bottom = m.sy(area.val - tick * 0.5).max(top + 1.0);
+        painter.rect_filled(
+            Rect::from_min_max(pos2(left, top), pos2(right, bottom)),
+            0.0,
+            with_alpha(BAR_VALUE_AREA, 45),
+        );
+        let stroke = Stroke::new(1.0, with_alpha(BAR_VALUE_AREA, 150));
+        painter.hline(left..=right, top, stroke);
+        painter.hline(left..=right, bottom, stroke);
+    }
+}
 
 /// Footprint view: per traded price level a delta profile (left of the bar's middle, green /
 /// red by sign) and a volume profile (right), the same shape at every zoom level; delta and
-/// volume numbers appear once rows and bars are big enough. A thin candle at the bar's left edge keeps open/close readable, the point
-/// of control is outlined and the bar delta is printed under the bar. Returns `false` when the
-/// visible bars carry no ladders (the caller then draws candles).
+/// volume numbers appear once rows and bars are big enough. A thin candle at the bar's left edge
+/// keeps open/close readable. POC and value area can be shown independently. Returns `false`
+/// when the visible bars carry no ladders (the caller then draws candles).
 #[allow(clippy::too_many_arguments)]
 fn draw_footprints(
     painter: &Painter,
@@ -874,10 +990,13 @@ fn draw_footprints(
             dir,
         );
 
+        if settings.show_bar_value_area {
+            draw_bar_value_area(painter, m, fp, cells_x0, cells_x0 + cells_w, tick);
+        }
         let mut poc: Option<(f64, f64)> = None;
         for lv in &fp.ladder {
             let total = lv.buy_vol + lv.sell_vol;
-            if poc.is_none_or(|(_, v)| total > v) {
+            if settings.show_bar_poc && poc.is_none_or(|(_, v)| total > v) {
                 poc = Some((lv.price, total));
             }
             let (ya, yb) = (m.sy(lv.price + tick * 0.5), m.sy(lv.price - tick * 0.5));
@@ -926,7 +1045,7 @@ fn draw_footprints(
                     pos2(cells_x0 + cells_w, m.sy(price - tick * 0.5)),
                 ),
                 0.0,
-                Stroke::new(1.0, Color32::from_rgb(240, 200, 80)),
+                Stroke::new(1.0, BAR_POC),
                 StrokeKind::Inside,
             );
         }
@@ -1527,40 +1646,168 @@ mod tests {
     use super::*;
 
     #[test]
-    fn right_axis_wheel_zooms_price_at_pointer_and_plot_wheel_zooms_time() {
+    fn chart_gestures_keep_axis_zoom_and_panning_independent() {
         let ctx = egui::Context::default();
-        let outer = Rect::from_min_size(pos2(0.0, 0.0), egui::vec2(700.0, 500.0));
+        let outer = Rect::from_min_size(pos2(0.0, 0.0), egui::vec2(600.0 + AXIS_W, 400.0 + AXIS_H));
         let plot = Rect::from_min_max(outer.min, pos2(600.0, 400.0));
         let mut state = ChartState::new(300.0, AxisMode::Time);
+        state.show_range(50.0, 150.0);
         state.p0 = 90.0;
         state.p1 = 110.0;
+        state.follow_replay = true;
+        let replay_x = Some(135.0);
         let mut frame = |events| {
             let input = egui::RawInput { screen_rect: Some(outer), events, ..Default::default() };
             let mut output = ctx.run_ui(input, |ui| {
-                let response = ui.allocate_rect(outer, Sense::click_and_drag());
-                handle_input(ui, &response, plot, &mut state, true, 0.25);
+                let area = ui.allocate_rect(outer, Sense::hover());
+                let response = ui.interact(plot, area.id.with("plot"), Sense::click_and_drag());
+                let price_axis = Rect::from_min_max(plot.right_top(), pos2(outer.right(), plot.bottom()));
+                let time_axis = Rect::from_min_max(plot.left_bottom(), pos2(plot.right(), outer.bottom()));
+                let price = ui.interact(price_axis, area.id.with("price"), Sense::drag());
+                let time = ui.interact(time_axis, area.id.with("time"), Sense::drag());
+                let corner = Rect::from_min_max(plot.right_bottom(), outer.right_bottom());
+                replay_follow_button(ui, corner, &mut state, replay_x.unwrap());
+                handle_input(&response, &mut state, true, 0.25, replay_x);
+                handle_axis_input(&price, &time, plot, &mut state, 0.25, replay_x);
             });
             output.textures_delta.clear();
-            (state.x0, state.x1, state.p0, state.p1, state.auto_y)
+            (state.x0, state.x1, state.p0, state.p1, state.auto_y, state.follow_replay)
         };
-        let wheel = || egui::Event::MouseWheel {
+        let wheel = |delta, phase| egui::Event::MouseWheel {
             unit: egui::MouseWheelUnit::Point,
-            delta: egui::vec2(0.0, 120.0),
-            phase: egui::TouchPhase::Move,
+            delta,
+            phase,
             source: egui::MouseWheelSource::Unknown,
             modifiers: egui::Modifiers::NONE,
         };
-        frame(vec![egui::Event::PointerMoved(pos2(630.0, 100.0))]);
-        let (x0, x1, low, high, auto_y) = frame(vec![wheel()]);
-        assert_eq!((x0, x1), (0.0, 300.0));
+        let move_to = |x, y| egui::Event::PointerMoved(pos2(x, y));
+        let button = |x, y, pressed| egui::Event::PointerButton {
+            pos: pos2(x, y),
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: egui::Modifiers::NONE,
+        };
+        frame(vec![move_to(650.0, 100.0)]);
+        let (x0, x1, _, high, auto_y, follow) = frame(vec![
+            wheel(egui::vec2(120.0, 0.0), egui::TouchPhase::Move),
+        ]);
+        assert_eq!((x0, x1), (50.0, 150.0));
         assert!(!auto_y);
-        assert!(high - low < 20.0);
-        assert!((high - 0.25 * (high - low) - 105.0).abs() < 1e-9);
+        assert!(follow);
+        assert!(high < 110.0);
+        frame(vec![wheel(egui::Vec2::ZERO, egui::TouchPhase::End)]);
 
-        frame(vec![egui::Event::PointerMoved(pos2(300.0, 100.0))]);
-        let (left, right, new_low, new_high, _) = frame(vec![wheel()]);
+        frame(vec![button(650.0, 100.0, true)]);
+        let (left, right, low, new_high, _, follow) = frame(vec![move_to(630.0, 100.0)]);
+        assert_eq!((left, right), (x0, x1));
+        assert!(follow);
+        assert!(new_high < high);
+        frame(vec![button(630.0, 100.0, false)]);
+
+        frame(vec![move_to(300.0, 411.0)]);
+        frame(vec![button(300.0, 411.0, true)]);
+        let (left, right, new_low, high, _, follow) = frame(vec![move_to(250.0, 411.0)]);
         assert!(right - left < x1 - x0);
-        assert_eq!((new_low, new_high), (low, high));
+        assert!((left + (right - left) * REPLAY_FRACTION - replay_x.unwrap()).abs() < 1e-9);
+        assert_eq!((new_low, high), (low, new_high));
+        assert!(follow);
+        frame(vec![button(250.0, 411.0, false)]);
+
+        frame(vec![move_to(300.0, 100.0)]);
+        frame(vec![button(300.0, 100.0, true)]);
+        let (panned_left, panned_right, .., follow) = frame(vec![move_to(260.0, 100.0)]);
+        assert!(panned_left > left && panned_right > right);
+        assert!(!follow);
+        frame(vec![button(260.0, 100.0, false)]);
+
+        let (left, right, low, high, _, follow) = frame(vec![
+            wheel(egui::vec2(0.0, 120.0), egui::TouchPhase::Move),
+        ]);
+        assert!(right - left < panned_right - panned_left);
+        assert_eq!((low, high), (new_low, new_high));
+        assert!(!follow);
+        frame(vec![wheel(egui::Vec2::ZERO, egui::TouchPhase::End)]);
+
+        frame(vec![move_to(636.0, 411.0)]);
+        frame(vec![button(636.0, 411.0, true)]);
+        let (followed_left, followed_right, .., follow) = frame(vec![button(636.0, 411.0, false)]);
+        assert!(follow);
+        assert!((followed_right - followed_left - (right - left)).abs() < 1e-9);
+        assert!((followed_left + (right - left) * REPLAY_FRACTION - replay_x.unwrap()).abs() < 1e-9);
+    }
+
+    #[test]
+    fn replay_follows_each_update_even_at_data_boundaries() {
+        let mut state = ChartState::new(300.0, AxisMode::Time);
+        state.show_range(0.0, 100.0);
+        state.follow_replay = true;
+        for x in [0.0, 0.5, 45.0, 299.5, 300.0] {
+            state.sync_replay(Some(x));
+            assert!((state.x0 + 100.0 * REPLAY_FRACTION - x).abs() < 1e-9);
+            assert!((state.x1 - state.x0 - 100.0).abs() < 1e-9);
+        }
+        state.follow_replay = false;
+        let range = (state.x0, state.x1);
+        state.sync_replay(Some(100.0));
+        assert_eq!((state.x0, state.x1), range);
+    }
+
+    #[test]
+    fn bar_value_area_and_poc_are_independent() {
+        let fp = accelerando_core::testkit::bar(0)
+            .level(99.75, 1.0, 0.0)
+            .level(100.0, 6.0, 0.0)
+            .level(100.25, 3.0, 0.0)
+            .build();
+        let result = accelerando_core::BacktestResult {
+            metrics: Default::default(),
+            trades: Vec::new(),
+            equity: Vec::new(),
+            footprints: vec![fp],
+            liquidity_heatmap: Default::default(),
+            series: Vec::new(),
+            counters: Default::default(),
+            tick_size: 0.25,
+            multiplier: 50.0,
+        };
+        let mut viewer = crate::Viewer::new(result, Default::default(), &[], None, Default::default());
+        let mut m = Mapper {
+            rect: Rect::from_min_size(Pos2::ZERO, egui::vec2(400.0, 300.0)),
+            x0: 0.0,
+            x1: viewer.model.xmap.total(),
+            p0: 99.0,
+            p1: 101.0,
+        };
+        let draw = |viewer: &crate::Viewer, m: &Mapper| {
+            let ctx = egui::Context::default();
+            let input = egui::RawInput { screen_rect: Some(m.rect), ..Default::default() };
+            let mut output = ctx.run_ui(input, |ui| {
+                draw_bars(ui.painter(), &viewer.model, &viewer.settings, m);
+            });
+            output.textures_delta.clear();
+            let mut poc = false;
+            let mut value_area = None;
+            for shape in output.shapes {
+                if let Shape::Rect(rect) = shape.shape {
+                    poc |= rect.stroke.color == BAR_POC;
+                    if rect.fill == with_alpha(BAR_VALUE_AREA, 45) {
+                        value_area = Some((rect.rect.top(), rect.rect.bottom()));
+                    }
+                }
+            }
+            (poc, value_area)
+        };
+        assert_eq!(draw(&viewer, &m), (false, None));
+        viewer.settings.show_bar_poc = true;
+        assert_eq!(draw(&viewer, &m), (true, None));
+        viewer.settings.show_bar_poc = false;
+        viewer.settings.show_bar_value_area = true;
+        let expected = (false, Some((m.sy(100.375), m.sy(99.875))));
+        assert_eq!(draw(&viewer, &m), expected);
+        viewer.settings.show_bar_poc = true;
+        assert_eq!(draw(&viewer, &m), (true, expected.1));
+        m.x1 *= 20.0; // Candles, below the footprint threshold.
+        assert_eq!(draw(&viewer, &m), expected);
     }
 
     #[test]

@@ -8,7 +8,6 @@ use std::sync::{mpsc, Arc};
 use accelerando_core::{Footprint, Level, OrderFlowEvent, Side};
 use eframe::egui;
 
-use crate::chart::ChartState;
 use crate::Model;
 
 /// One trade of the replay.
@@ -190,8 +189,6 @@ pub(crate) struct Replay {
     pub playing: bool,
     /// Replay seconds per real second.
     pub speed: f64,
-    /// Keep the replay position in view.
-    pub follow: bool,
     pub error: Option<String>,
     ticks: Vec<Tick>,
     next: usize,
@@ -206,7 +203,6 @@ impl Default for Replay {
             picking: false,
             playing: false,
             speed: 10.0,
-            follow: true,
             error: None,
             ticks: Vec::new(),
             next: 0,
@@ -314,13 +310,11 @@ impl Replay {
     pub fn update(
         &mut self,
         model: &mut Model,
-        chart: &mut ChartState,
         source: &TickSource,
         ctx: &egui::Context,
     ) {
         let Some(clock) = model.replay_clock() else { return };
         self.feed(source, ctx);
-        let before = model.replay_cut_x();
         if self.playing {
             let dt = ctx.input(|i| i.stable_dt).min(0.1) as f64;
             let mut target = clock + (dt * self.speed * 1e9) as i64;
@@ -338,14 +332,6 @@ impl Replay {
         }
         if self.loading() {
             ctx.request_repaint_after(std::time::Duration::from_millis(50));
-        }
-        // Follow: keep the replay position inside the right part of the view.
-        let after = model.replay_cut_x();
-        if let (true, Some(x)) = (self.follow && after != before, after) {
-            let span = chart.x1 - chart.x0;
-            if x > chart.x1 - span * 0.08 || x < chart.x0 {
-                chart.show_range(x - span * 0.8, x + span * 0.2);
-            }
         }
     }
 
@@ -375,7 +361,6 @@ impl Replay {
                 .max_decimals(1),
         )
         .on_hover_text("Replay seconds per real second. Quiet stretches are skipped.");
-        ui.checkbox(&mut self.follow, "Follow");
         if ui.button("⏮ Pick bar").on_hover_text("Click another bar to restart from it").clicked() {
             self.stop(model);
             self.picking = true;

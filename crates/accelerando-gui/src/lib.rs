@@ -485,6 +485,8 @@ pub(crate) struct Settings {
     pub bubble_delta: bool,
     pub bubble_transparency: u32,
     pub show_bars: bool,
+    pub show_bar_poc: bool,
+    pub show_bar_value_area: bool,
     /// Draw bars as footprints once they are wide enough.
     pub show_footprint: bool,
     pub show_trades: bool,
@@ -553,6 +555,8 @@ impl Viewer {
             bubble_delta: true,
             bubble_transparency: 41,
             show_bars: true,
+            show_bar_poc: false,
+            show_bar_value_area: false,
             show_footprint: true,
             show_trades: true,
             show_overlays: true,
@@ -903,6 +907,10 @@ impl Viewer {
                 ui.add_enabled_ui(s.show_bars, |ui| {
                     ui.checkbox(&mut s.show_footprint, "Footprint when zoomed in");
                 });
+                ui.checkbox(&mut s.show_bar_poc, "Show POC")
+                    .on_hover_text("Outline the highest-volume row in each footprint.");
+                ui.checkbox(&mut s.show_bar_value_area, "Show Value Area")
+                    .on_hover_text("Shade the price range containing at least 70% of each bar's traded volume.");
                 ui.checkbox(&mut s.show_trades, "Trades");
                 ui.checkbox(&mut s.red_up, "Red up");
 
@@ -1025,8 +1033,9 @@ impl eframe::App for Viewer {
         }
         if let Some(source) = self.ticks.clone() {
             self.replay.shortcuts(&ctx, &mut self.model);
-            self.replay.update(&mut self.model, &mut self.chart, &source, &ctx);
+            self.replay.update(&mut self.model, &source, &ctx);
         }
+        self.chart.sync_replay(self.model.replay_cut_x());
         if self.settings.show_equity && !self.model.result.equity.is_empty() {
             egui::Panel::bottom("equity")
                 .resizable(true)
@@ -1048,6 +1057,8 @@ impl eframe::App for Viewer {
             .inner;
         if let Some(index) = picked {
             self.replay.start(&mut self.model, index);
+            self.chart.follow_replay = true;
+            ctx.request_repaint();
         }
     }
 }
