@@ -30,7 +30,7 @@
 //! * checks that every value key the strategy reads is actually published;
 //! * runs a single parameter set or the `ParamSpec` grid in parallel and prints a summary table;
 //! * `--validate`: IS/OOS split, walk-forward, cost sensitivity and a random-entry baseline;
-//! * `--serve` / `--gui`: opens the web / native viewer on the (best) run;
+//! * `--gui`: opens the native viewer on the (best) run;
 //!   `--trades-json` / `--result-json` dump.
 //!
 //! Extending it without forking: [`App::mode`] adds a `--mode NAME` of your own (feature
@@ -103,7 +103,6 @@ pub struct RunOptions {
     pub validate_json: Option<PathBuf>,
     pub trades_json: Option<PathBuf>,
     pub result_json: Option<PathBuf>,
-    pub serve: bool,
     pub gui: bool,
     /// `--mode NAME`: run a mode registered with [`App::mode`] instead of a backtest.
     pub mode: Option<String>,
@@ -113,7 +112,6 @@ pub struct RunOptions {
     pub config: Option<PathBuf>,
     /// `--no-config`: ignore `accelerando.toml`.
     pub no_config: bool,
-    pub port: u16,
     pub list: bool,
 }
 
@@ -142,13 +140,11 @@ impl Default for RunOptions {
             validate_json: None,
             trades_json: None,
             result_json: None,
-            serve: false,
             gui: false,
             mode: None,
             opts: Vec::new(),
             config: None,
             no_config: false,
-            port: 8080,
             list: false,
         }
     }
@@ -189,7 +185,6 @@ validation
 output
   --trades-json PATH         all runs' trades
   --result-json PATH         full BacktestResult of the best run
-  --serve [--port P]         open the web viewer on the best run (default port 8080)
   --gui / --no-gui           open the native viewer on the best run (bar-type switch, tick replay)
   --jobs N                   worker threads (default: all cores)
 
@@ -252,14 +247,12 @@ impl RunOptions {
                 "--validate-json" => o.validate_json = Some(PathBuf::from(value(arg)?)),
                 "--trades-json" => o.trades_json = Some(PathBuf::from(value(arg)?)),
                 "--result-json" => o.result_json = Some(PathBuf::from(value(arg)?)),
-                "--serve" => o.serve = true,
                 "--gui" => o.gui = true,
                 "--no-gui" => o.gui = false,
                 "--mode" => o.mode = Some(value(arg)?),
                 "--opt" => o.opts.push(value(arg)?),
                 "--config" => o.config = Some(PathBuf::from(value(arg)?)),
                 "--no-config" => o.no_config = true,
-                "--port" => o.port = num(arg, value(arg)?)? as u16,
                 "--list" => o.list = true,
                 flag if flag.starts_with("--") => {
                     return Err(format!("unknown flag `{flag}`\n\n{HELP}"))
@@ -546,7 +539,7 @@ impl App {
         } else {
             let prepared = self.prepare(o, data_path, &reqs)?;
             prepared.data.check_values(&reqs.values)?;
-            let keep = (o.serve || o.gui) && candidates.len() == 1;
+            let keep = o.gui && candidates.len() == 1;
             let outcomes = self.run_candidates(&prepared.data, strategy, candidates, o.broker(), keep)?;
             print_table(&outcomes);
             if o.validate {
@@ -577,7 +570,7 @@ impl App {
         if let Some(path) = &o.result_json {
             write_json(path, &best.result)?;
         }
-        if o.serve || o.gui {
+        if o.gui {
             let result = if best.result.footprints.is_empty() {
                 // Grid runs drop footprints for memory; rerun the best one for the chart.
                 println!("re-running {} with chart data ...", best.label);
@@ -591,12 +584,9 @@ impl App {
             } else {
                 best.result.clone()
             };
-            if o.gui {
-                return gui::view(
-                    Arc::clone(&self.registry), o, data_path, &best.label, result, gui_events,
-                );
-            }
-            accelerando_web::serve(&result, o.port).map_err(|e| e.to_string())?;
+            return gui::view(
+                Arc::clone(&self.registry), o, data_path, &best.label, result, gui_events,
+            );
         }
         Ok(())
     }
@@ -840,7 +830,7 @@ impl App {
                     self.build_indicators(&requests)?,
                     self.build_strategy(strategy, params)?,
                     o.broker(),
-                    (o.serve || o.gui) && candidates.len() == 1,
+                    o.gui && candidates.len() == 1,
                     None,
                 )?;
                 Ok(RunOutcome {

@@ -8,9 +8,7 @@ over them, simulates fills with a next-bar-open broker, and returns a serializab
 runner, so your strategies and adapters are ordinary Rust code compiled with the framework — no
 plugin loading, no config DSL, no framework build steps.
 
-The companion `accelerando-web` crate serves a zero-build (no node, no bundler) browser workbench:
-candlestick / footprint / order-book heatmap charts, experiment comparison, and a full **manual
-bar-replay (sim-trading practice) system**.
+`accelerando-gui` provides a native desktop viewer with candlestick and footprint charts, order-book depth, and tick replay.
 
 [中文说明 / Chinese README](README_CN.md)
 
@@ -34,14 +32,13 @@ wire the pipeline directly in code.
 | --- | --- |
 | `accelerando-core` | event/footprint model, traits, engine, broker, metrics |
 | `accelerando` | facade crate that registers the built-in example adapters |
-| `accelerando-web` | browser workbench: result viewer, experiment comparison, manual bar replay |
 | `accelerando-example-sources` | example data sources: `parquet` (ATAS Replay with ZSTD support), `numcat_l2` (NumCat L2) |
 | `accelerando-example-aggregators` | example aggregators: `range`, `time` |
 | `accelerando-example-indicators` | example indicators: `technical`, `regime`, `stacked_imbalance`, `adaptive_imbalance`, `big_trades`, `economic_calendar` |
 | `accelerando-example-strategy` | example strategy: `indicator_cross` |
 | `accelerando-orderflow-features` | `trade_flow_features` indicator (causal per-bar order-flow features: delta/volume/trade-rate z-scores, delta efficiency, CVD, VWAP/range/session location, diagonal imbalances) + the shared `FeatureExtractor`, forward labels and CSV export for ML datasets |
 | `accelerando-derive` | `#[derive(Configurable)]`: declare a component's parameters once on the struct |
-| `accelerando-app` | batteries-included runner: CLI, prepared-data cache, parallel grids, `--validate` reports, web viewer |
+| `accelerando-app` | batteries-included runner: CLI, prepared-data cache, parallel grids, `--validate` reports, native viewer |
 | `accelerando-hyperopt` | library-only parameter search primitives |
 | `accelerando-ml` | factor mining: PerpetualBooster (GBM) training, Spearman IC, factor-effectiveness reports |
 
@@ -57,7 +54,7 @@ Depend on the crates by path from your runner project:
 [dependencies]
 accelerando      = { path = "../accelerando/crates/accelerando" }
 accelerando-core = { path = "../accelerando/crates/accelerando-core" }
-accelerando-web  = { path = "../accelerando/crates/accelerando-web" }
+accelerando-gui  = { path = "../accelerando/crates/accelerando-gui" }
 ```
 
 Build a pipeline and run it:
@@ -85,7 +82,7 @@ fn main() {
             slippage_ticks: 1.0,
             starting_equity: 100_000.0,
         },
-        keep_footprints: true,        // required for charting in the web viewer
+        keep_footprints: true,        // required for charting in the native viewer
         keep_liquidity_heatmap: false, // enable to render the L2 order-book heatmap
     };
 
@@ -93,7 +90,7 @@ fn main() {
     println!("net pnl: {:.2}", result.metrics.net_pnl);
 
     // one-call read-only browser viewer
-    accelerando_web::serve(&result, 8080).unwrap();
+    accelerando_gui::view(result, Default::default()).unwrap();
 }
 ```
 
@@ -146,7 +143,7 @@ fn main() {                                            // 4
 ```
 
 ```text
-cargo run --release -- data.parquet --strategy my_strategy --param stop_ticks=12 --serve
+cargo run --release -- data.parquet --strategy my_strategy --param stop_ticks=12 --gui
 cargo run --release -- data.parquet --strategy my_strategy --grid --max-evals 200 --validate
 cargo run --release -- --list
 ```
@@ -183,7 +180,7 @@ For large files, `--from 2026-09-02 --to 2026-09-03` (UTC; also `2026-09-02T13:3
    published and lists the keys that are), and the bar type it was designed for.
    `fp.value(key)` / `fp.tag(key)` / `fp.eastern_day_minute()` are shorthand accessors.
 4. **`accelerando-app`** - `App` handles data -> cached footprints -> parallel runs -> table ->
-   web viewer / JSON dumps. `--validate` adds an IS/OOS split (the IS winner's OOS result and the
+   native viewer / JSON dumps. `--validate` adds an IS/OOS split (the IS winner's OOS result and the
    IS->OOS rank correlation), walk-forward selection with `--grid`, slippage sensitivity, and a
    random-entry baseline matched on trade count / holding time / session minutes.
 
@@ -251,7 +248,7 @@ Parameter validation is strict: `build` panics on unknown param names or illegal
   resting limits and fill exactly at the target. Tick brackets are anchored on the actual
   (slipped) entry fill, like an ATM bracket.
 - **Line outputs use series**: `output.visuals.series("vwap", v)` / `series_colored` store one series per run
-  in `BacktestResult.series`; the studio renders them as polylines with a legend grouped by id
+  in `BacktestResult.series`; the GUI renders them as polylines with a legend grouped by id
   prefix. Do not push a `Plot::Line` per bar.
 - **Trade labels are atomic**: `.tagged("setup text")` is part of the `EntryIntent`, so metadata
   cannot accidentally attach to a different later order.
@@ -261,73 +258,9 @@ Parameter validation is strict: `build` panics on unknown param names or illegal
   (t-statistic-like, not annualized). It reflects both per-trade quality and trade count; a
   low-frequency strategy cannot reach a high value by construction.
 
-## Web workbench (`accelerando-web`)
+## Chart overlays in the native viewer
 
-Two entry points:
-
-- `serve(&result, port)` — simplest: read-only viewer for one `BacktestResult`.
-- `Studio` builder — chain on whichever capabilities you need:
-
-```rust
-accelerando_web::Studio::new()
-    .runs(summaries, |id| load_result(id))   // experiment index + lazily loaded run charts
-    .heatmap(|query| heatmap_json(query))    // optional: windowed order-book heatmap API
-    .annotations(annotation_config)          // optional: chart annotations persisted to JSONL
-    .replay(replay_manager)                  // optional: manual bar replay
-    .serve(port)?;
-```
-
-`Studio::experiment(experiment).serve(port)` is a shortcut for a complete in-memory
-`ExperimentResult`. The landing page has two tabs — Manual replay and Quant backtests — and the
-replay tab hides itself when replay is not enabled.
-
-Chart page features: candlestick / footprint / order-book-heatmap modes with TradingView-style
-interaction (wheel zoom, axis-drag scaling, double-click to re-fit, crosshair); drawing tools
-(horizontal line, rectangle, fixed-range volume profile, session/weekly/anchored VWAP) persisted
-per run in localStorage; ATAS-style stacked-imbalance zone bands that extend right until a close
-breaks through them.
-
-### Manual bar replay
-
-Construct a `ReplayManager` and hand it to the Studio:
-
-```rust
-use std::sync::Arc;
-use accelerando_web::ReplayManager;
-
-let replay = ReplayManager::new(Arc::new(prepared), "ES 2025-06 range30", "./replay-records");
-```
-
-- **Stepping**: `→` next bar, `Shift+→` +5, skip N, go-to time; "stop on fill" pauses a jump on
-  the bar where a fill/stop/target lands.
-- **Orders**: market buttons; space + left/right click places limit or breakout orders; TP/SL are
-  dragged out from the entry-line label (TradingView-style), can cross entry for break-even /
-  trailing, labels show tick distance and expected PnL.
-- **Positions**: scale-in (average-price merge), partial close, reversal; one working order
-  allowed alongside a position.
-- **Undo**: every action (including each bar of a multi-bar jump) snapshots; `←` steps back
-  (20k-step cap, cleared on restart).
-- **Recording**: every step is written atomically to `record_dir/<session>.json` (progress,
-  position, trades, equity, full event log); sessions auto-resume after a server restart. Records
-  carry a data fingerprint (first bar's close timestamp) — restarting with different data refuses
-  to resume and flags "data mismatch" in the index.
-- **Costs**: commission/slippage/starting equity are per-session and editable mid-session
-  (affects subsequent fills only).
-
-Replay HTTP API (all under the same server):
-
-| method & path | purpose |
-| --- | --- |
-| `POST /api/replay/new` | create session; body may set `start_bar`/`random_start`/`warmup_bars`/`starting_equity`/`commission_per_contract`/`slippage_ticks` |
-| `GET /api/replay/sessions` | list records (with compatibility flag) |
-| `POST /api/replay/delete?id=` | delete a record |
-| `GET /api/replay/state?id=&since_fp=&since_eq=` | incremental state (only new bars / equity points) |
-| `POST /api/replay/step?id=` | advance: `{count}` or `{to_ts_ms}`; `stop_on_event` controls pausing |
-| `POST /api/replay/back?id=` | undo `{count}` steps |
-| `POST /api/replay/order?id=` | place order: `{dir, order_type: market/limit/breakout, qty, entry_price?, stop?, target?}` |
-| `POST /api/replay/update?id=` | modify order/protection: `{scope: open/pending, stop?, target?, clear_stop?, clear_target?, entry_price?, order_type?}` |
-| `POST /api/replay/cancel?id=` / `flatten?id=` | cancel order / close everything |
-| `POST /api/replay/config?id=` | change commission/slippage |
+Open the result with `--gui`. In an indicator's `on_footprint`, push a `Plot` to `fp.plots`. In a strategy, use `out.visuals.push(plot)`. The viewer connects `Plot::Line` points with the same `id` and also supports markers, segments, price boxes and volume profiles.
 
 ## Hyperopt
 
@@ -394,13 +327,9 @@ applications depending on `accelerando-ml` need the same entry in their own `.ca
 
 ```bash
 cargo build                            # whole workspace
-cargo test -p accelerando-web          # replay engine unit tests
+cargo test -p accelerando-gui
 cargo test -p accelerando-ml           # factor evaluation tests (incl. planted-signal end-to-end)
-cargo run -p accelerando-web --example replay_smoke [port]   # synthetic-data smoke server (default 18973)
 ```
-
-The frontend has no build step: `studio.html` / `experiment.html` are embedded in the binary;
-edit and recompile.
 
 ## License
 

@@ -97,7 +97,6 @@ mod tests {
             strategy = "s"
             slippage_ticks = 2
             gui = true
-            serve = false
             cache = false
             indicator = ["a", "b:k=1"]
             [params]
@@ -119,7 +118,6 @@ mod tests {
         ] {
             assert!(joined.contains(part), "{part} missing from {joined}");
         }
-        assert!(!joined.contains("serve"));
         assert!(args_from_str("params = 3").is_err());
     }
 }

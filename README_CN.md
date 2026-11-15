@@ -7,8 +7,7 @@ Accelerando 把逐笔订单流数据聚合成 footprint（足迹图）K 线，�
 资金曲线、图表数据）。它以**库**的形式嵌入到你自己的 Rust 回测程序里——策略和适配器就是普通的
 Rust 代码，和框架一起编译，没有插件加载、没有配置 DSL、没有额外构建步骤。
 
-配套的 `accelerando-web` 提供一个零构建（无 node、无打包）的浏览器工作台：K 线 / 足迹图 /
-订单簿热力图、实验参数对比，以及一套完整的**手动 bar 回放（模拟盘练习）**系统。
+`accelerando-gui` 提供原生桌面图表，支持 K 线、足迹图、订单簿热力图及逐笔回放。
 
 [English README](README.md)
 
@@ -31,13 +30,12 @@ BacktestResult <- Broker <- Strategy <- Indicator 逐层增强
 | --- | --- |
 | `accelerando-core` | 事件/footprint 模型、trait、回测引擎、Broker、指标统计 |
 | `accelerando` | 门面 crate，注册内置示例适配器 |
-| `accelerando-web` | 浏览器工作台：结果查看、实验对比、手动 bar 回放 |
 | `accelerando-example-sources` | 示例数据源 `parquet`（ATAS Replay，支持 ZSTD）和 `numcat_l2`（NumCat 二级行情） |
 | `accelerando-example-aggregators` | 示例聚合器：`range`、`time` |
 | `accelerando-example-indicators` | 示例指标：`technical`、`regime`、`stacked_imbalance`、`adaptive_imbalance`、`big_trades`、`economic_calendar` |
 | `accelerando-example-strategy` | 示例策略：`indicator_cross` |
 | `accelerando-derive` | `#[derive(Configurable)]`：在结构体上一次性声明组件参数 |
-| `accelerando-app` | 开箱即用的 runner：命令行、预处理缓存、并行网格、`--validate` 验证报告、Web 查看 |
+| `accelerando-app` | 开箱即用的 runner：命令行、预处理缓存、并行网格、`--validate` 验证报告、桌面查看器 |
 | `accelerando-hyperopt` | 纯库形式的参数搜索原语 |
 | `accelerando-ml` | 因子挖掘：PerpetualBooster（GBM）训练、Spearman IC、因子有效性报告 |
 
@@ -52,7 +50,7 @@ BacktestResult <- Broker <- Strategy <- Indicator 逐层增强
 [dependencies]
 accelerando      = { path = "../accelerando/crates/accelerando" }
 accelerando-core = { path = "../accelerando/crates/accelerando-core" }
-accelerando-web  = { path = "../accelerando/crates/accelerando-web" }
+accelerando-gui  = { path = "../accelerando/crates/accelerando-gui" }
 ```
 
 组装管线并运行：
@@ -80,7 +78,7 @@ fn main() {
             slippage_ticks: 1.0,
             starting_equity: 100_000.0,
         },
-        keep_footprints: true,         // Web 图表渲染需要
+        keep_footprints: true,         // 桌面图表渲染需要
         keep_liquidity_heatmap: false, // 需要 L2 订单簿热力图时打开
     };
 
@@ -88,7 +86,7 @@ fn main() {
     println!("net pnl: {:.2}", result.metrics.net_pnl);
 
     // 一行代码起只读浏览器查看页
-    accelerando_web::serve(&result, 8080).unwrap();
+    accelerando_gui::view(result, Default::default()).unwrap();
 }
 ```
 
@@ -141,7 +139,7 @@ fn main() {                                            // 4
 ```
 
 ```text
-cargo run --release -- data.parquet --strategy my_strategy --param stop_ticks=12 --serve
+cargo run --release -- data.parquet --strategy my_strategy --param stop_ticks=12 --gui
 cargo run --release -- data.parquet --strategy my_strategy --grid --max-evals 200 --validate
 cargo run --release -- --list
 ```
@@ -178,7 +176,7 @@ cargo run --release -- --list
 3. **`Strategy::requirements()`**：声明要运行的指标（`IndicatorRequest::new("big_trades").param("k", v)`）、
    会读取的 `Footprint::values` 键（若某个键从未发布，runner 直接报错并列出已发布的键）、
    以及策略设计时的 K 线类型。`fp.value(key)` / `fp.tag(key)` / `fp.eastern_day_minute()` 是便捷读取。
-4. **`accelerando-app`**：`App` 负责 数据 -> 缓存的 footprints -> 并行回测 -> 汇总表 -> Web 查看 /
+4. **`accelerando-app`**：`App` 负责 数据 -> 缓存的 footprints -> 并行回测 -> 汇总表 -> 桌面查看器 /
    JSON 导出。`--validate` 额外输出：样本内/样本外切分（样本内最优者的样本外结果、IS->OOS 秩相关）、
    配合 `--grid` 的 walk-forward 选参、滑点敏感性，以及按交易笔数/持仓时长/时段分钟匹配的随机入场基线。
 
@@ -242,7 +240,7 @@ let strategy = registry.build_strategy("my_strategy", &Params::default()).unwrap
   市价入场/平仓，以及**被触发的止损**（止损触发后即市价单）；止盈是挂单限价，按止盈价原价成交。
   tick 止损止盈以实际（含滑点）入场成交价为锚，与 ATM 下单一致。
 - **线型输出用 series**：`output.visuals.series("vwap", v)` / `series_colored` 每 run 存一份
-  `BacktestResult.series`，studio 自动连线渲染（legend 按 id 前缀分组开关），别再每根 bar
+  `BacktestResult.series`，GUI 自动连线渲染（图例按 id 前缀分组开关），别再每根 bar
   push `Plot::Line`。
 - **trade 标签原子化**：标签通过 `EntryIntent::tagged("特征文本")` 与订单一起提交，不会因
   调用顺序错误附着到之后的其他订单。
@@ -251,68 +249,9 @@ let strategy = registry.build_strategy("my_strategy", &Params::default()).unwrap
 - **Sharpe 口径**：metrics 里的 sharpe 是逐 bar equity 收益的 `均值/标准差×√N`（t 统计式，
   不年化），它同时反映单笔质量和交易次数，笔数少的策略天然到不了高 Sharpe。
 
-## 浏览器工作台（accelerando-web）
+## 在桌面查看器上绘图
 
-两个服务入口，按需选一个：
-
-- `serve(&result, port)` —— 只读查看单个 `BacktestResult`，最简单。
-- `Studio` builder —— 有什么能力就链上什么：
-
-```rust
-accelerando_web::Studio::new()
-    .runs(summaries, |id| load_result(id))   // 实验对比 + 惰性加载结果
-    .heatmap(|query| heatmap_json(query))    // 可选：窗口化订单簿热力图
-    .annotations(annotation_config)          // 可选：图表标注（JSONL 持久化）
-    .replay(replay_manager)                  // 可选：手动 bar 回放
-    .serve(port)?;
-```
-
-内存内的完整实验可用快捷构造 `Studio::experiment(experiment).serve(port)`。首页是两个标签页：
-Manual replay（手动回放）与 Quant backtests（量化回测参数树）；replay 未启用时手动页签自动隐藏。
-
-图表页功能：K 线 / 足迹图 / 订单簿热力图三种模式；TradingView 式交互（滚轮缩放、拖轴缩放、
-双击价格轴恢复自适应、十字线）；画图工具（横线 H、矩形 R、固定区间成交量分布 VP、
-日内/每周/锚定 VWAP）按 run 存 localStorage 刷新不丢；ATAS 风格 stacked-imbalance 失衡区域带，
-自动向右延伸到某根 K 线收盘穿透为止。
-
-### 手动 bar 回放（ReplayManager）
-
-构造 `ReplayManager` 传给 Studio 即可：
-
-```rust
-use std::sync::Arc;
-use accelerando_web::ReplayManager;
-
-let replay = ReplayManager::new(Arc::new(prepared), "ES 2025-06 range30", "./replay-records");
-```
-
-- **走盘**：`→` 下一根、`Shift+→` +5、Skip N、Go-to 时间；"stop on fill" 勾选后跳跃在
-  成交/止损/止盈的那根 bar 自动暂停。
-- **下单**：市价按钮（Buy/Sell Mkt）；空格 + 左键买/右键卖挂限价或突破单；TP/SL 从入场线标签
-  上**拖出来**才生成（TradingView 风格），可移过入场价做保本/移损，线上标签显示 tick 距离和
-  预期盈亏，`×` 平仓/撤单/移除保护。
-- **仓位**：支持加仓（均价合并）、部分平仓、反手；持仓同时允许一张挂单。
-- **回退**：每个动作（含多 bar 跳跃的每一根）都有撤销快照，`←` 逐步回退（上限 2 万步，
-  重启后清空）。
-- **记录**：每一步原子写入 `record_dir/<会话id>.json`（进度、持仓、逐笔成交、资金曲线、完整
-  事件日志）；服务重启后同一 URL 自动恢复；记录带**数据指纹**（首根 bar 收盘时间戳），
-  换数据启动时拒绝续玩、首页列表标红 "data mismatch"。
-- **费用**：手续费/滑点/初始资金按会话配置，可中途修改（只影响之后的成交）。
-
-### 回放 HTTP API
-
-| 方法 路径 | 说明 |
-| --- | --- |
-| `POST /api/replay/new` | 建会话；body 可含 `start_bar`/`random_start`/`warmup_bars`/`starting_equity`/`commission_per_contract`/`slippage_ticks` |
-| `GET /api/replay/sessions` | 列出全部记录（含 compatible 标记） |
-| `POST /api/replay/delete?id=` | 删除记录 |
-| `GET /api/replay/state?id=&since_fp=&since_eq=` | 增量取状态（只传新 bar/新 equity 点） |
-| `POST /api/replay/step?id=` | 前进：`{count}` 或 `{to_ts_ms}`，`stop_on_event` 控制暂停 |
-| `POST /api/replay/back?id=` | 回退 `{count}` 步 |
-| `POST /api/replay/order?id=` | 下单：`{dir, order_type: market/limit/breakout, qty, entry_price?, stop?, target?}` |
-| `POST /api/replay/update?id=` | 改单/改保护：`{scope: open/pending, stop?, target?, clear_stop?, clear_target?, entry_price?, order_type?}` |
-| `POST /api/replay/cancel?id=` / `flatten?id=` | 撤单 / 全平 |
-| `POST /api/replay/config?id=` | 改手续费/滑点 |
+通过 `--gui` 打开回测图表。在指标的 `on_footprint` 中把 `Plot` 加入 `fp.plots`，或在策略中调用 `out.visuals.push(plot)`。相同 `id` 的 `Plot::Line` 点会连成一条线。GUI 也支持标记、线段、价格区间和成交量分布。
 
 ## 超参搜索（accelerando-hyperopt）
 
@@ -375,12 +314,9 @@ stable。本工作区 `.cargo/config.toml` 里的 `RUSTC_BOOTSTRAP = "perpetual"
 
 ```bash
 cargo build                            # 整个工作区
-cargo test -p accelerando-web          # 回放引擎单元测试
+cargo test -p accelerando-gui
 cargo test -p accelerando-ml           # 因子评估单元测试（含植入信号端到端验证）
-cargo run -p accelerando-web --example replay_smoke [port]   # 合成数据冒烟服务器（默认 18973）
 ```
-
-前端无构建步骤：`studio.html` / `experiment.html` 直接嵌入二进制，改完重新编译即可生效。
 
 ## 许可
 

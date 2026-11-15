@@ -15,9 +15,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<String> = env::args().collect();
 
     let mut path = "data/numcat_688184_2months_cached.json".to_string();
-    let mut port = 8080u16;
-    // Default: native egui window. `--web` serves the browser viewer on `--port` instead.
-    let mut web = false;
     // `--span <secs>` opens the window zoomed in on the last N seconds.
     let mut span: Option<f64> = None;
 
@@ -30,13 +27,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     i += 1;
                 }
             }
-            "--port" => {
-                if i + 1 < args.len() {
-                    port = args[i + 1].parse().unwrap_or(8080);
-                    i += 1;
-                }
-            }
-            "--web" => web = true,
             "--span" => {
                 if i + 1 < args.len() {
                     span = args[i + 1].parse().ok();
@@ -89,7 +79,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         strategy,
         broker_cfg: BrokerConfig::default(),
         keep_footprints: true,
-        keep_liquidity_heatmap: web,
+        keep_liquidity_heatmap: false,
     };
 
     println!("Running footprint engine over NumCat L2 events...");
@@ -101,27 +91,22 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         result.trades.len()
     );
 
-    if web {
-        println!("Starting web UI server at http://localhost:{port} ...");
-        accelerando_web::serve(&result, port)?;
-    } else {
-        println!("Loading event-time depth for the native viewer...");
-        let (trades, depth) = accelerando_core::prepare_market_history(
-            Box::new(NumCatL2Source::from_params(&src_params)),
-        );
-        accelerando_gui::view_with_market_history(
-            result,
-            accelerando_gui::ViewerOptions {
-                title: format!("Accelerando — {path}"),
-                utc_offset_hours: Some(8.0),
-                red_up: true,
-                initial_span_secs: span,
-                ..Default::default()
-            },
-            trades.ok().map(std::sync::Arc::new),
-            depth,
-        )?;
-    }
+    println!("Loading event-time depth for the native viewer...");
+    let (trades, depth) = accelerando_core::prepare_market_history(
+        Box::new(NumCatL2Source::from_params(&src_params)),
+    );
+    accelerando_gui::view_with_market_history(
+        result,
+        accelerando_gui::ViewerOptions {
+            title: format!("Accelerando — {path}"),
+            utc_offset_hours: Some(8.0),
+            red_up: true,
+            initial_span_secs: span,
+            ..Default::default()
+        },
+        trades.ok().map(std::sync::Arc::new),
+        depth,
+    )?;
 
     Ok(())
 }

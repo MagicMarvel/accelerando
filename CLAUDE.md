@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with th
 
 Accelerando is a high-speed, pluggable **footprint backtesting library** in Rust. It streams an
 order-flow feed into footprints, runs causal indicators and strategies over them, simulates fills,
-reports metrics, and exposes library primitives for parameter search, factor mining and web result
+reports metrics, and exposes library primitives for parameter search, factor mining and desktop result
 viewing.
 
 Downstream users create their own small runner binary so custom strategies, indicators and data
@@ -20,11 +20,10 @@ cargo build --release            # optimized (LTO, codegen-units=1, panic=abort)
 cargo build -p accelerando-core  # one crate
 ```
 
-Unit tests exist where behavior is self-contained: `cargo test -p accelerando-web` (replay engine),
+Unit tests exist where behavior is self-contained:
 `cargo test -p accelerando-gui` (time axis, 1s grid, smoothing, raster) and `cargo test -p accelerando-ml` (factor evaluation, incl. planted-signal end-to-end). For
 engine/indicator/strategy behavior, build a downstream runner that depends on these crates and
-exercises `run_backtest` with known data. `cargo run -p accelerando-web --example replay_smoke`
-serves a synthetic-data studio for manual checks.
+exercises `run_backtest` with known data.
 
 ## Architecture
 
@@ -71,17 +70,6 @@ Pipeline assembly lives in the embedding application:
 - `Trade.pnl` includes entry + exit commission (equity already did). Capped hyperopt grids are
   sampled evenly over the full cartesian product (`grid_size` reports the full size).
 
-### Web viewing (`accelerando-web`)
-
-- `accelerando_web::serve(&result, port)` — one-call read-only viewer for a single
-  `BacktestResult`.
-- `accelerando_web::Studio` — builder for a fuller workbench: `.runs(summaries, loader)` for an
-  experiment index with lazily loaded run charts, `.heatmap(f)` to route `/api/heatmap?<query>`
-  to the host app, `.annotations(cfg)` for labeled price/time boxes persisted to JSONL, and
-  `.replay(ReplayManager)` for interactive manual bar replay at `/replay`; then `.serve(port)`.
-  `Studio::experiment(exp)` is a convenience for a complete in-memory `ExperimentResult`.
-- The HTML is embedded (`studio.html`, `experiment.html`) — no node, no build step.
-
 ### Native viewing (`accelerando-gui`)
 
 - `accelerando_gui::view(result, ViewerOptions { .. })` — native egui/eframe window for one
@@ -99,8 +87,6 @@ Pipeline assembly lives in the embedding application:
   strategy's own bars) are mapped by timestamp; the backtest is not rerun. `display_bars` opens
   on a given type. `VolumeAggregator` ("volume", param `volume`) lives in
   `accelerando-example-aggregators`.
-  It does not cover the experiment index, annotations or manual replay — those stay in
-  `accelerando-web`.
 - `data.rs` is egui-free and unit-tested: `TimeAxis` (closed-market gaps removed, x in seconds),
   `BookGrid` (snapshots forward-filled to one cell per second, BBO derived from the levels),
   `smooth` (zero-lag, i.e. centered — display only, never feed it to a strategy), `rasterize`.
@@ -115,7 +101,7 @@ Pipeline assembly lives in the embedding application:
   temporary directory. ESU6 (5 weeks, 234 M depth changes): 1.7 GB peak instead of 6.3 GB.
   `view_with_market_history` still accepts a plain `DepthHistory`. Strategies never read it.
 - `cargo run --release -p accelerando --bin serve_numcat` opens it on the NumCat sample
-  (`--span <secs>` initial zoom, `--web` for the old browser viewer).
+  (`--span <secs>` initial zoom).
 
 ### Factor mining (`accelerando-ml`)
 
@@ -142,7 +128,7 @@ OOS R² and hit rate.
 - Timestamps are nanosecond `i64` values. Browser display code may lose sub-millisecond precision
   when converting to JavaScript numbers; do not rely on exact nanosecond equality in frontend code.
 - For charting, `BacktestResult.footprints` must be populated. Set `Pipeline.keep_footprints = true`
-  in the runner that generates a result for the web viewer (set it `false` for large search jobs to
+  in the runner that generates a result for the native viewer (set it `false` for large search jobs to
   save memory).
 
 ## Verification
@@ -151,7 +137,7 @@ OOS R² and hit rate.
 - Verify downstream integration with a runner crate such as `accel-consumer`.
 - For indicator/strategy changes, run a downstream runner on a known Parquet sample and compare metrics,
   trades and rendered plots.
-- For viewer changes, serve a `BacktestResult` from a runner and open the localhost URL.
+- For viewer changes, open a `BacktestResult` with `accelerando_gui::view` or run with `--gui`.
 
 ## Roadmap
 

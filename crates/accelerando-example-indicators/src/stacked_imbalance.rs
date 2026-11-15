@@ -48,7 +48,7 @@ struct Stack {
 /// plus an absolute aggressive-volume filter (fixed, or a rolling percentile of recent
 /// per-level aggressive volumes). Runs of `min_stack`+ adjacent same-direction imbalances
 /// merge into one stacked-imbalance zone, published as values and as `PriceBox` plots
-/// (group `imbalance`) that the web studio extends right until price closes through them.
+/// (group `imbalance`) for display on the price chart.
 #[derive(Configurable)]
 #[configurable(init = Self::init)]
 pub struct StackedImbalance {

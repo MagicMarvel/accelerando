@@ -3,12 +3,11 @@ name = "accelerando-app"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "Batteries-included runner for Accelerando: CLI, prepared-data cache, parallel grids, validation reports and the web viewer."
+description = "Batteries-included runner for Accelerando: CLI, prepared-data cache, parallel grids, validation reports and the native viewer."
 
 [dependencies]
 accelerando = { workspace = true }
 accelerando-core = { workspace = true }
-accelerando-web = { workspace = true }
 accelerando-gui = { workspace = true, optional = true }
 rayon = { workspace = true }
 serde = { workspace = true }

@@ -65,7 +65,7 @@ pub enum Plot {
         text_dx: Option<f64>,
         #[serde(default)]
         text_dy: Option<f64>,
-        /// Overlay group this marker belongs to. The web viewer renders one toggle per distinct
+        /// Overlay group this marker belongs to. The native viewer renders one toggle per distinct
         /// group so an indicator/strategy's markers can be shown or hidden independently.
         #[serde(default)]
         group: Option<String>,
@@ -87,7 +87,7 @@ pub enum Plot {
         group: Option<String>,
     },
     /// ATAS-style volume profile histogram. Left side = delta, right side = total volume.
-    /// `id` groups bars into one profile; the web viewer renders only the last occurrence per id.
+    /// `id` groups bars into one profile; the native viewer renders only the last occurrence per id.
     /// `span` = how many bars back this profile covers (for background shading).
     VolumeProfile {
         id: String,

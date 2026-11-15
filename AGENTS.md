@@ -19,25 +19,21 @@ cargo build -p accelerando-core  # one crate
 # run a backtest from a config -> writes result.json + prints metrics
 ./target/release/accelerando run --config examples/run.toml
 
-# read-only dashboard for a saved result.json
-./target/release/accelerando serve --result result.json --port 8080
-
-# interactive studio: edit params in the page, run, watch progress, save/load runs
-./target/release/accelerando studio --config examples/run.toml --port 8080   # saves under ./runs/
+# native viewer on the NumCat sample
+cargo run --release -p accelerando --bin serve_numcat
 
 # parallel parameter search (objective: sharpe|sortino|pnl|return|profit_factor)
 ./target/release/accelerando hyperopt --config examples/run.toml --algo random --evals 64 --jobs 8
 ```
 
 There are **no unit tests** in the tree. Correctness is verified two ways (see Verification below):
-a numeric port-check of `whitesnake` against the original detector, and driving the studio HTTP API.
+a numeric port-check of `whitesnake` against the original detector, and opening the native viewer.
 
 ## Architecture — the big picture
 
 The whole framework hangs off one idea: **every pluggable stage is `Configurable`** — it advertises
 a `ParamSpec` (declared tunable parameters + defaults) and is built from a `Params` map. The same
-definitions therefore drive both a single run and the hyperopt search space, and the studio's config
-form is auto-generated from them. Read these in order to understand the system:
+definitions therefore drive both a single run and the hyperopt search space. Read these in order to understand the system:
 
 1. `accelerando-core/src/params.rs` — `Params`, `ParamSpec`, `Configurable`. **This is the spine.**
    Understand it and the rest follows.
@@ -61,17 +57,15 @@ Pipeline assembly and registries live above core:
   functions in its `lib.rs`: `build(name, &Params) -> Box<dyn _>`, `spec(name) -> Option<ParamSpec>`,
   `list() -> &[&str]`. **Adding an adapter = implement the trait + `Configurable`, then add one line
   to each of those three functions.** It then appears automatically in the CLI, the hyperopt search
-  space, and the studio form — no other wiring.
+  space.
 - `accelerando-cli/src/pipeline.rs` merges each stage's `ParamSpec` into a namespaced `SearchSpace`
   (`source.*`, `aggregator.*`, `indicator.<i>.*`, `strategy.*`) and builds a `Pipeline` from a config
   plus optional sampled overrides routed back by that namespace prefix.
 - `accelerando-hyperopt/src/lib.rs` is decoupled from concrete adapters: it knows only a
   `SearchSpace` and an evaluator closure (supplied by the CLI). `BatchEvaluator` is the CPU/GPU seam —
   `CpuEvaluator` uses rayon today; a `wgpu` impl can satisfy the same trait later.
-- `accelerando-cli/src/studio.rs` + `accelerando-web/src/studio.html` — the interactive studio. The
-  server runs the backtest on a worker thread while the request loop keeps answering `/api/progress`;
-  progress is **bytes-read from the input feed** (via `ProgressHandle` + `DataSource::set_progress`,
-  implemented in `bookmap_csv.rs`). Runs persist to `runs/<name>/{config,result}.json`.
+- `accelerando-gui` displays a `BacktestResult` in a native window. The runner in
+  `accelerando-app` opens it with `--gui`.
 
 ## Conventions & gotchas
 
@@ -80,9 +74,7 @@ Pipeline assembly and registries live above core:
   intentionally omitted because it peeks at future bars. Don't reintroduce it into the indicator.
 - **Port-checking whitesnake:** the on-disk `price-shape-regime/target/release/*.exe` may be **stale**
   (older than its `src/main.rs`). Always `cargo build --release` the original first, then diff.
-- **`panic = "abort"` in release** → `catch_unwind` cannot recover. The studio therefore *pre-validates*
-  inputs (e.g. checks the data file exists before spawning a job). Keep new server entry points
-  validating rather than relying on unwinding.
+- **`panic = "abort"` in release** → `catch_unwind` cannot recover. Validate inputs before running.
 - **Bookmap feed:** `T` rows are `T,ts_ns,id,price,size,side,flag`; the aggressor side is column 5
   (0-indexed), value `1`/`2`. Which is the buy aggressor is feed-dependent — exposed as the
   `buy_aggressor_code` param (default 2), flip without code changes. The `c` row carries `tick_size`
@@ -96,9 +88,7 @@ Pipeline assembly and registries live above core:
 - whitesnake parity: build the original detector, run it and `accelerando run` on the same CSV slice,
   diff the per-bar regime labels (a faithful state matches 457/457 on the ES slice; the final
   possibly-partial bar may differ).
-- studio/server: drive the JSON API with curl (`/api/schema`, POST `/api/backtest`, poll
-  `/api/progress`, GET `/api/result`, `/api/save`, `/api/runs`, `/api/load`). Browser automation tools
-  in this environment cannot reach the host's `localhost`, but `curl` can.
+- native viewer: run a backtest with `--gui` to inspect its chart and overlays.
 
 ## Roadmap (where to extend)
 
