@@ -11,7 +11,7 @@ use crate::big_trades::{BigTradeSettings, MarkerShape};
 use crate::liquidity_colors::{self, ColorScale};
 use crate::market_history::{self, Viewport};
 use crate::vp::VpTool;
-use crate::{Model, Settings};
+use crate::{ChartMode, Model, Settings};
 
 const AXIS_W: f32 = 72.0;
 const AXIS_H: f32 = 22.0;
@@ -258,19 +258,20 @@ pub(crate) fn price_panel(
     handle_input(&response, state, !drawing_vp, model.result.tick_size, replay_x);
     handle_axis_input(&price_axis, &time_axis, plot, state, model.result.tick_size, replay_x);
     let book_visible = model.book_visible();
-    let show_quotes = book_visible && (settings.show_bbo || (model.has_trade_quotes && settings.show_heat));
+    let show_quotes = book_visible && settings.show_bbo;
+    let show_bubbles = book_visible && settings.show_trade_bubbles;
+    let heat_visible = book_visible && settings.mode == ChartMode::Heatmap && settings.show_heat;
     let pixels = f64::from(plot.width());
     let seconds_per_pixel = (state.x1 - state.x0) / pixels;
     let event_time = seconds_per_pixel < 1.0 && (model.tape.is_some() || !model.depth.is_empty());
-    let columns = if show_quotes || (book_visible && settings.show_heat && state.auto_y) {
-        let bubbles = show_quotes && settings.show_trade_bubbles;
+    let columns = if show_quotes || show_bubbles || (heat_visible && state.auto_y) {
         if event_time {
             let view = Viewport {
                 start: state.x0, end: state.x1, pixels, replay_ns: model.replay_clock(),
             };
             let mut columns = market_history::fine_columns(
                 &model.axis, model.tape.as_ref(), &model.depth, &view,
-                bubbles.then_some(settings.bubble_min_trade_size),
+                show_bubbles.then_some(settings.bubble_min_trade_size),
             );
             if !model.has_trade_quotes && model.depth.is_empty() {
                 // Old result files have snapshots but no original L2 updates.
@@ -283,7 +284,7 @@ pub(crate) fn price_panel(
         } else {
             let (bid, ask) = model.display_quotes();
             let end = model.completed_seconds().min(bid.len());
-            let volume = if bubbles {
+            let volume = if show_bubbles {
                 model.filtered_bubble_volume.as_deref().unwrap_or(&model.trade_volume)
             } else {
                 &[]
@@ -312,7 +313,6 @@ pub(crate) fn price_panel(
     let painter = ui.painter_at(plot);
     painter.rect_filled(plot, 0.0, BACKGROUND);
 
-    let heat_visible = settings.show_heat && book_visible;
     if heat_visible && model.has_heatmap() {
         let heat_painter = model.replay_cut_x().map_or_else(|| painter.clone(), |x| {
             painter.with_clip_rect(Rect::from_min_max(
@@ -322,7 +322,7 @@ pub(crate) fn price_panel(
         draw_heatmap(ui.ctx(), &heat_painter, model, settings, state, &m);
     }
     draw_axes(&axis_painter, &painter, model, &m);
-    // During a replay nothing is drawn to the right of the replay position.
+    // Time-based layers stop at the replay cursor.
     let cut_px = replay_x.map(|x| m.sx(x) + 1.0);
     let full_painter = painter;
     let painter = match cut_px {
@@ -331,18 +331,28 @@ pub(crate) fn price_panel(
         None => full_painter.clone(),
     };
     draw_boxes(&painter, model, settings, &m);
-    vp.draw_strategy(&painter, model, &m);
+    if settings.show_strategy_profiles {
+        crate::vp::draw_strategy_profiles(&painter, model, &m);
+    }
+    if settings.mode == ChartMode::Bar {
+        // The replay supplies only completed bars and the current partial bar. Its full
+        // on-screen footprint can extend past the clock without showing future trades.
+        draw_bars(&full_painter, model, settings, &m);
+    }
     if !heat_visible {
-        draw_price_overlays(&painter, model, settings, &m, false);
+        draw_overlays(&painter, model, &m, settings);
     }
     let hover = response.hover_pos().filter(|p| plot.contains(*p));
-    let mut hovered_bubble = None;
     if show_quotes {
         draw_quote_columns(&painter, &m, &columns);
-        if settings.show_trade_bubbles {
-            let bubble_pointer = hover.filter(|_| !pick_bar && !drawing_vp && !response.dragged());
-            hovered_bubble = draw_trade_bubbles(&painter, &m, &columns, settings, bubble_pointer);
-        }
+    }
+    let hovered_bubble = if show_bubbles {
+        let bubble_pointer = hover.filter(|_| !pick_bar && !drawing_vp && !response.dragged());
+        draw_trade_bubbles(&painter, &m, &columns, settings, bubble_pointer)
+    } else {
+        None
+    };
+    if show_quotes {
         let legend = plot.right_top() + egui::vec2(-8.0, 6.0);
         let painter = &full_painter;
         let ask_label = if model.has_trade_quotes { "est. ask" } else { "ask" };
@@ -357,7 +367,7 @@ pub(crate) fn price_panel(
         );
     }
     if heat_visible {
-        draw_price_overlays(&painter, model, settings, &m, true);
+        draw_overlays(&painter, model, &m, settings);
     }
     if settings.big_trades.visible {
         draw_big_trades(&painter, model, &m, &settings.big_trades);
@@ -402,7 +412,7 @@ pub(crate) fn price_panel(
     if let Some(pos) = hover {
         draw_crosshair(&axis_painter, &painter, model, &m, pos, event_time.then_some(columns.as_slice()));
     }
-    indicator_legend(ui, plot, model, settings, vp);
+    indicator_legend(ui, plot, model, settings);
     if let Some(pos) = hover.filter(|_| !pick_bar && !drawing_vp && !response.dragged()) {
         let liquidity = heat_visible
             .then(|| resting_liquidity_tooltip(model, &m, pos, settings.heat_metric))
@@ -431,7 +441,6 @@ fn indicator_legend(
     plot: Rect,
     model: &Model,
     settings: &mut Settings,
-    vp: &mut VpTool,
 ) {
     let rect = Rect::from_min_max(plot.left_top() + egui::vec2(6.0, 28.0), plot.right_bottom());
     let builder = egui::UiBuilder::new()
@@ -463,39 +472,9 @@ fn indicator_legend(
             }
         }
 
-        let (n_strategy, n_drawn) = (model.overlays.profiles.len(), vp.items.len());
-        let label = if n_drawn > 0 {
-            format!("Volume profile ({n_strategy} strategy, {n_drawn} drawn)")
-        } else {
-            format!("Volume profile ({n_strategy})")
-        };
-        if let Some(gear) = legend_row(ui, &label, &mut vp.show_strategy, true, true) {
-            egui::Popup::from_toggle_button_response(&gear)
-                .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
-                .show(|ui| {
-                    ui.set_min_width(260.0);
-                    ui.strong("Volume profile");
-                    ui.weak("Checkbox hides the strategy profiles; drawn ones stay.");
-                    ui.add(
-                        egui::Slider::new(&mut vp.smooth_ticks, 0.0..=30.0)
-                            .text("drawn: smoothing σ (ticks)"),
-                    );
-                    ui.add(egui::Slider::new(&mut vp.va_fraction, 0.3..=0.95).text("value area"));
-                    ui.add(
-                        egui::Slider::new(&mut vp.peak_fraction, 0.0..=0.95)
-                            .text("peak area (0 = off)"),
-                    )
-                    .on_hover_text(
-                        "Shade the contiguous levels with at least this share of the POC volume.",
-                    );
-                    ui.checkbox(&mut vp.extend_lines, "Extend POC / VAH / VAL to the right");
-                    if ui
-                        .add_enabled(n_drawn > 0, egui::Button::new(format!("Clear drawn ({n_drawn})")))
-                        .clicked()
-                    {
-                        vp.items.clear();
-                    }
-                });
+        if !overlays.profiles.is_empty() {
+            let label = format!("Volume profile ({})", overlays.profiles.len());
+            legend_row(ui, &label, &mut settings.show_strategy_profiles, true, false);
         }
         if let Some(gear) = legend_row(
             ui, "Big Trades", &mut settings.big_trades.visible, model.big_trades.available(), true,
@@ -661,7 +640,7 @@ fn visible_price_range(
 ) -> Option<(f64, f64)> {
     let mut lo = f64::INFINITY;
     let mut hi = f64::NEG_INFINITY;
-    if settings.show_bars || !model.book_visible() {
+    if settings.mode == ChartMode::Bar {
         let i0 = model.fp_x.partition_point(|f| f.1 < x0);
         let i1 = model.fp_x.partition_point(|f| f.0 <= x1);
         for fp in &model.bars()[i0..i1.max(i0)] {
@@ -670,9 +649,11 @@ fn visible_price_range(
         }
     }
     for column in columns.iter().flatten() {
-        for price in column.prices.into_iter().filter(|price| price.is_finite()) {
-            lo = lo.min(price);
-            hi = hi.max(price);
+        if settings.show_bbo || (settings.mode == ChartMode::Heatmap && settings.show_heat) {
+            for price in column.prices.into_iter().filter(|price| price.is_finite()) {
+                lo = lo.min(price);
+                hi = hi.max(price);
+            }
         }
         if let Some(bubble) = column.bubble {
             lo = lo.min(bubble.price);
@@ -879,14 +860,7 @@ fn with_alpha(color: Color32, alpha: u8) -> Color32 {
     Color32::from_rgba_unmultiplied(color.r(), color.g(), color.b(), alpha)
 }
 
-fn draw_price_overlays(painter: &Painter, model: &Model, settings: &Settings, m: &Mapper, over_heat: bool) {
-    if settings.show_bars {
-        draw_bars(painter, model, settings, m, over_heat);
-    }
-    draw_overlays(painter, model, m, settings);
-}
-
-fn draw_bars(painter: &Painter, model: &Model, settings: &Settings, m: &Mapper, over_heat: bool) {
+fn draw_bars(painter: &Painter, model: &Model, settings: &Settings, m: &Mapper) {
     let (up, down) = if settings.red_up { (RED, GREEN) } else { (GREEN, RED) };
     let fps = model.bars();
     let i0 = model.fp_x.partition_point(|f| f.1 < m.x0);
@@ -947,7 +921,6 @@ fn draw_bars(painter: &Painter, model: &Model, settings: &Settings, m: &Mapper, 
         return;
     }
     let half = (slot * 0.36).clamp(1.5, 30.0);
-    let fill_alpha = if over_heat { 255 } else { 200 };
     let tick = model.result.tick_size.abs().max(1e-9);
     for i in i0..i1 {
         let fp = &fps[i];
@@ -963,7 +936,7 @@ fn draw_bars(painter: &Painter, model: &Model, settings: &Settings, m: &Mapper, 
         painter.rect(
             Rect::from_min_max(pos2(xa, top), pos2(xb, bottom)),
             0.0,
-            with_alpha(color, fill_alpha),
+            with_alpha(color, 200),
             Stroke::new(1.0, color),
             StrokeKind::Middle,
         );
@@ -1804,6 +1777,99 @@ mod tests {
     use super::*;
 
     #[test]
+    fn vp_legend_only_counts_backtest_profiles() {
+        for has_profile in [false, true] {
+            let mut bar = accelerando_core::testkit::bar(0).price(100.0).build();
+            if has_profile {
+                bar.plots.push(accelerando_core::Plot::VolumeProfile {
+                    id: "test_vp".into(),
+                    levels: vec![accelerando_core::VpLevel {
+                        price: 100.0,
+                        buy_vol: 5.0,
+                        sell_vol: 2.0,
+                    }],
+                    span: 1,
+                });
+            }
+            let result = accelerando_core::BacktestResult {
+                metrics: Default::default(),
+                trades: Vec::new(),
+                equity: Vec::new(),
+                footprints: vec![bar],
+                liquidity_heatmap: Default::default(),
+                series: Vec::new(),
+                counters: Default::default(),
+                tick_size: 0.25,
+                multiplier: 50.0,
+            };
+            let mut viewer = crate::Viewer::new(result, Default::default(), &[], None, Default::default());
+            viewer.vp.items.push(crate::vp::ManualVp { t0: 0, t1: 0 });
+            let screen = Rect::from_min_size(Pos2::ZERO, egui::vec2(680.0, 420.0));
+            let input = egui::RawInput { screen_rect: Some(screen), ..Default::default() };
+            let mut output = egui::Context::default().run_ui(input, |ui| {
+                indicator_legend(ui, screen, &viewer.model, &mut viewer.settings);
+            });
+            output.textures_delta.clear();
+            let vp_labels: Vec<_> = output.shapes.iter().filter_map(|entry| match &entry.shape {
+                Shape::Text(text) if text.galley.text().starts_with("Volume profile") => {
+                    Some(text.galley.text())
+                }
+                _ => None,
+            }).collect();
+            if has_profile {
+                assert_eq!(vp_labels, vec!["Volume profile (1)"]);
+            } else {
+                assert!(vp_labels.is_empty());
+            }
+        }
+    }
+
+    #[test]
+    fn bar_replay_draws_the_partial_footprint_beyond_the_cursor() {
+        let bars = (0..3)
+            .map(|i| accelerando_core::testkit::bar(0).minute(i).price(100.0).build())
+            .collect();
+        let result = accelerando_core::BacktestResult {
+            metrics: Default::default(),
+            trades: Vec::new(),
+            equity: Vec::new(),
+            footprints: bars,
+            liquidity_heatmap: Default::default(),
+            series: Vec::new(),
+            counters: Default::default(),
+            tick_size: 0.25,
+            multiplier: 50.0,
+        };
+        let options = crate::ViewerOptions { axis_mode: Some(AxisMode::Time), ..Default::default() };
+        let mut viewer = crate::Viewer::new(result, options, &[], None, Default::default());
+        viewer.model.start_replay(0);
+        let ts_ns = viewer.model.full_bars()[0].ts_first_ns;
+        viewer.model.replay_apply(&[crate::Tick { ts_ns, price: 100.0, size: 10.0, side: 1 }], ts_ns);
+        assert_eq!(viewer.model.bars().len(), 1);
+
+        let mut state = ChartState::new(viewer.model.xmap.total(), AxisMode::Time);
+        state.show_range(0.0, 120.0);
+        state.auto_y = false;
+        (state.p0, state.p1) = (99.0, 101.0);
+        let screen = Rect::from_min_size(Pos2::ZERO, egui::vec2(680.0, 420.0));
+        let input = egui::RawInput { screen_rect: Some(screen), ..Default::default() };
+        let mut output = egui::Context::default().run_ui(input, |ui| {
+            price_panel(ui, &viewer.model, &mut viewer.settings, &mut state, None, &mut VpTool::default(), false);
+        });
+        output.textures_delta.clear();
+        let footprints: Vec<_> = output.shapes.iter().filter_map(|entry| {
+            match &entry.shape {
+                Shape::Rect(rect) if rect.fill == crate::TOTAL_VOLUME_COLOR => Some((rect.rect, entry.clip_rect)),
+                _ => None,
+            }
+        }).collect();
+        assert_eq!(footprints.len(), 1);
+        let (volume, clip) = footprints[0];
+        assert!(volume.left() > 50.0);
+        assert!(clip.contains_rect(volume));
+    }
+
+    #[test]
     fn chart_gestures_keep_axis_zoom_and_panning_independent() {
         let ctx = egui::Context::default();
         let outer = Rect::from_min_size(pos2(0.0, 0.0), egui::vec2(600.0 + AXIS_W, 400.0 + AXIS_H));
@@ -2023,7 +2089,7 @@ mod tests {
             let ctx = egui::Context::default();
             let input = egui::RawInput { screen_rect: Some(m.rect), ..Default::default() };
             let mut output = ctx.run_ui(input, |ui| {
-                draw_bars(ui.painter(), &viewer.model, &viewer.settings, m, false);
+                draw_bars(ui.painter(), &viewer.model, &viewer.settings, m);
             });
             output.textures_delta.clear();
             let mut poc = false;

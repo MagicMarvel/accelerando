@@ -10,7 +10,11 @@
 // Lets `#[derive(Configurable)]` (which emits `::accelerando_core::...` paths) work inside this crate.
 extern crate self as accelerando_core;
 
+pub mod bar_spec;
+pub use bar_spec::BarSpec;
 pub mod broker;
+pub mod context;
+pub use context::StrategyContext;
 pub mod depth_history;
 pub mod depth_store;
 pub mod engine;
@@ -32,19 +36,21 @@ pub mod testkit;
 pub mod traits;
 pub mod volume_profile;
 
+pub use accelerando_derive::Configurable;
 pub use broker::{
-    BracketSpec, Broker, BrokerConfig, EntryExecution, EntryIntent, OrderOutput, PortfolioSnapshot,
-    PositionInfo, StrategyOutput, TradeSide, VisualOutput,
+    BracketSpec, Broker, BrokerConfig, EntryExecution, EntryIntent, PortfolioSnapshot,
+    PositionInfo, TradeSide, VisualOutput,
 };
 pub use depth_history::{prepare_market_history, DepthHistory};
 pub use depth_store::{DepthStore, DepthWindow};
 pub use engine::{
     prepare_backtest_data, run_backtest, run_backtest_progress, run_prepared_backtest,
-    try_prepare_backtest_data, Pipeline,
-    PreparedBacktestData,
+    try_prepare_backtest_data, Pipeline, PreparedBacktestData,
 };
 pub use event::{EventInterest, OrderFlowEvent, Side};
-pub use event_engine::{prepare_event_data, run_event_backtest, run_prepared_event_backtest, PreparedEventData};
+pub use event_engine::{
+    prepare_event_data, run_event_backtest, run_prepared_event_backtest, PreparedEventData,
+};
 pub use footprint::{Footprint, Level, Plot, VpLevel};
 #[cfg(feature = "footprint-image")]
 pub use footprint_image::{
@@ -57,19 +63,19 @@ pub use heatmap::{
     HeatmapWindow, HiresHeatmap, SharedHeatmap, DEFAULT_HEATMAP_CACHE_DIR,
 };
 pub use metrics::Metrics;
-pub use accelerando_derive::Configurable;
 #[doc(hidden)]
 pub mod __private {
     pub use crate::params::sealed::Sealed;
 }
+pub use market_time::{in_clock_window, TimeZone};
 pub use params::{Configurable, ParamGroup, ParamRange, ParamSpec, ParamValue, Params};
 pub use progress::{ProgressHandle, ProgressSnapshot};
 pub use registry::Registry;
-pub use result::{Counters, BacktestResult, ExperimentResult, ExperimentRun, ExperimentRunSummary, LiquidityHeatmap,
-    LiquidityLevel, LiquiditySnapshot, Series, Trade, TradeReason,
+pub use result::{
+    BacktestResult, Counters, ExperimentResult, ExperimentRun, ExperimentRunSummary,
+    LiquidityHeatmap, LiquidityLevel, LiquiditySnapshot, Series, Trade, TradeReason,
 };
 pub use session::{SessionClock, SessionFilter, SessionTick, TradeDiscipline};
-pub use market_time::{in_clock_window, TimeZone};
 pub use traits::{
-    BarCtx, DataSource, FootprintAggregator, Indicator, IndicatorRequest, Strategy, StrategyRequirements,
+    DataSource, FootprintAggregator, Indicator, IndicatorRequest, Strategy, StrategyRequirements,
 };

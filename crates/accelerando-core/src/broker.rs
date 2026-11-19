@@ -44,6 +44,7 @@ struct EntryOrder {
     /// Free-form setup tag carried onto the resulting [`Trade`] for later analysis.
     label: Option<String>,
     reward_risk: Option<f64>,
+    max_hold_bars: Option<usize>,
 }
 
 /// The position change a strategy wants after the next fill.
@@ -93,6 +94,7 @@ struct Position {
     entered_intrabar: bool,
     /// Completed bars this lot has been open; its fill bar counts as 1.
     bars_open: usize,
+    max_hold_bars: Option<usize>,
     label: Option<String>,
 }
 
@@ -179,6 +181,7 @@ pub struct EntryIntent {
     pub bracket: BracketSpec,
     pub tag: Option<String>,
     pub max_fill_delay_ns: Option<i64>,
+    pub max_hold_bars: Option<usize>,
 }
 
 impl EntryIntent {
@@ -193,6 +196,7 @@ impl EntryIntent {
             },
             tag: None,
             max_fill_delay_ns: None,
+            max_hold_bars: None,
         }
     }
 
@@ -244,6 +248,13 @@ impl EntryIntent {
         self
     }
 
+    /// Close this lot at the first open after it has held this many bars, including the fill bar.
+    /// Available in footprint backtests.
+    pub fn hold_for_bars(mut self, bars: usize) -> Self {
+        self.max_hold_bars = Some(bars.max(1));
+        self
+    }
+
     fn into_order(self) -> EntryOrder {
         let (entry_limit, entry_min, entry_max) = match self.execution {
             EntryExecution::Market => (None, None, None),
@@ -275,6 +286,7 @@ impl EntryIntent {
             max_fill_delay_ns: self.max_fill_delay_ns,
             label: self.tag,
             reward_risk,
+            max_hold_bars: self.max_hold_bars,
         }
     }
 }
@@ -289,7 +301,7 @@ enum OrderAction {
 
 /// Typed order command buffer produced by a strategy and applied by the engine afterward.
 #[derive(Default)]
-pub struct OrderOutput {
+pub(crate) struct OrderOutput {
     actions: Vec<OrderAction>,
 }
 
@@ -348,12 +360,12 @@ impl VisualOutput {
 }
 
 /// All commands emitted by one strategy callback.
-pub struct StrategyOutput {
+pub(crate) struct StrategyCommands {
     pub orders: OrderOutput,
     pub visuals: VisualOutput,
 }
 
-impl StrategyOutput {
+impl StrategyCommands {
     pub fn new(visuals_enabled: bool) -> Self {
         Self {
             orders: OrderOutput::default(),
@@ -515,6 +527,7 @@ impl Broker {
             max_adverse_ticks: 0.0,
             entered_intrabar,
             bars_open: 0,
+            max_hold_bars: order.max_hold_bars,
             label: order.label.clone(),
         });
     }
@@ -526,6 +539,13 @@ impl Broker {
 
     /// Called when a new footprint arrives, before indicators/strategy run on it.
     pub fn on_new_footprint(&mut self, fp: &Footprint) {
+        for idx in (0..self.positions.len()).rev() {
+            let lot = &self.positions[idx];
+            if lot.max_hold_bars.is_some_and(|bars| lot.bars_open >= bars) {
+                let price = self.slip(fp.open, -lot.dir);
+                self.close_position_at(idx, price, fp.ts_first_ns, TradeReason::Signal);
+            }
+        }
         // 1) Realize pending position changes at this bar's open/intrabar limit touch.
         let pending = std::mem::take(&mut self.pending);
         let mut still_pending = Vec::new();
@@ -592,7 +612,12 @@ impl Broker {
         if replace_existing {
             self.close_all_at_open(open, ts, TradeReason::Signal);
         }
-        self.open_position(&order, self.slip(fill_px, order.dir), ts, entered_intrabar);
+        let entry_px = if order.entry_limit.is_some() {
+            fill_px
+        } else {
+            self.slip(fill_px, order.dir)
+        };
+        self.open_position(&order, entry_px, ts, entered_intrabar);
         false
     }
 
@@ -765,9 +790,26 @@ impl Broker {
         }
     }
 
-    pub fn apply_strategy_output(
+    /// Apply a completed bar callback's queued commands.
+    pub fn apply_context(
         &mut self,
-        output: StrategyOutput,
+        ctx: crate::StrategyContext<'_>,
+    ) -> (Vec<Plot>, Vec<(String, f64, Option<String>)>) {
+        self.apply_commands(ctx.into_commands())
+    }
+    /// Apply event callback commands at the supplied execution opportunity.
+    pub fn apply_event_context(
+        &mut self,
+        ctx: crate::StrategyContext<'_>,
+        ts: i64,
+        price: f64,
+    ) -> Result<(Vec<Plot>, Vec<(String, f64, Option<String>)>), String> {
+        self.apply_event_commands(ctx.into_commands(), ts, price)
+    }
+
+    pub(crate) fn apply_commands(
+        &mut self,
+        output: StrategyCommands,
     ) -> (Vec<Plot>, Vec<(String, f64, Option<String>)>) {
         let (actions, plots, series) = output.into_parts();
         for action in actions {
@@ -829,9 +871,9 @@ impl Broker {
 
     /// Apply market-only commands after an event callback at the current print plus slippage.
     /// Strategies own signal delays; exits for a new fill are first checked on the next event.
-    pub fn apply_event_output(
+    pub(crate) fn apply_event_commands(
         &mut self,
-        output: StrategyOutput,
+        output: StrategyCommands,
         ts: i64,
         price: f64,
     ) -> Result<(Vec<Plot>, Vec<(String, f64, Option<String>)>), String> {
@@ -842,6 +884,9 @@ impl Broker {
                 OrderAction::Replace(intent) | OrderAction::Add(intent) => {
                     if intent.execution != EntryExecution::Market {
                         return Err("event execution currently supports market entries only".into());
+                    }
+                    if intent.max_hold_bars.is_some() {
+                        return Err("bar-count holding periods require footprint execution".into());
                     }
                     if !independent_add && !self.positions.is_empty() {
                         return Err("event execution supports one position at a time".into());
@@ -924,16 +969,30 @@ mod tests {
             ..BrokerConfig::default()
         });
         b.set_contract(1.0, 10.0);
-        let mut output = StrategyOutput::new(false);
-        output.orders.add(EntryIntent::market(TradeSide::Long, 1.0).risk_reward_bracket(98.0, 1.0).tagged("A"));
-        output.orders.add(EntryIntent::market(TradeSide::Long, 2.0).risk_reward_bracket(99.0, 1.0).tagged("B"));
-        output.orders.add(EntryIntent::market(TradeSide::Short, 1.0).risk_reward_bracket(104.0, 1.0).tagged("C"));
-        b.apply_event_output(output, 10, 100.0).unwrap();
+        let mut output = StrategyCommands::new(false);
+        output.orders.add(
+            EntryIntent::market(TradeSide::Long, 1.0)
+                .risk_reward_bracket(98.0, 1.0)
+                .tagged("A"),
+        );
+        output.orders.add(
+            EntryIntent::market(TradeSide::Long, 2.0)
+                .risk_reward_bracket(99.0, 1.0)
+                .tagged("B"),
+        );
+        output.orders.add(
+            EntryIntent::market(TradeSide::Short, 1.0)
+                .risk_reward_bracket(104.0, 1.0)
+                .tagged("C"),
+        );
+        b.apply_event_commands(output, 10, 100.0).unwrap();
         assert_eq!(b.portfolio_snapshot().position_count, 3);
         assert!(b.trades.is_empty());
-        let mut replacement = StrategyOutput::new(false);
-        replacement.orders.replace(EntryIntent::market(TradeSide::Long, 1.0).risk_reward_bracket(98.0, 1.0));
-        assert!(b.apply_event_output(replacement, 10, 100.0).is_err());
+        let mut replacement = StrategyCommands::new(false);
+        replacement
+            .orders
+            .replace(EntryIntent::market(TradeSide::Long, 1.0).risk_reward_bracket(98.0, 1.0));
+        assert!(b.apply_event_commands(replacement, 10, 100.0).is_err());
         assert_eq!(b.portfolio_snapshot().position_count, 3);
         b.on_trade_event(11, 101.0);
         assert_eq!(b.portfolio_snapshot().position_count, 2);
@@ -990,13 +1049,13 @@ mod tests {
         let mut broker = broker();
         broker.on_new_footprint(&fp(100.0, 100.0, 100.0, 100.0, 100));
 
-        let mut output = StrategyOutput::new(false);
+        let mut output = StrategyCommands::new(false);
         output.orders.replace(
             EntryIntent::market(TradeSide::Long, 1.0)
                 .expire_after_ns(100)
                 .tick_bracket(10.0, 2.0),
         );
-        broker.apply_strategy_output(output);
+        broker.apply_commands(output);
         broker.on_new_footprint(&fp(101.0, 101.0, 101.0, 101.0, 1_000));
 
         assert_eq!(broker.position_count(), 0);
@@ -1008,13 +1067,13 @@ mod tests {
         let mut broker = broker();
         broker.on_new_footprint(&fp(100.0, 100.0, 100.0, 100.0, 100));
 
-        let mut output = StrategyOutput::new(false);
+        let mut output = StrategyCommands::new(false);
         output.orders.replace(
             EntryIntent::market(TradeSide::Long, 1.0)
                 .expire_after_ns(100)
                 .tick_bracket(10.0, 2.0),
         );
-        broker.apply_strategy_output(output);
+        broker.apply_commands(output);
         broker.on_new_footprint(&fp(101.0, 101.0, 101.0, 101.0, 150));
 
         assert_eq!(broker.position_count(), 1);
@@ -1024,14 +1083,14 @@ mod tests {
     #[test]
     fn additive_orders_open_multiple_lots_and_exit_independently() {
         let mut broker = broker();
-        let mut output = StrategyOutput::new(false);
+        let mut output = StrategyCommands::new(false);
         output
             .orders
             .add(EntryIntent::limit(TradeSide::Long, 1.0, 100.0).tick_bracket(10.0, 2.0));
         output
             .orders
             .add(EntryIntent::limit(TradeSide::Long, 1.0, 99.0).tick_bracket(10.0, 4.0));
-        broker.apply_strategy_output(output);
+        broker.apply_commands(output);
 
         broker.on_new_footprint(&fp(100.0, 100.0, 99.0, 99.0, 1));
         assert_eq!(broker.position_count(), 2);
@@ -1051,22 +1110,48 @@ mod tests {
     #[test]
     fn replace_order_does_not_stack_same_direction_lots() {
         let mut broker = broker();
-        let mut output = StrategyOutput::new(false);
+        let mut output = StrategyCommands::new(false);
         output
             .orders
             .replace(EntryIntent::market(TradeSide::Long, 1.0).tick_bracket(10.0, 0.0));
-        broker.apply_strategy_output(output);
+        broker.apply_commands(output);
         broker.on_new_footprint(&fp(100.0, 100.0, 100.0, 100.0, 1));
         assert_eq!(broker.position_count(), 1);
 
-        let mut output = StrategyOutput::new(false);
+        let mut output = StrategyCommands::new(false);
         output
             .orders
             .replace(EntryIntent::market(TradeSide::Long, 1.0).tick_bracket(10.0, 0.0));
-        broker.apply_strategy_output(output);
+        broker.apply_commands(output);
         broker.on_new_footprint(&fp(101.0, 101.0, 101.0, 101.0, 2));
         assert_eq!(broker.position_count(), 1);
         assert!(broker.trades.is_empty());
+    }
+
+    #[test]
+    fn limit_entries_keep_the_matched_price_with_slippage_enabled() {
+        let bar = fp(100.0, 103.0, 97.0, 100.0, 1);
+        for (side, limit, expected) in [
+            (TradeSide::Long, 98.0, 98.0),
+            (TradeSide::Short, 102.0, 102.0),
+            (TradeSide::Long, 101.0, 100.0),
+            (TradeSide::Short, 99.0, 100.0),
+        ] {
+            let mut broker = Broker::new(BrokerConfig {
+                slippage_ticks: 2.0,
+                ..BrokerConfig::default()
+            });
+            broker.set_contract(1.0, 1.0);
+            let mut output = StrategyCommands::new(false);
+            output.orders.add(EntryIntent::limit(side, 1.0, limit));
+            broker.apply_commands(output);
+            broker.on_new_footprint(&bar);
+
+            assert_eq!(
+                broker.portfolio_snapshot().open_position.unwrap().entry_px,
+                expected
+            );
+        }
     }
 
     /// Enter 1 lot at the next open (with 1 tick slippage) and return the broker.
@@ -1076,11 +1161,11 @@ mod tests {
             ..BrokerConfig::default()
         });
         broker.set_contract(1.0, 1.0);
-        let mut output = StrategyOutput::new(false);
+        let mut output = StrategyCommands::new(false);
         output
             .orders
             .replace(EntryIntent::market(side, 1.0).tick_bracket(stop, target));
-        broker.apply_strategy_output(output);
+        broker.apply_commands(output);
         broker.on_new_footprint(&fp(100.0, 100.0, 100.0, 100.0, 1));
         broker
     }
@@ -1089,7 +1174,10 @@ mod tests {
     fn triggered_stops_pay_slippage_but_targets_do_not() {
         // Long fills at 101 (open 100 + 1 tick); bracket anchored on the fill: stop 97, target 105.
         let mut b = slipped_entry(TradeSide::Long, 4.0, 4.0);
-        assert_eq!(b.portfolio_snapshot().open_position.unwrap().entry_px, 101.0);
+        assert_eq!(
+            b.portfolio_snapshot().open_position.unwrap().entry_px,
+            101.0
+        );
         b.on_new_footprint(&fp(99.0, 99.0, 96.0, 98.0, 2)); // touches the stop intrabar
         assert_eq!(b.trades[0].reason, TradeReason::StopLoss);
         assert_eq!(b.trades[0].exit_px, 96.0, "stop 97 minus 1 tick slippage");
@@ -1114,20 +1202,20 @@ mod tests {
     #[test]
     fn flatten_closes_every_open_lot() {
         let mut broker = broker();
-        let mut output = StrategyOutput::new(false);
+        let mut output = StrategyCommands::new(false);
         output
             .orders
             .add(EntryIntent::market(TradeSide::Long, 1.0).tick_bracket(10.0, 0.0));
         output
             .orders
             .add(EntryIntent::market(TradeSide::Long, 1.0).tick_bracket(10.0, 0.0));
-        broker.apply_strategy_output(output);
+        broker.apply_commands(output);
         broker.on_new_footprint(&fp(100.0, 100.0, 100.0, 100.0, 1));
         assert_eq!(broker.position_count(), 2);
 
-        let mut output = StrategyOutput::new(false);
+        let mut output = StrategyCommands::new(false);
         output.orders.exit_position();
-        broker.apply_strategy_output(output);
+        broker.apply_commands(output);
         broker.on_new_footprint(&fp(101.0, 101.0, 101.0, 101.0, 2));
         assert_eq!(broker.position_count(), 0);
         assert_eq!(broker.trades.len(), 2);
@@ -1140,16 +1228,16 @@ mod tests {
     #[test]
     fn cancel_pending_does_not_exit_an_open_position() {
         let mut broker = broker();
-        let mut output = StrategyOutput::new(false);
+        let mut output = StrategyCommands::new(false);
         output
             .orders
             .replace(EntryIntent::market(TradeSide::Long, 1.0).tick_bracket(10.0, 0.0));
-        broker.apply_strategy_output(output);
+        broker.apply_commands(output);
         broker.on_new_footprint(&fp(100.0, 100.0, 100.0, 100.0, 1));
 
-        let mut output = StrategyOutput::new(false);
+        let mut output = StrategyCommands::new(false);
         output.orders.cancel_pending();
-        broker.apply_strategy_output(output);
+        broker.apply_commands(output);
         broker.on_new_footprint(&fp(101.0, 101.0, 101.0, 101.0, 2));
 
         assert_eq!(broker.position_count(), 1);
@@ -1159,18 +1247,18 @@ mod tests {
     #[test]
     fn entry_tag_is_bound_to_the_resulting_trade() {
         let mut broker = broker();
-        let mut output = StrategyOutput::new(false);
+        let mut output = StrategyCommands::new(false);
         output.orders.replace(
             EntryIntent::market(TradeSide::Long, 1.0)
                 .tick_bracket(10.0, 0.0)
                 .tagged("breakout"),
         );
-        broker.apply_strategy_output(output);
+        broker.apply_commands(output);
         broker.on_new_footprint(&fp(100.0, 100.0, 100.0, 100.0, 1));
 
-        let mut output = StrategyOutput::new(false);
+        let mut output = StrategyCommands::new(false);
         output.orders.exit_position();
-        broker.apply_strategy_output(output);
+        broker.apply_commands(output);
         broker.on_new_footprint(&fp(101.0, 101.0, 101.0, 101.0, 2));
 
         assert_eq!(broker.trades.len(), 1);

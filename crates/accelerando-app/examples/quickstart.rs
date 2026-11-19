@@ -8,8 +8,8 @@
 
 use accelerando_core::ta::{Cross, CrossDir, Ema, RollingStats, SessionVwap};
 use accelerando_core::{
-    BarCtx, Configurable, EntryIntent, Footprint, SessionClock, SessionFilter, Strategy,
-    StrategyOutput, StrategyRequirements, TradeDiscipline, TradeSide,
+    Configurable, EntryIntent, SessionClock, SessionFilter, Strategy, StrategyContext,
+    StrategyRequirements, TradeDiscipline, TradeSide,
 };
 
 /// Trend pullback: price on the trend side of session VWAP, fast EMA above slow, and the close
@@ -48,33 +48,43 @@ pub struct VwapPullback {
 impl Strategy for VwapPullback {
     fn requirements(&self) -> StrategyRequirements {
         // Uses only OHLCV, so no indicators; declare the bar type it was designed for.
-        StrategyRequirements::new().bars("time:60")
+        StrategyRequirements::new().bars(accelerando_core::BarSpec::Time { seconds: 60 })
     }
 
-    fn on_footprint(&mut self, fp: &Footprint, ctx: &BarCtx, out: &mut StrategyOutput) {
+    fn on_bar(&mut self, ctx: &mut StrategyContext<'_>) {
+        let fp = ctx.bar();
+        let portfolio = ctx.portfolio();
         let now = self.clock.update(fp.ts_last_ns);
         self.discipline.on_bar(now.day);
 
         let vwap = self.vwap.update_bar(now.day, fp);
-        let fast = self.ema_fast.get_or_insert_with(|| Ema::new(self.fast)).update(fp.close);
-        let slow = self.ema_slow.get_or_insert_with(|| Ema::new(self.slow)).update(fp.close);
+        let fast = self
+            .ema_fast
+            .get_or_insert_with(|| Ema::new(self.fast))
+            .update(fp.close);
+        let slow = self
+            .ema_slow
+            .get_or_insert_with(|| Ema::new(self.slow))
+            .update(fp.close);
         let vol_z = self
             .volume
             .get_or_insert_with(|| RollingStats::new(100))
             .zscore_then_push(fp.volume);
         let crossed = self.cross.update(fp.close, fast);
-        out.visuals.series("vwap", vwap);
-        out.visuals.series_colored("ema_fast", fast, "#60a5fa");
+        ctx.plot_series("vwap", vwap);
+        ctx.plot_series_colored("ema_fast", fast, "#60a5fa");
 
-        if let Some(pos) = ctx.open_position.as_ref() {
+        if let Some(pos) = portfolio.open_position.as_ref() {
             if pos.bars_held >= self.max_hold_bars {
-                out.orders.exit_position();
+                ctx.exit_position();
             }
             return;
         }
         let Some(vol_z) = vol_z else { return };
         if !self.session.allows(now.minute)
-            || !self.discipline.can_enter(ctx.position, ctx.pending_count)
+            || !self
+                .discipline
+                .can_enter(portfolio.position, portfolio.pending_count)
             || vol_z < self.min_volume_z
         {
             return;
@@ -90,7 +100,7 @@ impl Strategy for VwapPullback {
             return;
         }
         let stop = self.stop_ticks as f64;
-        out.orders.replace(
+        ctx.replace_entry(
             EntryIntent::market(dir, 1.0)
                 .tick_bracket(stop, stop * self.target_r)
                 .tagged(format!("pullback volz={vol_z:.2}")),

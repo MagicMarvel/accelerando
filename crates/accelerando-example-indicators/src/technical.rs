@@ -8,6 +8,7 @@ use accelerando_core::{Configurable, Footprint, Indicator, Plot};
 
 #[derive(Configurable)]
 #[configurable(init = Self::init)]
+#[configurable(indicator = "technical")]
 pub struct TechnicalIndicators {
     #[param(default = 12, min = 2, max = 80)]
     fast_period: usize,

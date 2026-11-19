@@ -1,7 +1,7 @@
 //! The four pluggable stages. Each is [`Configurable`], so user crates can supply their own
 //! adapters and they slot straight into the engine and the hyperopt search space.
 
-use crate::broker::{PortfolioSnapshot, StrategyOutput};
+use crate::context::StrategyContext;
 use crate::event::{EventInterest, OrderFlowEvent};
 use crate::footprint::Footprint;
 use crate::params::{ParamValue, Params};
@@ -36,6 +36,11 @@ pub trait FootprintAggregator {
     /// Event classes this aggregator needs. Override to skip irrelevant hot-loop calls.
     fn event_interest(&self) -> EventInterest {
         EventInterest::ALL
+    }
+
+    /// Actual aggregation metadata, if known.
+    fn bar_spec(&self) -> Option<crate::BarSpec> {
+        None
     }
 
     /// Feed one event. Returns the just-completed footprint, if this event closed a bar.
@@ -101,9 +106,9 @@ pub struct StrategyRequirements {
     /// `Footprint::values` keys the strategy reads. A runner checks that each key is published
     /// on at least one footprint, which catches typos and missing indicators.
     pub values: Vec<String>,
-    /// The bar type the strategy was designed for, as an aggregator spec such as `"time:60"` or
-    /// `"range:30"`. Runners warn when a different one is used.
-    pub bars: Option<String>,
+    /// The aggregation this strategy expects. Runners warn when an explicit override
+    /// has a different aggregation type or different resolved parameters.
+    pub bars: Option<crate::BarSpec>,
 }
 
 impl StrategyRequirements {
@@ -111,8 +116,8 @@ impl StrategyRequirements {
         Self::default()
     }
 
-    pub fn indicator(mut self, request: IndicatorRequest) -> Self {
-        self.indicators.push(request);
+    pub fn indicator(mut self, request: impl Into<IndicatorRequest>) -> Self {
+        self.indicators.push(request.into());
         self
     }
 
@@ -121,28 +126,9 @@ impl StrategyRequirements {
         self
     }
 
-    pub fn bars(mut self, spec: &str) -> Self {
-        self.bars = Some(spec.to_string());
+    pub fn bars(mut self, spec: crate::BarSpec) -> Self {
+        self.bars = Some(spec);
         self
-    }
-}
-
-/// What the engine hands a strategy together with each completed footprint.
-///
-/// Dereferences to the [`PortfolioSnapshot`], so `ctx.position_count` etc. work directly.
-#[derive(Clone, Debug)]
-pub struct BarCtx {
-    /// Global 0-based number of this footprint in the run: the same index the chart and the
-    /// series use. Use it for ages, TTLs and plot anchors instead of counting bars yourself.
-    pub bar: usize,
-    /// Broker state as of this footprint (fills for it already resolved).
-    pub portfolio: PortfolioSnapshot,
-}
-
-impl std::ops::Deref for BarCtx {
-    type Target = PortfolioSnapshot;
-    fn deref(&self) -> &PortfolioSnapshot {
-        &self.portfolio
     }
 }
 
@@ -163,21 +149,13 @@ pub trait Strategy {
     /// Called once for every normalized order-flow event.
     ///
     /// Called by run_prepared_event_backtest. Footprint-only runners do not call it.
-    fn on_event(
-        &mut self,
-        _ev: &OrderFlowEvent,
-        _portfolio: &PortfolioSnapshot,
-        _output: &mut StrategyOutput,
-    ) {
-    }
+    fn on_event(&mut self, _ctx: &mut StrategyContext<'_>) {}
 
-    /// Called once per completed (and indicator-enriched) footprint. Market/account state is
-    /// immutable ([`BarCtx`]: global bar number + portfolio); orders and visuals are emitted
-    /// into separate typed output channels.
-    fn on_footprint(&mut self, _fp: &Footprint, _ctx: &BarCtx, _output: &mut StrategyOutput) {}
+    /// React to a completed, enriched bar using immutable inputs and queued commands.
+    fn on_bar(&mut self, _ctx: &mut StrategyContext<'_>) {}
 
     /// Called once for each round-trip the broker recorded on the current footprint (fills
-    /// resolve before the strategy sees the bar), right before [`Strategy::on_footprint`].
+    /// resolve before the strategy sees the bar), right before [`Strategy::on_bar`].
     /// Lets strategies react to their own exits without re-deriving them from position flips.
     fn on_trade_closed(&mut self, _trade: &Trade) {}
 

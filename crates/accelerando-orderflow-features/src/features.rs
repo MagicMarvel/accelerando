@@ -11,9 +11,7 @@
 use std::collections::VecDeque;
 
 use accelerando_core::market_time::eastern_day_minute;
-use accelerando_core::{
-    Configurable, EventInterest, Footprint, Indicator, OrderFlowEvent,
-};
+use accelerando_core::{Configurable, EventInterest, Footprint, Indicator, OrderFlowEvent};
 
 // ---- 2.1 base aggressive-trade features -------------------------------------------------------
 pub const BUY_VOLUME: &str = "tf_buy_volume";
@@ -147,7 +145,7 @@ struct SessionState {
 }
 
 #[derive(Configurable)]
-#[configurable(init = Self::init)]
+#[configurable(init = Self::init, indicator = "trade_flow_features")]
 pub struct TradeFlowFeatures {
     #[param(fixed, default = 0.25)]
     tick: f64,
@@ -162,7 +160,7 @@ pub struct TradeFlowFeatures {
     #[param(default = 20, min = 2, max = 500)]
     realized_vol_window: usize,
     #[param(default = "percentile", choice = ["percentile", "fixed"])]
-    large_trade_mode: String,
+    large_trade_mode: LargeTradeMode,
     #[param(default = 10.0, min = 1.0, max = 5000.0)]
     large_trade_min_size: f64,
     #[param(default = 0.95, min = 0.5, max = 0.999)]
@@ -173,7 +171,6 @@ pub struct TradeFlowFeatures {
     imbalance_ratio: f64,
     #[param(default = 5.0, min = 0.0, max = 5000.0)]
     imbalance_min_volume: f64,
-    large_trade_mode_fixed: bool,
 
     // Raw-trade capture for large-trade stats.
     pending_trades: VecDeque<PendingTrade>,
@@ -207,7 +204,6 @@ impl TradeFlowFeatures {
         self.recent_range_window = self.recent_range_window.max(2);
         self.atr_period = self.atr_period.max(2);
         self.realized_vol_window = self.realized_vol_window.max(2);
-        self.large_trade_mode_fixed = self.large_trade_mode == "fixed";
         self.large_trade_min_size = self.large_trade_min_size.max(1.0);
         self.large_trade_percentile = self.large_trade_percentile.clamp(0.5, 0.999);
         self.large_trade_window = self.large_trade_window.max(50);
@@ -283,12 +279,9 @@ impl TradeFlowFeatures {
         let sell = ((fp.volume - fp.delta) / 2.0).max(0.0);
         fp.values.insert(BUY_VOLUME.to_string(), buy);
         fp.values.insert(SELL_VOLUME.to_string(), sell);
-        fp.values.insert(
-            DELTA_RATIO.to_string(),
-            fp.delta / fp.volume.max(EPSILON),
-        );
-        let duration_s =
-            ((fp.ts_last_ns - fp.ts_first_ns) as f64 / 1e9).max(1e-3);
+        fp.values
+            .insert(DELTA_RATIO.to_string(), fp.delta / fp.volume.max(EPSILON));
+        let duration_s = ((fp.ts_last_ns - fp.ts_first_ns) as f64 / 1e9).max(1e-3);
         fp.values
             .insert(TRADE_RATE.to_string(), fp.trades as f64 / duration_s);
         fp.values.insert(
@@ -310,12 +303,8 @@ impl TradeFlowFeatures {
             bar_sizes.push(front.size);
             self.pending_trades.pop_front();
         }
-        let large_vol: f64 = bar_sizes
-            .iter()
-            .filter(|&&s| s >= threshold)
-            .sum();
-        fp.values
-            .insert(LARGE_TRADE_VOLUME.to_string(), large_vol);
+        let large_vol: f64 = bar_sizes.iter().filter(|&&s| s >= threshold).sum();
+        fp.values.insert(LARGE_TRADE_VOLUME.to_string(), large_vol);
         fp.values.insert(
             LARGE_TRADE_RATIO.to_string(),
             large_vol / fp.volume.max(EPSILON),
@@ -338,7 +327,7 @@ impl TradeFlowFeatures {
     }
 
     fn large_trade_threshold(&self) -> f64 {
-        if self.large_trade_mode_fixed || self.size_hist_total == 0 {
+        if self.large_trade_mode == LargeTradeMode::Fixed || self.size_hist_total == 0 {
             return self.large_trade_min_size;
         }
         let rank = (self.size_hist_total as f64 * self.large_trade_percentile).floor() as u64;
@@ -361,8 +350,7 @@ impl TradeFlowFeatures {
         let abs_delta_eff = move_ticks.abs() / eff_denominator;
         fp.values.insert(BAR_MOVE_TICKS.to_string(), move_ticks);
         fp.values.insert(BAR_RANGE_TICKS.to_string(), range_ticks);
-        fp.values
-            .insert(CLOSE_LOCATION.to_string(), close_location);
+        fp.values.insert(CLOSE_LOCATION.to_string(), close_location);
         fp.values.insert(DELTA_EFFICIENCY.to_string(), delta_eff);
         fp.values
             .insert(ABS_DELTA_EFFICIENCY.to_string(), abs_delta_eff);
@@ -377,19 +365,32 @@ impl TradeFlowFeatures {
         abs_delta_eff: f64,
     ) {
         let trade_rate = fp.values[TRADE_RATE];
-        let put = |key: &str, z: Option<f64>, values: &mut std::collections::BTreeMap<String, f64>| {
-            if let Some(z) = z {
-                values.insert(key.to_string(), z);
-            }
-        };
-        put(DELTA_Z, self.z_delta.score_and_push(fp.delta), &mut fp.values);
-        put(VOLUME_Z, self.z_volume.score_and_push(fp.volume), &mut fp.values);
+        let put =
+            |key: &str, z: Option<f64>, values: &mut std::collections::BTreeMap<String, f64>| {
+                if let Some(z) = z {
+                    values.insert(key.to_string(), z);
+                }
+            };
+        put(
+            DELTA_Z,
+            self.z_delta.score_and_push(fp.delta),
+            &mut fp.values,
+        );
+        put(
+            VOLUME_Z,
+            self.z_volume.score_and_push(fp.volume),
+            &mut fp.values,
+        );
         put(
             TRADE_RATE_Z,
             self.z_trade_rate.score_and_push(trade_rate),
             &mut fp.values,
         );
-        put(BAR_MOVE_Z, self.z_bar_move.score_and_push(move_ticks), &mut fp.values);
+        put(
+            BAR_MOVE_Z,
+            self.z_bar_move.score_and_push(move_ticks),
+            &mut fp.values,
+        );
         put(
             DELTA_EFF_Z,
             self.z_delta_eff.score_and_push(delta_eff),
@@ -470,10 +471,8 @@ impl TradeFlowFeatures {
         if vwap_vol > EPSILON {
             let vwap = vwap_pv / vwap_vol;
             fp.values.insert(SESSION_VWAP.to_string(), vwap);
-            fp.values.insert(
-                DIST_VWAP_TICKS.to_string(),
-                (fp.close - vwap) / self.tick,
-            );
+            fp.values
+                .insert(DIST_VWAP_TICKS.to_string(), (fp.close - vwap) / self.tick);
         }
     }
 
@@ -493,7 +492,13 @@ impl TradeFlowFeatures {
         let keyed: Vec<(i64, f64, f64)> = fp
             .ladder
             .iter()
-            .map(|lv| ((lv.price / self.tick).round() as i64, lv.buy_vol, lv.sell_vol))
+            .map(|lv| {
+                (
+                    (lv.price / self.tick).round() as i64,
+                    lv.buy_vol,
+                    lv.sell_vol,
+                )
+            })
             .collect();
         let mut pos_keys: Vec<i64> = Vec::new();
         let mut neg_keys: Vec<i64> = Vec::new();
@@ -612,4 +617,11 @@ fn longest_adjacent_run(keys: &[i64]) -> usize {
         prev = Some(k);
     }
     best
+}
+
+accelerando_core::choice_enum! {
+    pub enum LargeTradeMode {
+        Fixed => "fixed",
+        Percentile => "percentile",
+    }
 }

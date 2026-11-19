@@ -2,8 +2,7 @@
 //! `range_ticks` minimum price increments.
 
 use accelerando_core::{
-    Configurable, EventInterest, Footprint, FootprintAggregator, OrderFlowEvent,
-    Side,
+    Configurable, EventInterest, Footprint, FootprintAggregator, OrderFlowEvent, Side,
 };
 
 /// Aggregates trades into footprints bounded by price range rather than wall-clock time.
@@ -24,6 +23,11 @@ impl RangeAggregator {
 }
 
 impl FootprintAggregator for RangeAggregator {
+    fn bar_spec(&self) -> Option<accelerando_core::BarSpec> {
+        Some(accelerando_core::BarSpec::Range {
+            ticks: self.range_ticks,
+        })
+    }
     fn includes_closing_trade(&self) -> bool {
         true
     }

@@ -5,8 +5,7 @@
 //! RSI exhaustion.
 
 use accelerando_core::{
-    BarCtx, Configurable, EntryIntent, Footprint, Plot, Strategy, StrategyOutput, TradeSide,
-    VisualOutput,
+    Configurable, EntryIntent, Footprint, Plot, Strategy, StrategyContext, TradeSide, VisualOutput,
 };
 
 #[derive(Configurable)]
@@ -41,7 +40,9 @@ impl IndicatorCross {
 }
 
 impl Strategy for IndicatorCross {
-    fn on_footprint(&mut self, fp: &Footprint, ctx: &BarCtx, output: &mut StrategyOutput) {
+    fn on_bar(&mut self, ctx: &mut StrategyContext<'_>) {
+        let fp = ctx.bar();
+        let portfolio = ctx.portfolio();
         let Some(fast) = fp.values.get("ema_fast").copied() else {
             return;
         };
@@ -64,30 +65,30 @@ impl Strategy for IndicatorCross {
             .map(|(pf, ps)| pf >= ps && fast < slow)
             .unwrap_or(false);
 
-        let pos = ctx.position;
+        let pos = portfolio.position;
         if pos > 0 && (crossed_below || rsi >= self.sell_rsi_min) {
-            output.orders.exit_position();
-            self.plot(fp, &mut output.visuals, "exit_long", "#f97316");
+            ctx.exit_position();
+            self.plot(fp, ctx.visuals(), "exit_long", "#f97316");
         } else if pos < 0 && (crossed_above || rsi <= self.cover_rsi_max) {
-            output.orders.exit_position();
-            self.plot(fp, &mut output.visuals, "exit_short", "#f97316");
+            ctx.exit_position();
+            self.plot(fp, ctx.visuals(), "exit_short", "#f97316");
         } else if pos == 0 && has_volume && crossed_above && rsi <= self.buy_rsi_max {
-            output.orders.replace(
+            ctx.replace_entry(
                 EntryIntent::market(TradeSide::Long, self.qty)
                     .tick_bracket(self.stop_ticks, self.target_ticks),
             );
-            self.plot(fp, &mut output.visuals, "enter_long", "#16a34a");
+            self.plot(fp, ctx.visuals(), "enter_long", "#16a34a");
         } else if pos == 0
             && self.side == "long_short"
             && has_volume
             && crossed_below
             && rsi >= self.short_rsi_min
         {
-            output.orders.replace(
+            ctx.replace_entry(
                 EntryIntent::market(TradeSide::Short, self.qty)
                     .tick_bracket(self.stop_ticks, self.target_ticks),
             );
-            self.plot(fp, &mut output.visuals, "enter_short", "#dc2626");
+            self.plot(fp, ctx.visuals(), "enter_short", "#dc2626");
         }
 
         self.prev_fast = Some(fast);

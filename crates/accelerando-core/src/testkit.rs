@@ -16,12 +16,13 @@
 //! [`drive`] steps the strategy exactly like `run_prepared_backtest` (broker fills first, then
 //! `on_trade_closed`, then `on_footprint`) but keeps everything in memory for assertions.
 
-use crate::broker::{Broker, BrokerConfig, StrategyOutput};
+use crate::broker::{Broker, BrokerConfig, PortfolioSnapshot};
 use crate::engine::{run_prepared_backtest, PreparedBacktestData};
 use crate::footprint::{Footprint, Plot};
 use crate::market_time::{days_from_civil, in_us_dst, NS_PER_SEC};
 use crate::result::{BacktestResult, Trade};
-use crate::traits::{BarCtx, Strategy};
+use crate::traits::Strategy;
+use crate::StrategyContext;
 
 /// Default tick size used by the helpers (ES/NQ style).
 pub const TICK: f64 = 0.25;
@@ -181,13 +182,11 @@ pub fn drive_with<S: Strategy + ?Sized>(
             let trade = broker.trades[i].clone();
             strategy.on_trade_closed(&trade);
         }
-        let ctx = BarCtx {
-            bar,
-            portfolio: broker.portfolio_snapshot(),
-        };
-        let mut output = StrategyOutput::new(true);
-        strategy.on_footprint(fp, &ctx, &mut output);
-        let (plots, _) = broker.apply_strategy_output(output);
+        let portfolio = broker.portfolio_snapshot();
+        let mut ctx =
+            StrategyContext::for_bar(fp, &portfolio, bar, true).with_history(&bars[..bar]);
+        strategy.on_bar(&mut ctx);
+        let (plots, _) = broker.apply_context(ctx);
         out.plots.push(plots);
         out.positions.push(broker.portfolio_snapshot().position);
     }
@@ -196,7 +195,11 @@ pub fn drive_with<S: Strategy + ?Sized>(
 }
 
 /// Full engine run (metrics, equity, end-of-data flattening) over synthetic bars.
-pub fn backtest(strategy: Box<dyn Strategy>, bars: Vec<Footprint>, cfg: BrokerConfig) -> BacktestResult {
+pub fn backtest(
+    strategy: Box<dyn Strategy>,
+    bars: Vec<Footprint>,
+    cfg: BrokerConfig,
+) -> BacktestResult {
     let data = PreparedBacktestData::from_footprints(bars, TICK, MULTIPLIER);
     run_prepared_backtest(&data, strategy, cfg, false)
 }
@@ -205,18 +208,16 @@ pub fn backtest(strategy: Box<dyn Strategy>, bars: Vec<Footprint>, cfg: BrokerCo
 mod tests {
     use super::*;
     use crate::broker::{EntryIntent, TradeSide};
-    use crate::BarCtx;
 
     struct BuyFirstBar {
         done: bool,
     }
 
     impl Strategy for BuyFirstBar {
-        fn on_footprint(&mut self, _fp: &Footprint, _ctx: &BarCtx, out: &mut StrategyOutput) {
+        fn on_bar(&mut self, ctx: &mut StrategyContext<'_>) {
             if !self.done {
                 self.done = true;
-                out.orders
-                    .replace(EntryIntent::market(TradeSide::Long, 1.0).tick_bracket(4.0, 4.0));
+                ctx.replace_entry(EntryIntent::market(TradeSide::Long, 1.0).tick_bracket(4.0, 4.0));
             }
         }
     }
@@ -236,9 +237,10 @@ mod tests {
     struct CountBars(crate::Counters);
 
     impl Strategy for CountBars {
-        fn on_footprint(&mut self, fp: &Footprint, ctx: &BarCtx, _o: &mut StrategyOutput) {
+        fn on_bar(&mut self, ctx: &mut StrategyContext<'_>) {
+            let fp = ctx.bar();
             self.0.inc("bars");
-            self.0.add("bar_numbers", ctx.bar as f64);
+            self.0.add("bar_numbers", ctx.bar_index() as f64);
             self.0.add("closes", fp.close);
         }
         fn counters(&self) -> crate::Counters {
@@ -249,18 +251,32 @@ mod tests {
     #[test]
     fn strategy_counters_reach_the_result() {
         let bars = bars_from_closes(eastern_ts(2026, 1, 5, 10, 0), 60, &[100.0, 101.0, 102.5]);
-        let r = backtest(Box::new(CountBars(Default::default())), bars, BrokerConfig::default());
-        assert_eq!((r.counters.get("bars"), r.counters.get("closes")), (3.0, 303.5));
+        let r = backtest(
+            Box::new(CountBars(Default::default())),
+            bars,
+            BrokerConfig::default(),
+        );
+        assert_eq!(
+            (r.counters.get("bars"), r.counters.get("closes")),
+            (3.0, 303.5)
+        );
         // Global bar numbers are 0, 1, 2 -- the same index the chart uses.
         assert_eq!(r.counters.get("bar_numbers"), 3.0);
-        assert_eq!(r.counters.summary(), "bar_numbers 3 | bars 3 | closes 303.50");
+        assert_eq!(
+            r.counters.summary(),
+            "bar_numbers 3 | bars 3 | closes 303.50"
+        );
         let json = serde_json::to_value(&r).unwrap();
         assert_eq!(json["counters"]["bars"], 3.0);
     }
 
     #[test]
     fn drive_numbers_bars_like_the_engine() {
-        let bars = bars_from_closes(eastern_ts(2026, 1, 5, 10, 0), 60, &[100.0, 101.0, 102.5, 99.0]);
+        let bars = bars_from_closes(
+            eastern_ts(2026, 1, 5, 10, 0),
+            60,
+            &[100.0, 101.0, 102.5, 99.0],
+        );
         let mut s = CountBars(Default::default());
         drive(&mut s, &bars);
         assert_eq!(s.0.get("bar_numbers"), 6.0);
@@ -277,10 +293,59 @@ mod tests {
 
     #[test]
     fn level_builds_a_ladder() {
-        let fp = bar(0).price(100.0).level(100.0, 3.0, 1.0).level(100.25, 0.0, 2.0).build();
+        let fp = bar(0)
+            .price(100.0)
+            .level(100.0, 3.0, 1.0)
+            .level(100.25, 0.0, 2.0)
+            .build();
         assert_eq!(fp.volume, 6.0);
         assert_eq!(fp.delta, 0.0);
         assert_eq!(fp.ladder.len(), 2);
         assert_eq!(fp.high, 100.25);
     }
+}
+
+/// A synthetic context for testing reusable signal/drawing helpers in isolation.
+pub fn context(visuals_enabled: bool) -> StrategyContext<'static> {
+    static BAR: std::sync::OnceLock<Footprint> = std::sync::OnceLock::new();
+    static PORTFOLIO: PortfolioSnapshot = PortfolioSnapshot {
+        position: 0,
+        net_position_qty: 0.0,
+        position_count: 0,
+        pending_count: 0,
+        open_position: None,
+    };
+    StrategyContext::for_bar(
+        BAR.get_or_init(|| Footprint::seed(0, 100.0)),
+        &PORTFOLIO,
+        0,
+        visuals_enabled,
+    )
+}
+
+/// Invoke a bar callback with explicit fixture inputs, retaining commands in `sink`.
+pub fn on_bar<S: Strategy + ?Sized>(
+    strategy: &mut S,
+    bar: &Footprint,
+    state: &(usize, PortfolioSnapshot),
+    sink: &mut StrategyContext<'_>,
+) {
+    let mut ctx = StrategyContext::for_bar(bar, &state.1, state.0, sink.visuals_enabled());
+    ctx.set_commands(sink.take_commands());
+    strategy.on_bar(&mut ctx);
+    sink.set_commands(ctx.into_commands());
+}
+
+/// Invoke an event callback with an explicit account snapshot, retaining queued commands.
+pub fn on_event<S: Strategy + ?Sized>(
+    strategy: &mut S,
+    event: &crate::OrderFlowEvent,
+    portfolio: &PortfolioSnapshot,
+    sink: &mut StrategyContext<'_>,
+) {
+    let mut ctx =
+        StrategyContext::for_event(event, portfolio, sink.bar_index(), sink.visuals_enabled());
+    ctx.set_commands(sink.take_commands());
+    strategy.on_event(&mut ctx);
+    sink.set_commands(ctx.into_commands());
 }

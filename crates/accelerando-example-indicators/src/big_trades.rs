@@ -22,16 +22,18 @@ struct BigLevel {
     sell: f64,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum BigTradeMode {
-    Single,
-    Cumulative,
+accelerando_core::choice_enum! {
+    pub enum BigTradeMode {
+        Single => "single",
+        Cumulative => "cumulative",
+    }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum ThresholdMode {
-    Fixed,
-    Adaptive,
+accelerando_core::choice_enum! {
+    pub enum ThresholdMode {
+        Fixed => "fixed",
+        Adaptive => "adaptive",
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -117,16 +119,16 @@ fn valid_print(price: f64, size: f64, side: Side) -> bool {
 /// the first print, and price progression (buys sweep up, sells sweep down).
 /// The feed supplies one instrument stream without a market identifier.
 #[derive(Configurable)]
-#[configurable(init = Self::init)]
+#[configurable(init = Self::init, indicator = "big_trades")]
 pub struct BigTrades {
     #[param(default = "cumulative", choice = ["single", "cumulative"])]
     mode: BigTradeMode,
     #[param(default = DEFAULT_CUMULATIVE_WINDOW_MS, min = 1, max = 1000)]
     cumulative_window_ms: i64,
     #[param(default = "last", choice = ["last", "start", "weighted_average"])]
-    execution_price: String,
+    execution_price: ExecutionPrice,
     #[param(default = "any", choice = ["any", "at_high", "at_low", "body", "upper_wick", "lower_wick", "at_high_or_low"])]
-    price_location: String,
+    price_location: PriceLocation,
     #[param(default = "fixed", choice = ["fixed", "adaptive"])]
     threshold_mode: ThresholdMode,
     #[param(default = DEFAULT_MIN_TRADE_SIZE, min = 1.0, max = 5000.0)]
@@ -168,28 +170,6 @@ impl BigTrades {
         self.tick = self.tick.max(f64::EPSILON);
         self.max_markers_per_side = self.max_markers_per_side.max(1);
         self.cached_threshold = self.min_trade_size;
-    }
-}
-
-impl std::str::FromStr for BigTradeMode {
-    type Err = String;
-    fn from_str(s: &str) -> Result<Self, String> {
-        match s {
-            "single" => Ok(Self::Single),
-            "cumulative" => Ok(Self::Cumulative),
-            other => Err(format!("unknown BigTradeMode `{other}`")),
-        }
-    }
-}
-
-impl std::str::FromStr for ThresholdMode {
-    type Err = String;
-    fn from_str(s: &str) -> Result<Self, String> {
-        match s {
-            "fixed" => Ok(Self::Fixed),
-            "adaptive" => Ok(Self::Adaptive),
-            other => Err(format!("unknown ThresholdMode `{other}`")),
-        }
     }
 }
 
@@ -370,10 +350,10 @@ impl BigTrades {
     }
 
     fn consider_cumulative(&mut self, pending: CumulativeTrade) {
-        let price = match self.execution_price.as_str() {
-            "start" => pending.first_price,
-            "weighted_average" => pending.notional / pending.total,
-            _ => pending.last_price,
+        let price = match self.execution_price {
+            ExecutionPrice::Start => pending.first_price,
+            ExecutionPrice::WeightedAverage => pending.notional / pending.total,
+            ExecutionPrice::Last => pending.last_price,
         };
         self.consider(BigTrade {
             side: pending.side,
@@ -397,14 +377,16 @@ impl BigTrades {
         // Allow only floating-point rounding error when comparing a VWAP to a bar boundary.
         let at =
             |level: f64| (price - level).abs() <= f64::EPSILON * price.abs().max(level.abs()) * 4.0;
-        match self.price_location.as_str() {
-            "at_high" => at(fp.high),
-            "at_low" => at(fp.low),
-            "body" => (price >= body_low || at(body_low)) && (price <= body_high || at(body_high)),
-            "upper_wick" => price >= body_high || at(body_high),
-            "lower_wick" => price <= body_low || at(body_low),
-            "at_high_or_low" => at(fp.high) || at(fp.low),
-            _ => true,
+        match self.price_location {
+            PriceLocation::AtHigh => at(fp.high),
+            PriceLocation::AtLow => at(fp.low),
+            PriceLocation::Body => {
+                (price >= body_low || at(body_low)) && (price <= body_high || at(body_high))
+            }
+            PriceLocation::UpperWick => price >= body_high || at(body_high),
+            PriceLocation::LowerWick => price <= body_low || at(body_low),
+            PriceLocation::AtHighOrLow => at(fp.high) || at(fp.low),
+            PriceLocation::Any => true,
         }
     }
 
@@ -518,5 +500,25 @@ impl BigTrades {
         self.by_tick.clear();
         self.total_buy = 0.0;
         self.total_sell = 0.0;
+    }
+}
+
+accelerando_core::choice_enum! {
+    pub enum ExecutionPrice {
+        Last => "last",
+        Start => "start",
+        WeightedAverage => "weighted_average",
+    }
+}
+
+accelerando_core::choice_enum! {
+    pub enum PriceLocation {
+        Any => "any",
+        AtHigh => "at_high",
+        AtLow => "at_low",
+        Body => "body",
+        UpperWick => "upper_wick",
+        LowerWick => "lower_wick",
+        AtHighOrLow => "at_high_or_low",
     }
 }

@@ -7,9 +7,10 @@
 //!
 //! The window shows the price panel (zoom-adaptive liquidity heatmap, best-bid / best-ask
 //! lines, bars, trades and strategy overlays) and an optional equity panel on the same x axis.
-//! Display options, the equity toggle, metrics and the trade list live behind the Settings
-//! button. The x axis is either one equal-width slot per bar or proportional to time; either
-//! way closed-market time is never drawn over.
+//! The toolbar switches between bars and the heatmap. The heatmap gear controls the
+//! liquidity layer, Bid/Ask lines and trade bubbles. Settings contains the equity toggle,
+//! metrics and trade list. The x axis uses either equal-width bar slots or proportional time,
+//! with closed-market time skipped in both modes.
 //!
 //! The heatmap needs `Pipeline.keep_liquidity_heatmap = true` and bars need
 //! `Pipeline.keep_footprints = true` in the runner that produced the result.
@@ -545,8 +546,15 @@ impl Model {
     }
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ChartMode {
+    Bar,
+    Heatmap,
+}
+
 /// Chart display settings.
 pub(crate) struct Settings {
+    pub mode: ChartMode,
     pub big_trades: big_trades::BigTradeSettings,
     pub show_heat: bool,
     pub show_bbo: bool,
@@ -559,11 +567,11 @@ pub(crate) struct Settings {
     pub bubble_colorblind: bool,
     pub bubble_delta: bool,
     pub bubble_transparency: u32,
-    pub show_bars: bool,
     pub show_bar_poc: bool,
     pub show_bar_value_area: bool,
     pub show_trades: bool,
     pub show_overlays: bool,
+    pub show_strategy_profiles: bool,
     pub hidden_overlay_groups: std::collections::BTreeSet<String>,
     /// Point markers strategies attach to bars (e.g. labelled entry dots).
     pub show_markers: bool,
@@ -577,6 +585,14 @@ pub(crate) struct Settings {
     pub heat_contrast: f32,
     pub smoothing_secs: u32,
     pub red_up: bool,
+}
+
+impl Settings {
+    fn select_mode(&mut self, mode: ChartMode, has_bubbles: bool) {
+        self.mode = mode;
+        self.show_bbo = mode == ChartMode::Heatmap;
+        self.show_trade_bubbles = self.show_bbo && has_bubbles;
+    }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -605,7 +621,7 @@ struct Viewer {
     bar_error: Option<String>,
     /// Requested at the first frame (needs the egui context).
     startup_bars: Option<BarSpec>,
-    /// Volume profiles: strategy ones and the ones drawn by hand.
+    /// Profiles drawn by hand and their tool settings.
     vp: VpTool,
     /// Tick-by-tick replay and the host's tick reader.
     replay: Replay,
@@ -626,11 +642,17 @@ impl Viewer {
         let mut model = Model::new(result, &options, quotes, tape, depth);
         let smoothing_secs = if model.has_trade_quotes { 3 } else { options.smoothing_secs };
         model.set_smoothing(smoothing_secs as usize);
+        let mode = if model.bars().is_empty() && model.book_visible() {
+            ChartMode::Heatmap
+        } else {
+            ChartMode::Bar
+        };
         let settings = Settings {
+            mode,
             big_trades: Default::default(),
-            show_heat: model.has_heatmap(),
-            show_bbo: model.has_heatmap(),
-            show_trade_bubbles: !model.trade_volume.is_empty(),
+            show_heat: true,
+            show_bbo: mode == ChartMode::Heatmap,
+            show_trade_bubbles: mode == ChartMode::Heatmap && !model.trade_volume.is_empty(),
             bubble_min_trade_size: 0.0,
             bubble_min_displayed_volume: 1.0,
             bubble_aggregation: 52,
@@ -639,11 +661,11 @@ impl Viewer {
             bubble_colorblind: false,
             bubble_delta: true,
             bubble_transparency: 41,
-            show_bars: true,
             show_bar_poc: false,
             show_bar_value_area: false,
             show_trades: true,
             show_overlays: true,
+            show_strategy_profiles: true,
             hidden_overlay_groups: Default::default(),
             show_markers: false,
             show_equity: false,
@@ -712,11 +734,26 @@ impl Viewer {
             {
                 self.bar_dialog_open = !self.bar_dialog_open;
             }
-            let heatmap = ui.selectable_label(
-                self.toolbar_popup == Some(ToolbarPopup::Heatmap),
-                "Heatmap",
-            );
-            self.show_toolbar_popup(&settings, &heatmap);
+            if ui
+                .selectable_label(self.settings.mode == ChartMode::Bar, "Bar")
+                .clicked()
+            {
+                self.settings.select_mode(ChartMode::Bar, false);
+                self.toolbar_popup = None;
+            }
+            let heatmap = egui::Button::selectable(self.settings.mode == ChartMode::Heatmap, "Heatmap");
+            if ui
+                .add_enabled(self.model.book_visible(), heatmap)
+                .on_disabled_hover_text("Requires order-book or trade data and a time-proportional x axis.")
+                .clicked()
+            {
+                self.settings.select_mode(ChartMode::Heatmap, !self.model.trade_volume.is_empty());
+                self.toolbar_popup = None;
+            }
+            let heatmap_gear = ui
+                .selectable_label(self.toolbar_popup == Some(ToolbarPopup::Heatmap), "⚙")
+                .on_hover_text("Heatmap settings");
+            self.show_toolbar_popup(&settings, &heatmap_gear);
             if let Some((spec, _)) = &self.pending {
                 ui.spinner();
                 ui.label(format!("building {} bars ...", spec.label()));
@@ -726,9 +763,13 @@ impl Viewer {
                 .on_hover_text("Double-click the chart to show everything.");
             ui.separator();
             ui.toggle_value(&mut self.vp.drawing, "📊 Draw VP").on_hover_text(
-                "Drag across bars to draw a volume profile. Right-click a profile to delete it, \
-                 Esc to stop drawing. Use the gear next to Volume profile for its settings.",
+                "Drag across bars to draw one volume profile. Right-click a profile to delete it, \
+                 or press Esc to cancel drawing.",
             );
+            let vp_settings = ui.button("⚙").on_hover_text("Manual VP settings");
+            egui::Popup::from_toggle_button_response(&vp_settings)
+                .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
+                .show(|ui| self.vp.controls(ui));
             ui.label("σ");
             ui.add(
                 egui::DragValue::new(&mut self.vp.smooth_ticks)
@@ -744,7 +785,7 @@ impl Viewer {
             ui.separator();
             if self.model.replay_clock().is_none() {
                 ui.add_enabled_ui(self.ticks.is_some(), |ui| {
-                    ui.toggle_value(&mut self.replay.picking, "⏵ Replay")
+                    ui.toggle_value(&mut self.replay.picking, "▶ Replay")
                         .on_hover_text(
                             "Click a bar: everything after it is hidden and the trades are \
                              played back tick by tick.",
@@ -757,7 +798,7 @@ impl Viewer {
             } else {
                 let clock = self.model.replay_clock().unwrap_or(0);
                 ui.label(
-                    egui::RichText::new(format!("⏵ {}", data::format_ts_full(clock, self.model.tz)))
+                    egui::RichText::new(format!("▶ {}", data::format_ts_full(clock, self.model.tz)))
                         .monospace()
                         .color(chart::REPLAY),
                 );
@@ -891,10 +932,10 @@ impl Viewer {
         self.chart.show_range(xmap.to_x(t0), xmap.to_x(t1));
     }
 
-    fn show_toolbar_popup(&mut self, settings: &egui::Response, heatmap: &egui::Response) {
+    fn show_toolbar_popup(&mut self, settings: &egui::Response, heatmap_gear: &egui::Response) {
         let clicked = if settings.clicked() {
             Some(ToolbarPopup::Settings)
-        } else if heatmap.clicked() {
+        } else if heatmap_gear.clicked() {
             Some(ToolbarPopup::Heatmap)
         } else {
             None
@@ -907,7 +948,7 @@ impl Viewer {
         };
         let anchor = match popup {
             ToolbarPopup::Settings => settings,
-            ToolbarPopup::Heatmap => heatmap,
+            ToolbarPopup::Heatmap => heatmap_gear,
         };
         // The chart handles click dismissal so interacting with a ComboBox popup
         // (which has its own layer) leaves the toolbar popup open.
@@ -938,27 +979,20 @@ impl Viewer {
         if !book_visible {
             ui.weak("Heatmap requires a time-proportional x axis.");
         }
-        if has_quotes {
-            ui.add_enabled_ui(book_visible, |ui| {
-                ui.checkbox(&mut s.show_heat, "Heatmap (estimated Bid / Ask)")
-                    .on_hover_text("Highest buy and lowest sell per visible time column. A missing side keeps its previous price.");
-                ui.add_enabled_ui(s.show_heat, |ui| {
-                    trade_bubble_controls(ui, s, has_tape);
-                    ui.add(
-                        egui::Slider::new(&mut s.smoothing_secs, 0..=15)
-                            .suffix(" s")
-                            .text("line smoothing"),
-                    )
-                    .on_hover_text("Trailing average for the overview. Close zoom uses event-time quotes.");
-                });
-            });
-            return;
-        }
         ui.add_enabled_ui(book_visible, |ui| {
-            ui.checkbox(&mut s.show_heat, "Liquidity heatmap");
-            ui.checkbox(&mut s.show_bbo, "Bid / Ask lines");
+            if has_quotes {
+                ui.checkbox(&mut s.show_bbo, "Estimated Bid / Ask lines")
+                    .on_hover_text("Highest buy and lowest sell per visible time column. A missing side keeps its previous price.");
+            } else {
+                ui.checkbox(&mut s.show_bbo, "Bid / Ask lines");
+            }
             if has_bubbles {
-                ui.add_enabled_ui(s.show_bbo, |ui| trade_bubble_controls(ui, s, has_tape));
+                trade_bubble_controls(ui, s, has_tape);
+            }
+            if has_quotes {
+                ui.add(egui::Slider::new(&mut s.smoothing_secs, 0..=15).suffix(" s").text("line smoothing"))
+                    .on_hover_text("Trailing average for the overview. Close zoom uses event-time quotes.");
+                return;
             }
             ui.add(
                 egui::Slider::new(&mut s.smoothing_secs, 0..=300)
@@ -970,6 +1004,9 @@ impl Viewer {
                 "Width of the zero-lag (centered) smoothing kernel applied to the \
                  overview bid/ask lines. Close zoom uses event-time quotes.",
             );
+            ui.add_enabled_ui(s.mode == ChartMode::Heatmap, |ui| {
+                ui.checkbox(&mut s.show_heat, "Liquidity heatmap");
+            });
             egui::ComboBox::from_label("heat")
                 .selected_text(match s.heat_metric {
                     HeatMetric::Total => "Bid + Ask",
@@ -1015,7 +1052,6 @@ impl Viewer {
 
         ui.separator();
         ui.strong("Chart");
-        ui.checkbox(&mut s.show_bars, "Bars");
         ui.checkbox(&mut s.show_bar_poc, "Show POC")
             .on_hover_text("Outline the highest-volume row in each footprint.");
         ui.checkbox(&mut s.show_bar_value_area, "Show Value Area")
@@ -1266,4 +1302,85 @@ fn metrics_rows(result: &BacktestResult) -> Vec<(String, String)> {
         (format!("· {k}"), v)
     }));
     rows
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use accelerando_core::{OrderFlowEvent, Side};
+
+    #[test]
+    fn toolbar_switches_modes_and_gear_overlays_work_in_bar_mode() {
+        let result = BacktestResult {
+            metrics: Default::default(),
+            trades: Vec::new(),
+            equity: Vec::new(),
+            footprints: vec![accelerando_core::testkit::bar(0).price(100.0).build()],
+            liquidity_heatmap: Default::default(),
+            series: Vec::new(),
+            counters: Default::default(),
+            tick_size: 0.25,
+            multiplier: 50.0,
+        };
+        let quotes = data::trade_quotes(&[OrderFlowEvent::Trade {
+            ts_ns: 500_000_000,
+            price: 100.0,
+            size: 10.0,
+            aggressor: Side::Buy,
+        }]);
+        let mut viewer = Viewer::new(result, Default::default(), &quotes, None, Default::default());
+        let ctx = egui::Context::default();
+        let frame = |viewer: &mut Viewer, events| {
+            let input = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1200.0, 800.0))),
+                events,
+                ..Default::default()
+            };
+            let mut output = ctx.run_ui(input, |ui| viewer.toolbar(ui));
+            output.textures_delta.clear();
+            output.shapes
+        };
+        let click = |viewer: &mut Viewer, label| {
+            // Popups place their contents after the first layout pass.
+            frame(viewer, Vec::new());
+            let pos = frame(viewer, Vec::new())
+                .into_iter()
+                .find_map(|entry| match entry.shape {
+                    egui::Shape::Text(text) if text.galley.text() == label => {
+                        Some(text.pos + text.galley.rect.center().to_vec2())
+                    }
+                    _ => None,
+                })
+                .unwrap_or_else(|| panic!("missing toolbar control: {label}"));
+            let button = |pressed| egui::Event::PointerButton {
+                pos,
+                button: egui::PointerButton::Primary,
+                pressed,
+                modifiers: egui::Modifiers::NONE,
+            };
+            frame(viewer, vec![egui::Event::PointerMoved(pos), button(true)]);
+            frame(viewer, vec![button(false)]);
+        };
+
+        assert!(viewer.settings.mode == ChartMode::Bar);
+        assert!(!viewer.settings.show_bbo && !viewer.settings.show_trade_bubbles);
+        click(&mut viewer, "Heatmap");
+        assert!(viewer.settings.mode == ChartMode::Heatmap);
+        assert!(viewer.settings.show_bbo && viewer.settings.show_trade_bubbles);
+        assert!(viewer.toolbar_popup.is_none());
+
+        click(&mut viewer, "Bar");
+        assert!(viewer.settings.mode == ChartMode::Bar);
+        assert!(!viewer.settings.show_bbo && !viewer.settings.show_trade_bubbles);
+        click(&mut viewer, "⚙");
+        assert!(viewer.toolbar_popup == Some(ToolbarPopup::Heatmap));
+        click(&mut viewer, "Trade bubbles");
+        assert!(!viewer.settings.show_bbo && viewer.settings.show_trade_bubbles);
+        click(&mut viewer, "Estimated Bid / Ask lines");
+        assert!(viewer.settings.mode == ChartMode::Bar);
+        assert!(viewer.settings.show_bbo && viewer.settings.show_trade_bubbles);
+
+        click(&mut viewer, "Bar");
+        assert!(!viewer.settings.show_bbo && !viewer.settings.show_trade_bubbles);
+    }
 }

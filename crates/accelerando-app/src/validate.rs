@@ -14,8 +14,8 @@
 use std::collections::HashMap;
 
 use accelerando_core::{
-    run_prepared_backtest, BacktestResult, BarCtx, BrokerConfig, EntryIntent, Footprint,
-    PreparedBacktestData, Strategy, StrategyOutput, Trade, TradeSide,
+    run_prepared_backtest, BacktestResult, BrokerConfig, EntryIntent, PreparedBacktestData,
+    Strategy, StrategyContext, Trade, TradeSide,
 };
 use rayon::prelude::*;
 use serde::Serialize;
@@ -86,9 +86,8 @@ pub fn split_report(
         } else {
             None
         },
-        oos_profitable_share: multi.then(|| {
-            oos.iter().filter(|s| s.net_pnl > 0.0).count() as f64 / oos.len() as f64
-        }),
+        oos_profitable_share: multi
+            .then(|| oos.iter().filter(|s| s.net_pnl > 0.0).count() as f64 / oos.len() as f64),
     })
 }
 
@@ -122,7 +121,13 @@ pub fn walk_forward(
     }
     let (first, last) = time_bounds(data);
     let width = (last - first) / folds as i64;
-    let edge = |k: usize| if k == folds { last } else { first + width * k as i64 };
+    let edge = |k: usize| {
+        if k == folds {
+            last
+        } else {
+            first + width * k as i64
+        }
+    };
     let mut out = Vec::new();
     let mut stitched: Vec<&Trade> = Vec::new();
     for k in 1..folds {
@@ -213,19 +218,23 @@ pub fn random_baseline(
     if strategy_trades.is_empty() || fps.len() < 10 || runs == 0 {
         return None;
     }
-    let bar_of = |ts: i64| fps.partition_point(|f| f.ts_last_ns < ts).min(fps.len() - 1);
+    let bar_of = |ts: i64| {
+        fps.partition_point(|f| f.ts_last_ns < ts)
+            .min(fps.len() - 1)
+    };
     let holds: Vec<usize> = strategy_trades
         .iter()
-        .map(|t| bar_of(t.exit_ts_ns).saturating_sub(bar_of(t.entry_ts_ns)).max(1))
+        .map(|t| {
+            bar_of(t.exit_ts_ns)
+                .saturating_sub(bar_of(t.entry_ts_ns))
+                .max(1)
+        })
         .collect();
     let minutes: Vec<u32> = strategy_trades
         .iter()
         .map(|t| accelerando_core::market_time::eastern_day_minute(t.entry_ts_ns).1)
         .collect();
-    let (lo, hi) = (
-        *minutes.iter().min()?,
-        *minutes.iter().max()?,
-    );
+    let (lo, hi) = (*minutes.iter().min()?, *minutes.iter().max()?);
     // Signal bar = one bar before the fill bar.
     let eligible: Vec<usize> = (0..fps.len() - 1)
         .filter(|&i| {
@@ -260,10 +269,7 @@ pub fn random_baseline(
                 schedule.insert(i, (dir, hold));
                 busy_until = i + hold + 2;
             }
-            let strat = RandomEntry {
-                schedule,
-                hold: 0,
-            };
+            let strat = RandomEntry { schedule, hold: 0 };
             let result = run_prepared_backtest(data, Box::new(strat), cfg, false);
             result.trades.iter().map(|t| t.pnl).sum::<f64>()
         })
@@ -288,18 +294,23 @@ struct RandomEntry {
 }
 
 impl Strategy for RandomEntry {
-    fn on_footprint(&mut self, _fp: &Footprint, ctx: &BarCtx, out: &mut StrategyOutput) {
-        let i = ctx.bar;
-        if let Some(pos) = ctx.open_position.as_ref() {
+    fn on_bar(&mut self, ctx: &mut StrategyContext<'_>) {
+        let portfolio = ctx.portfolio();
+        let i = ctx.bar_index();
+        if let Some(pos) = portfolio.open_position.as_ref() {
             if pos.bars_held >= self.hold {
-                out.orders.exit_position();
+                ctx.exit_position();
             }
             return;
         }
         if let Some(&(dir, hold)) = self.schedule.get(&i) {
             self.hold = hold;
-            let side = if dir > 0 { TradeSide::Long } else { TradeSide::Short };
-            out.orders.replace(EntryIntent::market(side, 1.0));
+            let side = if dir > 0 {
+                TradeSide::Long
+            } else {
+                TradeSide::Short
+            };
+            ctx.replace_entry(EntryIntent::market(side, 1.0));
         }
     }
 }
@@ -352,7 +363,10 @@ impl ValidationReport {
             }
         }
         if let Some(wf) = &self.walk_forward {
-            println!("\nwalk-forward ({} OOS folds; choose on previous fold)", wf.folds.len());
+            println!(
+                "\nwalk-forward ({} OOS folds; choose on previous fold)",
+                wf.folds.len()
+            );
             for f in &wf.folds {
                 println!(
                     "  fold {}  chosen {:<28} sel net {:>9.2}  OOS {}",

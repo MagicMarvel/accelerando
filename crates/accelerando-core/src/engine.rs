@@ -1,13 +1,14 @@
 //! The streaming backtest engine: wires the four stages together and runs them one footprint
 //! at a time. This is the hot loop used by normal runs and hyperopt evaluators.
 
-use crate::broker::{Broker, BrokerConfig, StrategyOutput};
+use crate::broker::{Broker, BrokerConfig};
 use crate::event::{EventInterest, OrderFlowEvent};
 use crate::footprint::Footprint;
 use crate::metrics::Metrics;
 use crate::progress::ProgressHandle;
 use crate::result::{BacktestResult, LiquidityHeatmap, LiquidityLevel, LiquiditySnapshot, Series};
-use crate::traits::{BarCtx, DataSource, FootprintAggregator, Indicator, Strategy};
+use crate::traits::{DataSource, FootprintAggregator, Indicator, Strategy};
+use crate::StrategyContext;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
@@ -222,7 +223,11 @@ impl HeatmapSampler {
             .snapshot(bucket * LIQUIDITY_HEATMAP_INTERVAL_NS, self.last_px);
         // An empty snapshot ends the previous one (the book was cleared); a leading or repeated
         // empty snapshot carries no information.
-        let prev_empty = self.out.snapshots.last().is_none_or(|s| s.levels.is_empty());
+        let prev_empty = self
+            .out
+            .snapshots
+            .last()
+            .is_none_or(|s| s.levels.is_empty());
         if !(snapshot.levels.is_empty() && prev_empty) {
             self.out.snapshots.push(snapshot);
         }
@@ -253,6 +258,8 @@ pub struct Pipeline {
 /// adapter, aggregator and indicators are identical but strategies differ.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct PreparedBacktestData {
+    #[serde(default)]
+    pub bar_spec: Option<crate::BarSpec>,
     pub footprints: Vec<Footprint>,
     #[serde(default)]
     pub liquidity_heatmap: LiquidityHeatmap,
@@ -265,6 +272,7 @@ impl PreparedBacktestData {
     pub fn from_footprints(footprints: Vec<Footprint>, tick_size: f64, multiplier: f64) -> Self {
         Self {
             footprints,
+            bar_spec: None,
             liquidity_heatmap: LiquidityHeatmap::default(),
             tick_size,
             multiplier,
@@ -278,7 +286,12 @@ impl PreparedBacktestData {
     pub fn check_values(&self, keys: &[String]) -> Result<(), String> {
         let missing: Vec<&String> = keys
             .iter()
-            .filter(|key| !self.footprints.iter().any(|fp| fp.values.contains_key(*key)))
+            .filter(|key| {
+                !self
+                    .footprints
+                    .iter()
+                    .any(|fp| fp.values.contains_key(*key))
+            })
             .collect();
         if missing.is_empty() {
             return Ok(());
@@ -311,8 +324,14 @@ pub fn prepare_backtest_data(
     keep_liquidity_heatmap: bool,
     progress: Option<ProgressHandle>,
 ) -> PreparedBacktestData {
-    try_prepare_backtest_data(source, aggregator, indicators, keep_liquidity_heatmap, progress)
-        .unwrap_or_else(|e| panic!("{e}"))
+    try_prepare_backtest_data(
+        source,
+        aggregator,
+        indicators,
+        keep_liquidity_heatmap,
+        progress,
+    )
+    .unwrap_or_else(|e| panic!("{e}"))
 }
 
 /// Prepare footprints and return any input error to the caller.
@@ -327,6 +346,7 @@ pub fn try_prepare_backtest_data(
     let mut heatmap_sampler = keep_liquidity_heatmap.then(HeatmapSampler::new);
     let mut tick_size = 0.25;
     let mut multiplier = 1.0;
+    let bar_spec = aggregator.bar_spec();
     let aggregator_interest = aggregator.event_interest();
     let includes_closing_trade = aggregator.includes_closing_trade();
     let indicator_interests: Vec<EventInterest> =
@@ -344,15 +364,14 @@ pub fn try_prepare_backtest_data(
         source.set_progress(h.clone());
     }
 
-    let handle = |fp: Footprint,
-                  history: &mut Vec<Footprint>,
-                  indicators: &mut Vec<Box<dyn Indicator>>| {
-        let mut fp = fp;
-        for ind in indicators.iter_mut() {
-            ind.on_footprint(&mut fp, history);
-        }
-        history.push(fp);
-    };
+    let handle =
+        |fp: Footprint, history: &mut Vec<Footprint>, indicators: &mut Vec<Box<dyn Indicator>>| {
+            let mut fp = fp;
+            for ind in indicators.iter_mut() {
+                ind.on_footprint(&mut fp, history);
+            }
+            history.push(fp);
+        };
 
     for event in source.try_events() {
         let ev = match event {
@@ -377,17 +396,14 @@ pub fn try_prepare_backtest_data(
             }
         }
 
-        let feed_before_close = includes_closing_trade && matches!(ev, OrderFlowEvent::Trade { .. });
+        let feed_before_close =
+            includes_closing_trade && matches!(ev, OrderFlowEvent::Trade { .. });
         if feed_before_close {
             feed_indicators(&mut indicators, &indicator_interests, &ev);
         }
         if aggregator_interest.matches(&ev) {
             if let Some(fp) = aggregator.on_event(&ev) {
-                handle(
-                    fp,
-                    &mut history,
-                    &mut indicators,
-                );
+                handle(fp, &mut history, &mut indicators);
                 if let Some(h) = &progress {
                     h.inc_footprints();
                 }
@@ -402,11 +418,7 @@ pub fn try_prepare_backtest_data(
         }
     }
     if let Some(fp) = aggregator.flush() {
-        handle(
-            fp,
-            &mut history,
-            &mut indicators,
-        );
+        handle(fp, &mut history, &mut indicators);
         if let Some(h) = &progress {
             h.inc_footprints();
         }
@@ -416,6 +428,7 @@ pub fn try_prepare_backtest_data(
     }
 
     Ok(PreparedBacktestData {
+        bar_spec,
         footprints: history,
         liquidity_heatmap: heatmap_sampler
             .map(HeatmapSampler::finish)
@@ -458,13 +471,12 @@ pub fn run_prepared_backtest(
             let trade = broker.trades[i].clone();
             strategy.on_trade_closed(&trade);
         }
-        let ctx = BarCtx {
-            bar: bar_index,
-            portfolio: broker.portfolio_snapshot(),
-        };
-        let mut output = StrategyOutput::new(keep_footprints);
-        strategy.on_footprint(source_fp, &ctx, &mut output);
-        let (plots, points) = broker.apply_strategy_output(output);
+        let portfolio = broker.portfolio_snapshot();
+        let mut ctx = StrategyContext::for_bar(source_fp, &portfolio, bar_index, keep_footprints)
+            .with_history(&data.footprints[..bar_index])
+            .with_bar_spec(data.bar_spec.as_ref());
+        strategy.on_bar(&mut ctx);
+        let (plots, points) = broker.apply_context(ctx);
         series.extend(bar_index, points);
         if keep_footprints {
             let mut fp = source_fp.clone();
@@ -515,6 +527,7 @@ pub fn run_backtest_progress(
     let mut heatmap_sampler = keep_liquidity_heatmap.then(HeatmapSampler::new);
     let mut last_close = f64::NAN;
     let mut last_ts = 0i64;
+    let bar_spec = aggregator.bar_spec();
     let aggregator_interest = aggregator.event_interest();
     let includes_closing_trade = aggregator.includes_closing_trade();
     let indicator_interests: Vec<EventInterest> =
@@ -559,13 +572,12 @@ pub fn run_backtest_progress(
         }
         // Strategy reacts and sets intent for the next bar.
         {
-            let ctx = BarCtx {
-                bar: history.len(),
-                portfolio: broker.portfolio_snapshot(),
-            };
-            let mut output = StrategyOutput::new(keep_footprints);
-            strategy.on_footprint(&fp, &ctx, &mut output);
-            let (plots, points) = broker.apply_strategy_output(output);
+            let portfolio = broker.portfolio_snapshot();
+            let mut ctx = StrategyContext::for_bar(&fp, &portfolio, history.len(), keep_footprints)
+                .with_history(history)
+                .with_bar_spec(bar_spec.as_ref());
+            strategy.on_bar(&mut ctx);
+            let (plots, points) = broker.apply_context(ctx);
             series.extend(history.len(), points);
             fp.plots.extend(plots);
         }
@@ -573,7 +585,8 @@ pub fn run_backtest_progress(
     };
 
     for ev in source.events() {
-        let feed_before_close = includes_closing_trade && matches!(ev, OrderFlowEvent::Trade { .. });
+        let feed_before_close =
+            includes_closing_trade && matches!(ev, OrderFlowEvent::Trade { .. });
         if feed_before_close {
             feed_indicators(&mut indicators, &indicator_interests, &ev);
         }
@@ -681,9 +694,17 @@ mod tests {
     #[test]
     fn heatmap_sampler_emits_one_snapshot_per_changed_second() {
         const S: i64 = LIQUIDITY_HEATMAP_INTERVAL_NS;
-        let set = |ts_ns, price, size, side| OrderFlowEvent::SetLevel { ts_ns, price, size, side };
+        let set = |ts_ns, price, size, side| OrderFlowEvent::SetLevel {
+            ts_ns,
+            price,
+            size,
+            side,
+        };
         let mut sampler = HeatmapSampler::new();
-        sampler.on_event(&OrderFlowEvent::Contract { tick_size: 0.01, multiplier: 1.0 });
+        sampler.on_event(&OrderFlowEvent::Contract {
+            tick_size: 0.01,
+            multiplier: 1.0,
+        });
         // Second 10: several updates collapse into one snapshot holding the last state.
         sampler.on_event(&set(10 * S, 10.00, 5.0, Side::Buy));
         sampler.on_event(&set(10 * S + S / 2, 10.00, 7.0, Side::Buy));

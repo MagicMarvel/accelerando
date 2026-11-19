@@ -1,8 +1,8 @@
 //! Opt-in trade-event execution. The existing footprint engine remains unchanged.
 use crate::{
-    BacktestResult, BarCtx, Broker, BrokerConfig, DataSource, EventInterest, Footprint,
+    BacktestResult, Broker, BrokerConfig, DataSource, EventInterest, Footprint,
     FootprintAggregator, Indicator, LiquidityHeatmap, Metrics, OrderFlowEvent, Plot, Series,
-    Strategy, StrategyOutput,
+    Strategy, StrategyContext,
 };
 use serde::Serialize;
 use std::{collections::BTreeMap, io::Write};
@@ -71,7 +71,9 @@ pub fn prepare_event_data(source: Box<dyn DataSource>) -> Result<PreparedEventDa
     PreparedEventData::from_events(trade_events(source).collect::<Result<_, _>>()?)
 }
 
-fn trade_events(mut source: Box<dyn DataSource>) -> impl Iterator<Item = Result<OrderFlowEvent, String>> {
+fn trade_events(
+    mut source: Box<dyn DataSource>,
+) -> impl Iterator<Item = Result<OrderFlowEvent, String>> {
     let interest = EventInterest::CONTRACT.union(EventInterest::TRADE);
     source.set_event_interest(interest);
     source.try_events().filter(move |event| match event {
@@ -131,7 +133,7 @@ impl Display {
 
 /// Trade exits -> event strategy -> immediate market execution. Completed bars are delivered
 /// before the boundary print, with explicit availability and completeness metadata. Signals
-/// emitted from on_footprint are queued until that boundary print; the bar's OHLC never fills them.
+/// emitted from on_bar are queued until that boundary print; the bar's OHLC never fills them.
 pub fn run_prepared_event_backtest(
     data: &PreparedEventData,
     aggregator: Box<dyn FootprintAggregator>,
@@ -163,7 +165,15 @@ pub fn run_event_backtest(
     keep: bool,
     sink: Option<&mut dyn Write>,
 ) -> Result<BacktestResult, String> {
-    run_event_iterator(trade_events(source), aggregator, indicators, strategy, cfg, keep, sink)
+    run_event_iterator(
+        trade_events(source),
+        aggregator,
+        indicators,
+        strategy,
+        cfg,
+        keep,
+        sink,
+    )
 }
 
 fn run_event_iterator(
@@ -180,6 +190,7 @@ fn run_event_iterator(
     }
     let mut broker = Broker::new(cfg);
     let includes_closing_trade = aggregator.includes_closing_trade();
+    let bar_spec = aggregator.bar_spec();
     let feed_trade = |indicators: &mut [Box<dyn Indicator>], event: &OrderFlowEvent| {
         for ind in indicators {
             if ind.event_interest().matches(event) {
@@ -246,10 +257,15 @@ fn run_event_iterator(
                 for ind in &mut indicators {
                     ind.on_event(ev);
                 }
-                let mut output = StrategyOutput::new(keep);
-                strategy.on_event(ev, &broker.portfolio_snapshot(), &mut output);
+                let portfolio = broker.portfolio_snapshot();
+                let mut ctx =
+                    StrategyContext::for_event(ev, &portfolio, display.index as usize, keep)
+                        .with_history(&indicator_history)
+                        .with_bar_spec(bar_spec.as_ref());
+                strategy.on_event(&mut ctx);
+                let output = ctx.into_commands();
                 // Contract callbacks are lifecycle notifications, not fill opportunities.
-                let (plots, points) = broker.apply_strategy_output(output);
+                let (plots, points) = broker.apply_commands(output);
                 display.output(plots, points);
                 contract_seen = true;
             }
@@ -264,15 +280,14 @@ fn run_event_iterator(
                     for ind in &mut indicators {
                         ind.on_footprint(&mut fp, &indicator_history);
                     }
-                    let mut output = StrategyOutput::new(keep);
-                    let ctx = BarCtx {
-                        bar: display.index as usize,
-                        portfolio: broker.portfolio_snapshot(),
-                    };
-                    strategy.on_footprint(&fp, &ctx, &mut output);
-                    if !indicators.is_empty() {
-                        indicator_history.push(fp.clone());
-                    }
+                    let portfolio = broker.portfolio_snapshot();
+                    let mut ctx =
+                        StrategyContext::for_bar(&fp, &portfolio, display.index as usize, keep)
+                            .with_history(&indicator_history)
+                            .with_bar_spec(bar_spec.as_ref());
+                    strategy.on_bar(&mut ctx);
+                    let output = ctx.into_commands();
+                    indicator_history.push(fp.clone());
                     display.finish_bar(fp, keep);
                     deferred = Some(output);
                 }
@@ -285,12 +300,17 @@ fn run_event_iterator(
                     feed_trade(&mut indicators, ev);
                 }
                 if let Some(output) = deferred.take() {
-                    let (plots, points) = broker.apply_event_output(output, ts_ns, price)?;
+                    let (plots, points) = broker.apply_event_commands(output, ts_ns, price)?;
                     display.output(plots, points);
                 }
-                let mut output = StrategyOutput::new(keep);
-                strategy.on_event(ev, &broker.portfolio_snapshot(), &mut output);
-                let (plots, points) = broker.apply_event_output(output, ts_ns, price)?;
+                let portfolio = broker.portfolio_snapshot();
+                let mut ctx =
+                    StrategyContext::for_event(ev, &portfolio, display.index as usize, keep)
+                        .with_history(&indicator_history)
+                        .with_bar_spec(bar_spec.as_ref());
+                strategy.on_event(&mut ctx);
+                let output = ctx.into_commands();
+                let (plots, points) = broker.apply_event_commands(output, ts_ns, price)?;
                 display.output(plots, points);
                 if let Some(pos) = broker
                     .open_position_info()
@@ -367,8 +387,8 @@ fn run_event_iterator(
 mod tests {
     use super::*;
     use crate::{EntryIntent, TradeReason, TradeSide};
-    fn output(stop: f64) -> StrategyOutput {
-        let mut o = StrategyOutput::new(false);
+    fn output(stop: f64) -> crate::broker::StrategyCommands {
+        let mut o = crate::broker::StrategyCommands::new(false);
         o.orders
             .replace(EntryIntent::market(TradeSide::Long, 1.0).risk_reward_bracket(stop, 1.5));
         o
@@ -381,7 +401,7 @@ mod tests {
         });
         b.set_contract(1.0, 10.0);
         b.on_trade_event(1, 100.0);
-        b.apply_event_output(output(98.0), 1, 100.0).unwrap();
+        b.apply_event_commands(output(98.0), 1, 100.0).unwrap();
         assert_eq!(b.open_position_info().unwrap().target, Some(106.0));
         assert!(b.trades.is_empty());
         b.on_trade_event(1, 108.0);
@@ -392,7 +412,7 @@ mod tests {
     fn invalid_stop_is_rejected_and_no_fee_is_charged() {
         let mut b = Broker::new(BrokerConfig::default());
         b.set_contract(1.0, 10.0);
-        assert!(b.apply_event_output(output(101.0), 1, 100.0).is_err());
+        assert!(b.apply_event_commands(output(101.0), 1, 100.0).is_err());
         assert!(b.open_position_info().is_none());
     }
     #[test]

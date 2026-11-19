@@ -2,8 +2,7 @@
 //! closes the current footprint and starts the opposite one with the trigger trade.
 
 use accelerando_core::{
-    Configurable, EventInterest, Footprint, FootprintAggregator, OrderFlowEvent,
-    Side,
+    Configurable, EventInterest, Footprint, FootprintAggregator, OrderFlowEvent, Side,
 };
 
 #[derive(Clone, Copy)]
@@ -30,6 +29,11 @@ impl ReverseAggregator {
 }
 
 impl FootprintAggregator for ReverseAggregator {
+    fn bar_spec(&self) -> Option<accelerando_core::BarSpec> {
+        Some(accelerando_core::BarSpec::Reverse {
+            ticks: self.reversal_ticks,
+        })
+    }
     fn event_interest(&self) -> EventInterest {
         EventInterest::CONTRACT.union(EventInterest::TRADE)
     }
@@ -43,7 +47,12 @@ impl FootprintAggregator for ReverseAggregator {
                 }
                 previous
             }
-            OrderFlowEvent::Trade { ts_ns, price, size, aggressor } => {
+            OrderFlowEvent::Trade {
+                ts_ns,
+                price,
+                size,
+                aggressor,
+            } => {
                 let tick_size = self.tick_size;
                 let distance_ticks = |distance: f64| (distance / tick_size).round() as i64;
                 let reversal = self.current.as_ref().and_then(|bar| match self.direction {
@@ -66,12 +75,16 @@ impl FootprintAggregator for ReverseAggregator {
                     Some(bar)
                 });
 
-                let bar = self.current.get_or_insert_with(|| Footprint::seed(ts_ns, price));
+                let bar = self
+                    .current
+                    .get_or_insert_with(|| Footprint::seed(ts_ns, price));
                 match aggressor {
                     Side::Unknown => bar.add_unknown_trade(ts_ns, price, size),
                     side => bar.add_trade(ts_ns, price, size, side == Side::Buy, self.tick_size),
                 }
-                if self.direction.is_none() && distance_ticks(bar.high - bar.low) >= self.reversal_ticks {
+                if self.direction.is_none()
+                    && distance_ticks(bar.high - bar.low) >= self.reversal_ticks
+                {
                     self.direction = Some(if price == bar.high {
                         Direction::Up
                     } else {
@@ -101,12 +114,14 @@ mod tests {
     #[test]
     fn reverses_from_the_running_extreme_and_assigns_the_trigger_once() {
         let mut agg = ReverseAggregator::from_params(&Params::default());
-        let mut trade = |price| agg.on_event(&OrderFlowEvent::Trade {
-            ts_ns: 1,
-            price,
-            size: 1.0,
-            aggressor: Side::Buy,
-        });
+        let mut trade = |price| {
+            agg.on_event(&OrderFlowEvent::Trade {
+                ts_ns: 1,
+                price,
+                size: 1.0,
+                aggressor: Side::Buy,
+            })
+        };
         for price in [100.0, 104.0, 106.0, 102.25] {
             assert!(trade(price).is_none());
         }

@@ -104,8 +104,8 @@ version is `crates/accelerando-app/examples/quickstart.rs`.
 
 ```rust
 use accelerando_core::ta::{Cross, CrossDir, Ema, SessionVwap};
-use accelerando_core::{BarCtx, Configurable, EntryIntent, Footprint, SessionClock,
-    SessionFilter, Strategy, StrategyOutput, StrategyRequirements, TradeDiscipline, TradeSide};
+use accelerando_core::{Configurable, EntryIntent, Footprint, SessionClock,
+    SessionFilter, Strategy, StrategyContext, StrategyRequirements, TradeDiscipline, TradeSide};
 
 #[derive(Configurable)]                     // 1
 #[configurable(init = Self::init)]
@@ -125,15 +125,17 @@ impl MyStrategy { fn init(&mut self) { self.ema = Ema::new(self.fast); } }
 
 impl Strategy for MyStrategy {
     fn requirements(&self) -> StrategyRequirements {   // 3
-        StrategyRequirements::new().bars("time:60")    // .indicator(..) / .values(&[..])
+        StrategyRequirements::new().bars(accelerando_core::BarSpec::Time { seconds: 60 })    // .indicator(..) / .values(&[..])
     }
-    fn on_footprint(&mut self, fp: &Footprint, ctx: &BarCtx, out: &mut StrategyOutput) {
+    fn on_bar(&mut self, ctx: &mut StrategyContext<'_>) {
+        let fp = ctx.bar();
+        let portfolio = ctx.portfolio();
         let now = self.clock.update(fp.ts_last_ns);    // 2
         self.discipline.on_bar(now.day);
         let vwap = self.vwap.update_bar(now.day, fp);
         let fast = self.ema.update(fp.close);
         let crossed = self.cross.update(fp.close, fast);
-        // ... out.orders.replace(EntryIntent::market(..).tick_bracket(..))
+        // ... ctx.replace_entry(EntryIntent::market(..).tick_bracket(..))
     }
 }
 
@@ -229,17 +231,21 @@ Parameter validation is strict: `build` panics on unknown param names or illegal
 
 ## Mechanics worth knowing when writing strategies
 
-- **Read/write boundary**: `Strategy::on_footprint` receives an immutable `BarCtx` (global bar number `ctx.bar` + `PortfolioSnapshot`, which it derefs to) and a
-  mutable `StrategyOutput`. Account state is read from `portfolio`; decisions are emitted through
-  `output.orders` and chart-only data through `output.visuals`.
-- **Position visibility**: `portfolio.open_position` contains `PositionInfo` (direction, average price,
+- **Callback context**: `Strategy::on_bar(&mut self, ctx: &mut StrategyContext<'_>)`
+  reads immutable market/account inputs through `ctx.bar()`, `ctx.history()`, `ctx.bar_spec()`
+  and `ctx.portfolio()`. `ctx.bar_index()` is the global bar number. Queue trading commands
+  through `ctx.replace_entry()`, `ctx.add_entry()`, `ctx.cancel_pending()` and `ctx.exit_position()`;
+  use `ctx.plot()` / `ctx.plot_series()` for visuals. The engine applies commands after the callback,
+  so the account snapshot stays unchanged within that callback. Raw-event strategies implement
+  `on_event(&mut self, ctx: &mut StrategyContext<'_>)` and read `ctx.event()`.
+- **Position visibility**: `ctx.portfolio().open_position` contains `PositionInfo` (direction, average price,
   bars held, current stop/target) — a time stop is just `pos.bars_held >= N`. Strategies can also
   implement `on_trade_closed(&Trade)` to be called back on every round-trip close.
 - **Typed entries**: submit `EntryIntent::market(TradeSide::Long, qty)` or `EntryIntent::limit(...)`
-  through `output.orders.replace(...)` / `add(...)`. Attach structural protection with
+  through `ctx.replace_entry(...)` / `ctx.add_entry(...)`. Attach structural protection with
   `.price_bracket(stop, target)` or relative protection with `.tick_bracket(stop, target)`.
-- **Explicit cancellation and exits**: `output.orders.cancel_pending()` only removes resting entry
-  orders; `output.orders.exit_position()` requests a next-bar position exit.
+- **Explicit cancellation and exits**: `ctx.cancel_pending()` only removes resting entry
+  orders; `ctx.exit_position()` requests a next-bar position exit.
 - **Fill model**: intent set on bar `i` fills at bar `i+1`'s open; stops/targets are checked
   intrabar against high/low. Within one bar the stop is assumed to hit before the target
   (conservative). If the open gaps through the stop, the stop triggers at the **open price** —
@@ -247,7 +253,7 @@ Parameter validation is strict: `build` panics on unknown param names or illegal
   fill: market entries/exits **and triggered stops** (a stop becomes a market order). Targets are
   resting limits and fill exactly at the target. Tick brackets are anchored on the actual
   (slipped) entry fill, like an ATM bracket.
-- **Line outputs use series**: `output.visuals.series("vwap", v)` / `series_colored` store one series per run
+- **Line outputs use series**: `ctx.plot_series("vwap", v)` / `ctx.plot_series_colored()` store one series per run
   in `BacktestResult.series`; the GUI renders them as polylines with a legend grouped by id
   prefix. Do not push a `Plot::Line` per bar.
 - **Trade labels are atomic**: `.tagged("setup text")` is part of the `EntryIntent`, so metadata
@@ -260,7 +266,7 @@ Parameter validation is strict: `build` panics on unknown param names or illegal
 
 ## Chart overlays in the native viewer
 
-Open the result with `--gui`. In an indicator's `on_footprint`, push a `Plot` to `fp.plots`. In a strategy, use `out.visuals.push(plot)`. The viewer connects `Plot::Line` points with the same `id` and also supports markers, segments, price boxes and volume profiles.
+Open the result with `--gui`. In an indicator's `on_footprint`, push a `Plot` to `fp.plots`. In a strategy, use `ctx.plot(plot)`. The viewer connects `Plot::Line` points with the same `id` and also supports markers, segments, price boxes and volume profiles.
 
 ## Hyperopt
 

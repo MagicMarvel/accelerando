@@ -9,7 +9,7 @@ pub use dataset::{
     build_dataset, continuation_label, export_csv, failure_label, ContinuationLabelConfig,
     DatasetConfig, DatasetKind, FailureLabelConfig, FeatureExtractor, MlDatasetRow,
 };
-pub use features::TradeFlowFeatures;
+pub use features::{TradeFlowFeatures, TradeFlowFeaturesRequest};
 
 use accelerando_core::Registry;
 
@@ -23,7 +23,9 @@ mod tests {
     use super::features as tf;
     use super::*;
     use accelerando_core::market_time::{days_from_civil, NS_PER_SEC};
-    use accelerando_core::{Configurable, Footprint, Indicator, Level, OrderFlowEvent, Params, Side};
+    use accelerando_core::{
+        Configurable, Footprint, Indicator, Level, OrderFlowEvent, Params, Side,
+    };
 
     const TICK: f64 = 0.25;
 
@@ -32,7 +34,15 @@ mod tests {
         (days_from_civil(year, month, day) * 86_400 + (hour + 5) * 3600 + minute * 60) * NS_PER_SEC
     }
 
-    fn bar(ts_ns: i64, open: f64, high: f64, low: f64, close: f64, buy: f64, sell: f64) -> Footprint {
+    fn bar(
+        ts_ns: i64,
+        open: f64,
+        high: f64,
+        low: f64,
+        close: f64,
+        buy: f64,
+        sell: f64,
+    ) -> Footprint {
         let mid = ((high + low) / 2.0 / TICK).round() * TICK;
         Footprint {
             ts_first_ns: ts_ns,
@@ -70,7 +80,15 @@ mod tests {
 
     #[test]
     fn delta_and_delta_ratio_are_correct() {
-        let mut fp = bar(et_ts(2026, 1, 5, 10, 0), 100.0, 100.5, 99.75, 100.25, 30.0, 10.0);
+        let mut fp = bar(
+            et_ts(2026, 1, 5, 10, 0),
+            100.0,
+            100.5,
+            99.75,
+            100.25,
+            30.0,
+            10.0,
+        );
         indicator().on_footprint(&mut fp, &[]);
         assert_eq!(fp.delta, 20.0);
         assert_eq!(fp.values[tf::BUY_VOLUME], 30.0);
@@ -87,9 +105,33 @@ mod tests {
     #[test]
     fn cvd_resets_per_eastern_day() {
         let mut ind = indicator();
-        let mut day1a = bar(et_ts(2026, 1, 5, 10, 0), 100.0, 100.5, 100.0, 100.5, 30.0, 10.0);
-        let mut day1b = bar(et_ts(2026, 1, 5, 10, 1), 100.5, 101.0, 100.5, 101.0, 25.0, 5.0);
-        let mut day2 = bar(et_ts(2026, 1, 6, 9, 31), 101.0, 101.5, 101.0, 101.5, 12.0, 2.0);
+        let mut day1a = bar(
+            et_ts(2026, 1, 5, 10, 0),
+            100.0,
+            100.5,
+            100.0,
+            100.5,
+            30.0,
+            10.0,
+        );
+        let mut day1b = bar(
+            et_ts(2026, 1, 5, 10, 1),
+            100.5,
+            101.0,
+            100.5,
+            101.0,
+            25.0,
+            5.0,
+        );
+        let mut day2 = bar(
+            et_ts(2026, 1, 6, 9, 31),
+            101.0,
+            101.5,
+            101.0,
+            101.5,
+            12.0,
+            2.0,
+        );
         ind.on_footprint(&mut day1a, &[]);
         ind.on_footprint(&mut day1b, &[]);
         ind.on_footprint(&mut day2, &[]);
@@ -109,14 +151,30 @@ mod tests {
         let mut history: Vec<Footprint> = Vec::new();
         for i in 0..40 {
             let (b, s) = if i % 2 == 0 { (12.0, 8.0) } else { (8.0, 12.0) };
-            let mut fp = bar(base_ts + i * 60 * NS_PER_SEC, 100.0, 100.25, 99.75, 100.0, b, s);
+            let mut fp = bar(
+                base_ts + i * 60 * NS_PER_SEC,
+                100.0,
+                100.25,
+                99.75,
+                100.0,
+                b,
+                s,
+            );
             ind.on_footprint(&mut fp, &history);
             history.push(fp);
         }
         // z of the calm bars stays small…
         assert!(history[39].values[tf::DELTA_Z].abs() < 2.0);
         // …and the outlier is scored against calm history only, so it is extreme.
-        let mut spike = bar(base_ts + 40 * 60 * NS_PER_SEC, 100.0, 101.0, 100.0, 101.0, 500.0, 20.0);
+        let mut spike = bar(
+            base_ts + 40 * 60 * NS_PER_SEC,
+            100.0,
+            101.0,
+            100.0,
+            101.0,
+            500.0,
+            20.0,
+        );
         ind.on_footprint(&mut spike, &history);
         assert!(spike.values[tf::DELTA_Z] > 5.0);
     }
@@ -128,7 +186,15 @@ mod tests {
             let mut bars: Vec<Footprint> = (0..50)
                 .map(|i| {
                     let b = 10.0 + (i % 5) as f64;
-                    bar(base_ts + i * 60 * NS_PER_SEC, 100.0 + i as f64 * 0.25, 100.5 + i as f64 * 0.25, 99.75 + i as f64 * 0.25, 100.25 + i as f64 * 0.25, b, 8.0)
+                    bar(
+                        base_ts + i * 60 * NS_PER_SEC,
+                        100.0 + i as f64 * 0.25,
+                        100.5 + i as f64 * 0.25,
+                        99.75 + i as f64 * 0.25,
+                        100.25 + i as f64 * 0.25,
+                        b,
+                        8.0,
+                    )
                 })
                 .collect();
             // Mutate only the future (last 10 bars).
@@ -145,7 +211,10 @@ mod tests {
         let a = build(10.0);
         let b = build(900.0);
         for i in 0..40 {
-            assert_eq!(a[i].values, b[i].values, "bar {i} features changed with future data");
+            assert_eq!(
+                a[i].values, b[i].values,
+                "bar {i} features changed with future data"
+            );
         }
     }
 
@@ -196,12 +265,36 @@ mod tests {
     fn diagonal_imbalance_direction_is_correct() {
         let mut fp = Footprint {
             ladder: vec![
-                Level { price: 100.00, buy_vol: 5.0, sell_vol: 20.0 },
-                Level { price: 100.25, buy_vol: 90.0, sell_vol: 25.0 }, // buy: 90 ≥ 3×20
-                Level { price: 100.50, buy_vol: 80.0, sell_vol: 20.0 }, // buy: 80 ≥ 3×25
-                Level { price: 100.75, buy_vol: 70.0, sell_vol: 5.0 },  // buy: 70 ≥ 3×20
+                Level {
+                    price: 100.00,
+                    buy_vol: 5.0,
+                    sell_vol: 20.0,
+                },
+                Level {
+                    price: 100.25,
+                    buy_vol: 90.0,
+                    sell_vol: 25.0,
+                }, // buy: 90 ≥ 3×20
+                Level {
+                    price: 100.50,
+                    buy_vol: 80.0,
+                    sell_vol: 20.0,
+                }, // buy: 80 ≥ 3×25
+                Level {
+                    price: 100.75,
+                    buy_vol: 70.0,
+                    sell_vol: 5.0,
+                }, // buy: 70 ≥ 3×20
             ],
-            ..bar(et_ts(2026, 1, 5, 10, 0), 100.0, 100.75, 100.0, 100.75, 245.0, 70.0)
+            ..bar(
+                et_ts(2026, 1, 5, 10, 0),
+                100.0,
+                100.75,
+                100.0,
+                100.75,
+                245.0,
+                70.0,
+            )
         };
         indicator().on_footprint(&mut fp, &[]);
         assert_eq!(fp.values[tf::POS_IMBALANCE_COUNT], 3.0);
@@ -257,7 +350,15 @@ mod tests {
     // ---- labels ---------------------------------------------------------------------------------
 
     fn plain(open: f64, high: f64, low: f64, close: f64, i: i64) -> Footprint {
-        bar(et_ts(2026, 1, 5, 10, 0) + i * 60 * NS_PER_SEC, open, high, low, close, 10.0, 10.0)
+        bar(
+            et_ts(2026, 1, 5, 10, 0) + i * 60 * NS_PER_SEC,
+            open,
+            high,
+            low,
+            close,
+            10.0,
+            10.0,
+        )
     }
 
     #[test]
@@ -294,7 +395,7 @@ mod tests {
     fn failure_label_requires_low_mfe_then_reverse_break() {
         let cfg = FailureLabelConfig::default(); // 8t = 2.0 both ways, mfe ≤ 0.2·ATR
         let atr = 2.0; // mfe allowance = 0.4
-        // Buy candidate at 100: stalls (mfe 0.25 ≤ 0.4), then breaks down 2.0 → label 1.
+                       // Buy candidate at 100: stalls (mfe 0.25 ≤ 0.4), then breaks down 2.0 → label 1.
         let fps = vec![
             plain(100.0, 100.0, 100.0, 100.0, 0),
             plain(100.0, 100.25, 99.5, 99.75, 1),
@@ -326,12 +427,36 @@ mod tests {
         let mut bars: Vec<Footprint> = (0..45)
             .map(|i| {
                 let (b, s) = if i % 2 == 0 { (12.0, 8.0) } else { (8.0, 12.0) };
-                bar(base_ts + i * 60 * NS_PER_SEC, 100.0, 100.25, 99.75, 100.0, b, s)
+                bar(
+                    base_ts + i * 60 * NS_PER_SEC,
+                    100.0,
+                    100.25,
+                    99.75,
+                    100.0,
+                    b,
+                    s,
+                )
             })
             .collect();
-        bars.push(bar(base_ts + 45 * 60 * NS_PER_SEC, 100.0, 100.25, 99.75, 100.0, 400.0, 10.0));
+        bars.push(bar(
+            base_ts + 45 * 60 * NS_PER_SEC,
+            100.0,
+            100.25,
+            99.75,
+            100.0,
+            400.0,
+            10.0,
+        ));
         // A follow-up bar so the failure label can resolve.
-        bars.push(bar(base_ts + 46 * 60 * NS_PER_SEC, 100.0, 100.0, 97.0, 97.25, 10.0, 10.0));
+        bars.push(bar(
+            base_ts + 46 * 60 * NS_PER_SEC,
+            100.0,
+            100.0,
+            97.0,
+            97.25,
+            10.0,
+            10.0,
+        ));
         run(&mut ind, &mut bars);
 
         let cfg = DatasetConfig {

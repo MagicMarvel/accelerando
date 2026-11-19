@@ -38,8 +38,6 @@ pub(crate) struct VpTool {
     pub peak_fraction: f32,
     /// Extend POC / VAH / VAL of drawn profiles to the right edge of the chart.
     pub extend_lines: bool,
-    /// Draw the strategy's own volume profiles.
-    pub show_strategy: bool,
     pub items: Vec<ManualVp>,
     /// x at the start of the current drag.
     drag_from: Option<f64>,
@@ -53,7 +51,6 @@ impl Default for VpTool {
             va_fraction: 0.70,
             peak_fraction: 0.70,
             extend_lines: true,
-            show_strategy: true,
             items: Vec::new(),
             drag_from: None,
         }
@@ -110,6 +107,7 @@ impl VpTool {
             return;
         }
         self.items.push(ManualVp { t0: bars[i0].ts_first_ns, t1: bars[i1 - 1].ts_first_ns });
+        self.drawing = false;
     }
 
     /// Remove the most recent drawn profile under `x`.
@@ -123,18 +121,16 @@ impl VpTool {
         }
     }
 
-    /// Profiles drawn by the strategy (behind the bars).
-    pub fn draw_strategy(&self, painter: &Painter, model: &Model, m: &Mapper) {
-        if !self.show_strategy {
-            return;
-        }
-        let tick = model.result.tick_size.abs().max(1e-9);
-        for p in &model.overlays.profiles {
-            if p.x1 < m.x0 || p.x0 > m.x1 {
-                continue;
-            }
-            draw_profile(painter, m, p.x0, p.x1, &p.levels, tick, p.color, &p.text);
-        }
+    pub fn controls(&mut self, ui: &mut egui::Ui) {
+        ui.set_min_width(260.0);
+        ui.strong("Manual VP settings");
+        ui.add(egui::Slider::new(&mut self.va_fraction, 0.3..=0.95).text("Value area"));
+        ui.add(
+            egui::Slider::new(&mut self.peak_fraction, 0.0..=0.95)
+                .text("Peak area (0 = off)"),
+        )
+        .on_hover_text("Shade the contiguous levels with at least this share of the POC volume.");
+        ui.checkbox(&mut self.extend_lines, "Extend POC / VAH / VAL to the right");
     }
 
     /// Drawn profiles, their levels and the current selection (on top of the bars).
@@ -196,6 +192,18 @@ impl VpTool {
                 "Draw VP: drag across bars · right-click a profile to delete · Esc to stop",
                 FontId::proportional(12.0),
                 MANUAL_EDGE,
+            );
+        }
+    }
+}
+
+/// Profiles supplied by the backtest, drawn behind the bars.
+pub(crate) fn draw_strategy_profiles(painter: &Painter, model: &Model, m: &Mapper) {
+    let tick = model.result.tick_size.abs().max(1e-9);
+    for profile in &model.overlays.profiles {
+        if profile.x1 >= m.x0 && profile.x0 <= m.x1 {
+            draw_profile(
+                painter, m, profile.x0, profile.x1, &profile.levels, tick, profile.color, &profile.text,
             );
         }
     }

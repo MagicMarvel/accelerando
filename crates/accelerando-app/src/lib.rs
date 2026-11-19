@@ -56,7 +56,7 @@ use std::time::{Duration, Instant};
 
 use accelerando_core::{
     run_prepared_backtest, run_prepared_event_backtest, try_prepare_backtest_data, BacktestResult,
-    BrokerConfig, Configurable, DataSource, EventInterest, FootprintAggregator, Indicator,
+    BarSpec, BrokerConfig, Configurable, DataSource, EventInterest, FootprintAggregator, Indicator,
     IndicatorRequest, ParamRange, ParamValue, Params, PreparedBacktestData, PreparedEventData,
     ProgressHandle, Registry, Strategy, StrategyRequirements,
 };
@@ -67,7 +67,7 @@ pub use stats::TradeStats;
 pub use validate::{Candidate, ValidationReport};
 
 /// Bumped whenever the cached `PreparedBacktestData` layout or preparation semantics change.
-const CACHE_VERSION: u32 = 2;
+const CACHE_VERSION: u32 = 3;
 
 /// Bars used when neither `--agg` nor the strategy's `requirements().bars` says otherwise.
 pub const DEFAULT_AGG: &str = "time:60";
@@ -268,10 +268,17 @@ impl RunOptions {
             o.data = base.data;
         }
         if o.strategy == base_strategy {
-            let pinned: Vec<&str> = o.params.iter().filter_map(|p| p.split_once('=').map(|(k, _)| k.trim())).collect();
+            let pinned: Vec<&str> = o
+                .params
+                .iter()
+                .filter_map(|p| p.split_once('=').map(|(k, _)| k.trim()))
+                .collect();
             let mut merged: Vec<String> = base_params
                 .into_iter()
-                .filter(|p| !p.split_once('=').is_some_and(|(k, _)| pinned.contains(&k.trim())))
+                .filter(|p| {
+                    !p.split_once('=')
+                        .is_some_and(|(k, _)| pinned.contains(&k.trim()))
+                })
                 .collect();
             merged.append(&mut o.params);
             o.params = merged;
@@ -318,6 +325,7 @@ const AGG_SHORTHAND: &[(&str, &str)] = &[
     ("time", "bar_secs"),
     ("range", "range_ticks"),
     ("reverse", "reversal_ticks"),
+    ("volume", "volume"),
 ];
 
 /// Prepared data plus how it was built.
@@ -385,7 +393,10 @@ impl App {
         self
     }
 
-    pub fn aggregator<T: FootprintAggregator + Configurable + 'static>(mut self, name: &str) -> Self {
+    pub fn aggregator<T: FootprintAggregator + Configurable + 'static>(
+        mut self,
+        name: &str,
+    ) -> Self {
         self.registry_mut().register_aggregator::<T>(name);
         self
     }
@@ -432,7 +443,8 @@ impl App {
 
     /// Mutable access while the app is being built (before any run shares the registry).
     pub fn registry_mut(&mut self) -> &mut Registry {
-        Arc::get_mut(&mut self.registry).expect("registry is shared; register adapters before running")
+        Arc::get_mut(&mut self.registry)
+            .expect("registry is shared; register adapters before running")
     }
 
     /// Options for `args` layered over `accelerando.toml` (or `--config PATH`; `--no-config`
@@ -485,7 +497,11 @@ impl App {
             let mode = self.modes.get(name).ok_or_else(|| {
                 format!(
                     "unknown --mode `{name}`; registered modes: {}",
-                    if self.modes.is_empty() { "(none)".to_string() } else { self.modes.keys().cloned().collect::<Vec<_>>().join(", ") }
+                    if self.modes.is_empty() {
+                        "(none)".to_string()
+                    } else {
+                        self.modes.keys().cloned().collect::<Vec<_>>().join(", ")
+                    }
                 )
             })?;
             return (mode.run)(&ModeContext {
@@ -495,8 +511,13 @@ impl App {
             });
         }
         let strategy = self.strategy_name(o)?;
-        let candidates =
-            accelerando::strategy_param_grid(&self.registry, strategy, &o.params, o.max_evals, o.grid)?;
+        let candidates = accelerando::strategy_param_grid(
+            &self.registry,
+            strategy,
+            &o.params,
+            o.max_evals,
+            o.grid,
+        )?;
         let probe = self.build_strategy(strategy, &candidates[0])?;
         let reqs = probe.requirements();
         let event_driven = probe.event_interest() != EventInterest::NONE;
@@ -533,14 +554,16 @@ impl App {
                 gui_events = Some((events, depth));
                 outcomes
             } else {
-                let events = accelerando_core::prepare_event_data(self.build_source(o, data_path)?)?;
+                let events =
+                    accelerando_core::prepare_event_data(self.build_source(o, data_path)?)?;
                 self.run_event(o, &events, strategy, &reqs, &candidates)?
             }
         } else {
             let prepared = self.prepare(o, data_path, &reqs)?;
             prepared.data.check_values(&reqs.values)?;
             let keep = o.gui && candidates.len() == 1;
-            let outcomes = self.run_candidates(&prepared.data, strategy, candidates, o.broker(), keep)?;
+            let outcomes =
+                self.run_candidates(&prepared.data, strategy, candidates, o.broker(), keep)?;
             print_table(&outcomes);
             if o.validate {
                 let report = self.validate(o, &prepared.data, strategy, &outcomes)?;
@@ -558,7 +581,12 @@ impl App {
 
         let best = outcomes
             .iter()
-            .max_by(|a, b| a.result.metrics.net_pnl.total_cmp(&b.result.metrics.net_pnl))
+            .max_by(|a, b| {
+                a.result
+                    .metrics
+                    .net_pnl
+                    .total_cmp(&b.result.metrics.net_pnl)
+            })
             .ok_or("no runs produced")?;
         if let Some(path) = &o.trades_json {
             let dump: Vec<_> = outcomes
@@ -585,7 +613,12 @@ impl App {
                 best.result.clone()
             };
             return gui::view(
-                Arc::clone(&self.registry), o, data_path, &best.label, result, gui_events,
+                Arc::clone(&self.registry),
+                o,
+                data_path,
+                &best.label,
+                result,
+                gui_events,
             );
         }
         Ok(())
@@ -613,14 +646,19 @@ impl App {
 
     /// `o` with `agg` filled in from the strategy's declared bars when `--agg` was not given;
     /// warns when an explicit `--agg` differs from them.
-    pub fn resolve_bars(&self, o: &RunOptions, strategy: &str, reqs: &StrategyRequirements) -> RunOptions {
+    pub fn resolve_bars(
+        &self,
+        o: &RunOptions,
+        strategy: &str,
+        reqs: &StrategyRequirements,
+    ) -> RunOptions {
         let mut out = o.clone();
         match (&o.agg, &reqs.bars) {
             (None, Some(bars)) => {
                 println!("bars: {bars} (declared by `{strategy}`)");
-                out.agg = Some(bars.clone());
+                out.agg = Some(bars.to_string());
             }
-            (Some(agg), Some(bars)) if agg != bars => eprintln!(
+            (Some(agg), Some(bars)) if !self.bars_match(agg, bars) => eprintln!(
                 "WARNING: `{strategy}` was designed for --agg {bars}; running on {agg} (results are not comparable)"
             ),
             _ => {}
@@ -674,8 +712,21 @@ impl App {
         build_source(&self.registry, o, path)
     }
 
-    fn build_aggregator(&self, agg: &str) -> Result<Box<dyn FootprintAggregator>, String> {
-        let (name, assignments) = parse_component_spec(agg, AGG_SHORTHAND);
+    fn normalize_bars(&self, bars: &BarSpec) -> Result<BarSpec, String> {
+        let (name, params) = bars.component();
+        let spec = self.registry.aggregator_spec(name).ok_or_else(|| {
+            format!(
+                "unknown aggregator `{name}`; registered: {}",
+                self.registry.aggregator_names().join(", ")
+            )
+        })?;
+        let resolved = spec.resolve(&params)?;
+        Ok(BarSpec::from_component(name, resolved))
+    }
+
+    /// Text exists only at the CLI/configuration boundary. Resolve defaults before comparison.
+    fn parse_bars(&self, text: &str) -> Result<BarSpec, String> {
+        let (name, assignments) = parse_component_spec(text, AGG_SHORTHAND);
         let spec = self.registry.aggregator_spec(&name).ok_or_else(|| {
             format!(
                 "unknown aggregator `{name}`; registered: {}",
@@ -683,12 +734,47 @@ impl App {
             )
         })?;
         let params = spec.parse_assignments(&assignments)?;
+        self.normalize_bars(&BarSpec::Custom { name, params })
+    }
+
+    fn effective_bars(
+        &self,
+        options: &RunOptions,
+        requirements: &StrategyRequirements,
+    ) -> Result<BarSpec, String> {
+        if let Some(expected) = &requirements.bars {
+            // A strategy default remains typed even after resolve_bars supplies its display text.
+            if options.agg.is_none()
+                || options.agg.as_deref() == Some(expected.to_string().as_str())
+            {
+                return self.normalize_bars(expected);
+            }
+        }
+        self.parse_bars(options.agg())
+    }
+
+    fn bars_match(&self, text: &str, expected: &BarSpec) -> bool {
+        if text == expected.to_string() {
+            return self.normalize_bars(expected).is_ok();
+        }
+        match (self.parse_bars(text), self.normalize_bars(expected)) {
+            (Ok(actual), Ok(expected)) => actual == expected,
+            _ => false,
+        }
+    }
+
+    fn build_aggregator(&self, bars: &BarSpec) -> Result<Box<dyn FootprintAggregator>, String> {
+        let normalized = self.normalize_bars(bars)?;
+        let (name, params) = normalized.component();
         self.registry
-            .build_aggregator(&name, &params)
+            .build_aggregator(name, &params)
             .ok_or_else(|| format!("aggregator `{name}` not registered"))
     }
 
-    fn build_indicators(&self, requests: &[IndicatorRequest]) -> Result<Vec<Box<dyn Indicator>>, String> {
+    fn build_indicators(
+        &self,
+        requests: &[IndicatorRequest],
+    ) -> Result<Vec<Box<dyn Indicator>>, String> {
         requests
             .iter()
             .map(|r| {
@@ -701,7 +787,10 @@ impl App {
                 })?;
                 spec.validate(&r.params)
                     .map_err(|e| format!("indicator `{}`: {e}", r.name))?;
-                Ok(self.registry.build_indicator(&r.name, &r.params).expect("checked"))
+                Ok(self
+                    .registry
+                    .build_indicator(&r.name, &r.params)
+                    .expect("checked"))
             })
             .collect()
     }
@@ -714,10 +803,13 @@ impl App {
         reqs: &StrategyRequirements,
     ) -> Result<Prepared, String> {
         let indicators = self.indicator_requests(o, reqs)?;
-        let cache_path = o
-            .cache_dir
-            .as_ref()
-            .map(|dir| dir.join(format!("prep_{:016x}.json", cache_key(o, path, &indicators))));
+        let bars = self.effective_bars(o, reqs)?;
+        let cache_path = o.cache_dir.as_ref().map(|dir| {
+            dir.join(format!(
+                "prep_{:016x}.json",
+                cache_key(o, path, &indicators, &bars)
+            ))
+        });
         if let Some(cp) = &cache_path {
             if let Ok(bytes) = std::fs::read(cp) {
                 match serde_json::from_slice::<PreparedBacktestData>(&bytes) {
@@ -734,25 +826,21 @@ impl App {
             }
         }
         let source = self.build_source(o, path)?;
-        let aggregator = self.build_aggregator(o.agg())?;
+        let aggregator = self.build_aggregator(&bars)?;
         let built_indicators = self.build_indicators(&indicators)?;
         let progress = ProgressHandle::new();
         let reporter = spawn_progress(progress.clone());
-        let data = try_prepare_backtest_data(
-            source,
-            aggregator,
-            built_indicators,
-            false,
-            Some(progress),
-        );
+        let data =
+            try_prepare_backtest_data(source, aggregator, built_indicators, false, Some(progress));
         let _ = reporter.join();
-        let data = data?;
+        let mut data = data?;
         println!(
             "prepared {} footprints (tick {}, multiplier {})",
             data.footprints.len(),
             data.tick_size,
             data.multiplier
         );
+        data.bar_spec = Some(bars);
         if let Some(cp) = &cache_path {
             if let Ok(bytes) = serde_json::to_vec(&data) {
                 if let Some(dir) = cp.parent() {
@@ -826,7 +914,7 @@ impl App {
             .map(|(params, label)| {
                 let result = run_prepared_event_backtest(
                     events,
-                    self.build_aggregator(o.agg())?,
+                    self.build_aggregator(&self.effective_bars(o, reqs)?)?,
                     self.build_indicators(&requests)?,
                     self.build_strategy(strategy, params)?,
                     o.broker(),
@@ -876,7 +964,8 @@ impl App {
                 .expect("strategy registered")
         };
         let costs = validate::cost_sensitivity(data, &build, o.broker(), &[0.0, 1.0, 2.0, 3.0]);
-        let random = validate::random_baseline(data, &chosen.result.trades, o.broker(), o.random_runs, 42);
+        let random =
+            validate::random_baseline(data, &chosen.result.trades, o.broker(), o.random_runs, 42);
         Ok(ValidationReport {
             split,
             walk_forward,
@@ -897,7 +986,11 @@ impl App {
                     ParamRange::Choice(opts) => format!("one of {}", opts.join("|")),
                     ParamRange::Fixed => "fixed".to_string(),
                 };
-                println!("    {:<32} default {:<14} {range}", e.name, fmt_value(&e.default));
+                println!(
+                    "    {:<32} default {:<14} {range}",
+                    e.name,
+                    fmt_value(&e.default)
+                );
             }
         };
         println!("strategies:");
@@ -917,7 +1010,10 @@ impl App {
                 println!("  {name:<20} {}", mode.about);
             }
         }
-        println!("\naggregators: {}", self.registry.aggregator_names().join(", "));
+        println!(
+            "\naggregators: {}",
+            self.registry.aggregator_names().join(", ")
+        );
         println!("sources: {}", self.registry.source_names().join(", "));
     }
 }
@@ -948,7 +1044,12 @@ fn fmt_params(p: &Params) -> String {
 
 fn print_table(outcomes: &[RunOutcome]) {
     let mut rows: Vec<&RunOutcome> = outcomes.iter().collect();
-    rows.sort_by(|a, b| b.result.metrics.net_pnl.total_cmp(&a.result.metrics.net_pnl));
+    rows.sort_by(|a, b| {
+        b.result
+            .metrics
+            .net_pnl
+            .total_cmp(&a.result.metrics.net_pnl)
+    });
     println!(
         "\n{:<24} {:>11} {:>7} {:>7} {:>6} {:>10} {:>7}",
         "run", "net", "trades", "win%", "PF", "maxDD", "sharpe"
@@ -974,11 +1075,19 @@ fn print_table(outcomes: &[RunOutcome]) {
     }
     // Strategy tallies (`Strategy::counters`) for the top run.
     if let Some(best) = rows.first().filter(|b| !b.result.counters.is_empty()) {
-        println!("counters ({}): {}", best.label, best.result.counters.summary());
+        println!(
+            "counters ({}): {}",
+            best.label,
+            best.result.counters.summary()
+        );
     }
 }
 
-pub(crate) fn build_source(registry: &Registry, o: &RunOptions, path: &str) -> Result<Box<dyn DataSource>, String> {
+pub(crate) fn build_source(
+    registry: &Registry,
+    o: &RunOptions,
+    path: &str,
+) -> Result<Box<dyn DataSource>, String> {
     std::fs::metadata(path).map_err(|e| format!("cannot read data file {path}: {e}"))?;
     let mut params = Params::default().with("path", path);
     for (key, value) in [("start", &o.from), ("end", &o.to)] {
@@ -989,8 +1098,12 @@ pub(crate) fn build_source(registry: &Registry, o: &RunOptions, path: &str) -> R
     let spec = registry
         .source_spec(&o.source)
         .ok_or_else(|| format!("unknown source `{}`", o.source))?;
-    spec.validate(&params)
-        .map_err(|e| format!("source `{}`: {e} (--from/--to need a source with start/end)", o.source))?;
+    spec.validate(&params).map_err(|e| {
+        format!(
+            "source `{}`: {e} (--from/--to need a source with start/end)",
+            o.source
+        )
+    })?;
     registry
         .build_source(&o.source, &params)
         .ok_or_else(|| format!("unknown source `{}`", o.source))
@@ -1029,11 +1142,11 @@ pub struct ModeContext<'a> {
 impl ModeContext<'_> {
     /// `--opt key=value` value of `key`.
     pub fn opt(&self, key: &str) -> Option<&str> {
-        self.options
-            .opts
-            .iter()
-            .rev()
-            .find_map(|o| o.split_once('=').filter(|(k, _)| k.trim() == key).map(|(_, v)| v.trim()))
+        self.options.opts.iter().rev().find_map(|o| {
+            o.split_once('=')
+                .filter(|(k, _)| k.trim() == key)
+                .map(|(_, v)| v.trim())
+        })
     }
 
     /// `--opt key=value` parsed as `T`, or `default` when absent.
@@ -1049,9 +1162,15 @@ impl ModeContext<'_> {
     /// Fail on `--opt` keys this mode does not know (call it first with the keys you read).
     pub fn expect_opts(&self, known: &[&str]) -> Result<(), String> {
         for o in &self.options.opts {
-            let key = o.split_once('=').map(|(k, _)| k.trim()).unwrap_or(o.as_str());
+            let key = o
+                .split_once('=')
+                .map(|(k, _)| k.trim())
+                .unwrap_or(o.as_str());
             if !known.contains(&key) {
-                return Err(format!("unknown --opt `{key}` for this mode; known: {}", known.join(", ")));
+                return Err(format!(
+                    "unknown --opt `{key}` for this mode; known: {}",
+                    known.join(", ")
+                ));
             }
         }
         Ok(())
@@ -1066,7 +1185,13 @@ impl ModeContext<'_> {
     pub fn candidates(&self) -> Result<Vec<Params>, String> {
         let strategy = self.app.strategy_name(self.options)?;
         let o = self.options;
-        accelerando::strategy_param_grid(self.app.registry(), strategy, &o.params, o.max_evals, o.grid)
+        accelerando::strategy_param_grid(
+            self.app.registry(),
+            strategy,
+            &o.params,
+            o.max_evals,
+            o.grid,
+        )
     }
 
     /// The selected strategy's requirements, or none when no strategy is selected.
@@ -1081,14 +1206,17 @@ impl ModeContext<'_> {
     /// Options with `agg` resolved against the selected strategy's declared bars.
     pub fn resolved_options(&self) -> Result<RunOptions, String> {
         Ok(match self.strategy() {
-            Some(s) => self.app.resolve_bars(self.options, s, &self.requirements()?),
+            Some(s) => self
+                .app
+                .resolve_bars(self.options, s, &self.requirements()?),
             None => self.options.clone(),
         })
     }
 
     /// Prepared (cached) footprints with `reqs`' indicators plus the app's and `--indicator`s.
     pub fn prepare(&self, reqs: &StrategyRequirements) -> Result<Prepared, String> {
-        self.app.prepare(&self.resolved_options()?, self.data_path, reqs)
+        self.app
+            .prepare(&self.resolved_options()?, self.data_path, reqs)
     }
 
     /// Raw trades (binary-cached).
@@ -1097,7 +1225,7 @@ impl ModeContext<'_> {
     }
 }
 
-fn cache_key(o: &RunOptions, path: &str, indicators: &[IndicatorRequest]) -> u64 {
+fn cache_key(o: &RunOptions, path: &str, indicators: &[IndicatorRequest], bars: &BarSpec) -> u64 {
     let meta = std::fs::metadata(path).ok();
     let mtime = meta
         .as_ref()
@@ -1113,7 +1241,7 @@ fn cache_key(o: &RunOptions, path: &str, indicators: &[IndicatorRequest]) -> u64
         "source": o.source,
         "from": o.from,
         "to": o.to,
-        "agg": o.agg(),
+        "agg": bars,
         "indicators": indicators,
     });
     let mut h = std::collections::hash_map::DefaultHasher::new();
@@ -1167,15 +1295,26 @@ mod tests {
             parse_component_spec("range:range_ticks=20", AGG_SHORTHAND),
             ("range".into(), vec!["range_ticks=20".into()])
         );
-        assert_eq!(parse_component_spec("regime", &[]), ("regime".into(), vec![]));
+        assert_eq!(
+            parse_component_spec("regime", &[]),
+            ("regime".into(), vec![])
+        );
     }
 
     #[test]
     fn cli_parses_and_rejects_unknown_flags() {
-        let args: Vec<String> = ["data.parquet", "--strategy", "x", "--param", "a=1", "--grid", "--validate"]
-            .iter()
-            .map(|s| s.to_string())
-            .collect();
+        let args: Vec<String> = [
+            "data.parquet",
+            "--strategy",
+            "x",
+            "--param",
+            "a=1",
+            "--grid",
+            "--validate",
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
         let o = RunOptions::parse(&args).unwrap();
         assert_eq!(o.data.as_deref(), Some("data.parquet"));
         assert_eq!(o.source, "parquet");
@@ -1190,13 +1329,18 @@ mod tests {
 
     #[test]
     fn cli_layers_over_config() {
-        let base = RunOptions::parse(&args("file.parquet --strategy s --param a=1 --param b=2 --gui --slippage-ticks 2")).unwrap();
-        let o = RunOptions::parse_onto(base.clone(), &args("--param b=3 --slippage-ticks 0")).unwrap();
+        let base = RunOptions::parse(&args(
+            "file.parquet --strategy s --param a=1 --param b=2 --gui --slippage-ticks 2",
+        ))
+        .unwrap();
+        let o =
+            RunOptions::parse_onto(base.clone(), &args("--param b=3 --slippage-ticks 0")).unwrap();
         assert_eq!(o.data.as_deref(), Some("file.parquet"));
         assert_eq!(o.params, vec!["a=1".to_string(), "b=3".to_string()]);
         assert_eq!(o.slippage_ticks, 0.0);
         assert!(o.gui);
-        let o = RunOptions::parse_onto(base.clone(), &args("other.parquet --strategy t --no-gui")).unwrap();
+        let o = RunOptions::parse_onto(base.clone(), &args("other.parquet --strategy t --no-gui"))
+            .unwrap();
         assert_eq!(o.data.as_deref(), Some("other.parquet"));
         assert!(o.params.is_empty() && !o.gui);
         assert!(RunOptions::parse(&args("--opt x=1")).is_err());
@@ -1212,7 +1356,7 @@ mod tests {
 
     impl Strategy for OnRange {
         fn requirements(&self) -> StrategyRequirements {
-            StrategyRequirements::new().bars("range:30")
+            StrategyRequirements::new().bars(BarSpec::Range { ticks: 30 })
         }
     }
 
@@ -1225,7 +1369,10 @@ mod tests {
         assert_eq!(app.resolve_bars(&o, "on_range", &reqs).agg(), "range:30");
         // An explicit --agg wins (with a warning).
         let explicit = RunOptions::parse(&args("--agg time:15")).unwrap();
-        assert_eq!(app.resolve_bars(&explicit, "on_range", &reqs).agg(), "time:15");
+        assert_eq!(
+            app.resolve_bars(&explicit, "on_range", &reqs).agg(),
+            "time:15"
+        );
         let two = App::new().strategy::<OnRange>("a").strategy::<OnRange>("b");
         assert!(two.strategy_name(&o).is_err());
     }
@@ -1234,34 +1381,218 @@ mod tests {
     fn custom_modes_get_options_and_strategy() {
         use std::sync::atomic::AtomicBool;
         static RAN: AtomicBool = AtomicBool::new(false);
-        let app = App::new().strategy::<OnRange>("on_range").mode("probe", "test mode", |ctx| {
-            ctx.expect_opts(&["horizon", "label"])?;
-            assert_eq!(ctx.opt_or("horizon", 60.0)?, 120.0);
-            assert_eq!(ctx.opt("label"), Some("x=y"));
-            assert_eq!(ctx.strategy(), Some("on_range"));
-            assert_eq!(ctx.candidates()?[0].int("n", 0), 5);
-            assert_eq!(ctx.resolved_options()?.agg(), "range:30");
-            RAN.store(true, Ordering::SeqCst);
-            Ok(())
-        });
+        let app = App::new()
+            .strategy::<OnRange>("on_range")
+            .mode("probe", "test mode", |ctx| {
+                ctx.expect_opts(&["horizon", "label"])?;
+                assert_eq!(ctx.opt_or("horizon", 60.0)?, 120.0);
+                assert_eq!(ctx.opt("label"), Some("x=y"));
+                assert_eq!(ctx.strategy(), Some("on_range"));
+                assert_eq!(ctx.candidates()?[0].int("n", 0), 5);
+                assert_eq!(ctx.resolved_options()?.agg(), "range:30");
+                RAN.store(true, Ordering::SeqCst);
+                Ok(())
+            });
         let run = |extra: &str| {
-            let o = RunOptions::parse(&args(&format!("Cargo.toml --mode probe --param n=5 {extra}"))).unwrap();
+            let o = RunOptions::parse(&args(&format!(
+                "Cargo.toml --mode probe --param n=5 {extra}"
+            )))
+            .unwrap();
             app.run(&o)
         };
         run("--opt horizon=120 --opt label=x=y").unwrap();
         assert!(RAN.load(Ordering::SeqCst));
-        assert!(run("--opt nope=1").unwrap_err().contains("unknown --opt `nope`"));
+        assert!(run("--opt nope=1")
+            .unwrap_err()
+            .contains("unknown --opt `nope`"));
         let o = RunOptions::parse(&args("Cargo.toml --mode missing")).unwrap();
         assert!(app.run(&o).unwrap_err().contains("registered modes: probe"));
     }
 
     #[test]
     fn with_indicator_is_prepared_for_every_strategy() {
-        let name = accelerando::default_registry().indicator_names().first().map(|s| s.to_string());
+        let name = accelerando::default_registry()
+            .indicator_names()
+            .first()
+            .map(|s| s.to_string());
         let Some(name) = name else { return };
         let app = App::new().with_indicator(&name);
-        let reqs = app.indicator_requests(&RunOptions::default(), &StrategyRequirements::default()).unwrap();
+        let reqs = app
+            .indicator_requests(&RunOptions::default(), &StrategyRequirements::default())
+            .unwrap();
         assert_eq!(reqs.len(), 1);
         assert_eq!(reqs[0].name, name);
+    }
+}
+
+#[cfg(test)]
+mod typed_bar_tests {
+    use super::*;
+    use accelerando_core::{Footprint, OrderFlowEvent, Side};
+
+    #[test]
+    fn cli_specs_normalize_to_typed_periods() {
+        let app = App::new();
+        for (text, expected) in [
+            ("time:1", BarSpec::Time { seconds: 1 }),
+            ("time:bar_secs=1", BarSpec::Time { seconds: 1 }),
+            ("time", BarSpec::Time { seconds: 300 }),
+            ("range:30", BarSpec::Range { ticks: 30 }),
+            ("reverse:16", BarSpec::Reverse { ticks: 16 }),
+            ("volume:1000", BarSpec::Volume { contracts: 1000 }),
+            ("volume:volume=1000", BarSpec::Volume { contracts: 1000 }),
+        ] {
+            assert_eq!(app.parse_bars(text).unwrap(), expected);
+            assert!(app.bars_match(text, &expected));
+            assert!(app.build_aggregator(&expected).is_ok());
+        }
+        assert!(!app.bars_match("time:60", &BarSpec::Time { seconds: 1 }));
+        assert!(!app.bars_match("range:1", &BarSpec::Time { seconds: 1 }));
+    }
+
+    #[test]
+    fn one_second_bars_close_on_the_next_second() {
+        let mut aggregator = App::new()
+            .build_aggregator(&BarSpec::Time { seconds: 1 })
+            .unwrap();
+        assert!(aggregator
+            .on_event(&OrderFlowEvent::Trade {
+                ts_ns: 0,
+                price: 100.0,
+                size: 2.0,
+                aggressor: Side::Buy,
+            })
+            .is_none());
+        let bar = aggregator
+            .on_event(&OrderFlowEvent::Trade {
+                ts_ns: 1_000_000_000,
+                price: 101.0,
+                size: 3.0,
+                aggressor: Side::Sell,
+            })
+            .unwrap();
+        assert_eq!(bar.volume, 2.0);
+        assert_eq!(bar.close, 100.0);
+        assert_eq!(aggregator.flush().unwrap().volume, 3.0);
+    }
+
+    #[test]
+    fn typed_requirements_supply_defaults_and_explicit_cli_still_wins() {
+        let app = App::new();
+        let reqs = StrategyRequirements::new().bars(BarSpec::Time { seconds: 1 });
+        let resolved = app.resolve_bars(&RunOptions::default(), "test", &reqs);
+        assert_eq!(resolved.agg(), "time:1");
+        let explicit = RunOptions {
+            agg: Some("range:30".into()),
+            ..Default::default()
+        };
+        assert_eq!(app.resolve_bars(&explicit, "test", &reqs).agg(), "range:30");
+        assert!(app.bars_match("time:bar_secs=1", reqs.bars.as_ref().unwrap()));
+    }
+
+    #[test]
+    fn equivalent_cli_periods_share_the_prepared_cache_key() {
+        let app = App::new();
+        let reqs = StrategyRequirements::new().bars(BarSpec::Time { seconds: 1 });
+        let a = RunOptions {
+            agg: Some("time:1".into()),
+            ..Default::default()
+        };
+        let b = RunOptions {
+            agg: Some("time:bar_secs=1".into()),
+            ..Default::default()
+        };
+        assert_eq!(
+            cache_key(
+                &a,
+                "Cargo.toml",
+                &[],
+                &app.effective_bars(&a, &reqs).unwrap()
+            ),
+            cache_key(
+                &b,
+                "Cargo.toml",
+                &[],
+                &app.effective_bars(&b, &reqs).unwrap()
+            )
+        );
+    }
+
+    #[test]
+    fn typed_custom_defaults_do_not_round_trip_through_cli_text() {
+        let app = App::new().aggregator::<CustomBars>("custom");
+        let expected = BarSpec::Custom {
+            name: "custom".into(),
+            params: Params::default().with("n", 2).with("tag", "a,b=c"),
+        };
+        let reqs = StrategyRequirements::new().bars(expected.clone());
+        let options = app.resolve_bars(&RunOptions::default(), "test", &reqs);
+        assert_eq!(app.effective_bars(&options, &reqs).unwrap(), expected);
+        assert!(app.bars_match(options.agg(), &expected));
+        assert!(app.build_aggregator(&expected).is_ok());
+    }
+
+    #[derive(Configurable)]
+    struct CustomBars {
+        #[param(default = 2, min = 1, max = 10)]
+        n: i64,
+        #[param(fixed, default = "")]
+        tag: String,
+    }
+    impl FootprintAggregator for CustomBars {
+        fn on_event(&mut self, _: &OrderFlowEvent) -> Option<Footprint> {
+            assert_eq!(self.n, 2);
+            let _ = &self.tag;
+            None
+        }
+        fn flush(&mut self) -> Option<Footprint> {
+            None
+        }
+    }
+
+    #[test]
+    fn custom_aggregators_resolve_defaults_and_preserve_params() {
+        let app = App::new().aggregator::<CustomBars>("custom");
+        let expected = BarSpec::Custom {
+            name: "custom".into(),
+            params: Params::default().with("n", 2),
+        };
+        assert!(app.bars_match("custom", &expected));
+        assert!(app.bars_match("custom:n=2", &expected));
+        let mut aggregator = app.build_aggregator(&expected).unwrap();
+        assert!(aggregator
+            .on_event(&OrderFlowEvent::Contract {
+                tick_size: 0.25,
+                multiplier: 50.0
+            })
+            .is_none());
+        assert!(!app.bars_match("custom:n=3", &expected));
+    }
+
+    #[test]
+    fn invalid_periods_and_unknown_aggregators_return_errors() {
+        let app = App::new();
+        for text in [
+            "time:0",
+            "time:-1",
+            "time:1.5",
+            "time:3601",
+            "time:typo=1",
+            "range:0",
+            "volume:11",
+            "missing:1",
+        ] {
+            assert!(
+                app.parse_bars(text).is_err(),
+                "unexpectedly accepted {text}"
+            );
+        }
+        assert!(app.build_aggregator(&BarSpec::Time { seconds: 0 }).is_err());
+        assert!(app
+            .build_aggregator(&BarSpec::Custom {
+                name: "missing".into(),
+                params: Params::default()
+            })
+            .is_err());
     }
 }

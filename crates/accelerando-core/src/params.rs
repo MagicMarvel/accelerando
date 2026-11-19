@@ -236,26 +236,27 @@ impl ParamSpec {
                 return Err(format!("parameter `{name}` was specified more than once"));
             }
             let entry = self.entry(name)?;
-            let value =
-                match (&entry.range, &entry.default) {
-                    (ParamRange::Int { .. }, _) | (ParamRange::Fixed, ParamValue::Int(_)) => {
-                        ParamValue::Int(match (parse_bool_word(raw), parse_hhmm(raw)) {
-                            (Some(b), _) => i64::from(b),
-                            (None, Some(minutes)) => minutes,
-                            (None, None) => raw.parse::<i64>().map_err(|_| {
-                                format!("parameter `{name}` expects an integer (or HH:MM), got `{raw}`")
-                            })?,
-                        })
-                    }
-                    (ParamRange::Float { .. }, _) | (ParamRange::Fixed, ParamValue::Float(_)) => {
-                        ParamValue::Float(raw.parse::<f64>().map_err(|_| {
+            let value = match (&entry.range, &entry.default) {
+                (ParamRange::Int { .. }, _) | (ParamRange::Fixed, ParamValue::Int(_)) => {
+                    ParamValue::Int(match (parse_bool_word(raw), parse_hhmm(raw)) {
+                        (Some(b), _) => i64::from(b),
+                        (None, Some(minutes)) => minutes,
+                        (None, None) => raw.parse::<i64>().map_err(|_| {
+                            format!("parameter `{name}` expects an integer (or HH:MM), got `{raw}`")
+                        })?,
+                    })
+                }
+                (ParamRange::Float { .. }, _) | (ParamRange::Fixed, ParamValue::Float(_)) => {
+                    ParamValue::Float(
+                        raw.parse::<f64>().map_err(|_| {
                             format!("parameter `{name}` expects a number, got `{raw}`")
-                        })?)
-                    }
-                    (ParamRange::Choice(_), _) | (ParamRange::Fixed, ParamValue::Str(_)) => {
-                        ParamValue::Str(raw.to_string())
-                    }
-                };
+                        })?,
+                    )
+                }
+                (ParamRange::Choice(_), _) | (ParamRange::Fixed, ParamValue::Str(_)) => {
+                    ParamValue::Str(raw.to_string())
+                }
+            };
             overrides.set(name, value);
         }
         self.validate(&overrides)?;
@@ -554,10 +555,16 @@ mod tests {
     #[test]
     fn integer_params_accept_clock_times() {
         let spec = ParamSpec::new().time("start", 1080, 0, 1440, 5);
-        let p = spec.parse_assignments(&["start=09:35".to_string()]).unwrap();
+        let p = spec
+            .parse_assignments(&["start=09:35".to_string()])
+            .unwrap();
         assert_eq!(p.int("start", 0), 9 * 60 + 35);
-        assert!(spec.parse_assignments(&["start=09:33".to_string()]).is_err()); // step 5
-        assert!(spec.parse_assignments(&["start=25:00".to_string()]).is_err());
+        assert!(spec
+            .parse_assignments(&["start=09:33".to_string()])
+            .is_err()); // step 5
+        assert!(spec
+            .parse_assignments(&["start=25:00".to_string()])
+            .is_err());
     }
 
     #[test]
@@ -566,4 +573,29 @@ mod tests {
             assert!(spec().parse_assignments(&[assignment.to_string()]).is_err());
         }
     }
+}
+
+/// Declare a typed choice and its text representation at configuration boundaries.
+#[macro_export]
+macro_rules! choice_enum {
+    ($(#[$meta:meta])* $vis:vis enum $name:ident { $($variant:ident => $text:literal),+ $(,)? }) => {
+        $(#[$meta])*
+        #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+        $vis enum $name { $($variant),+ }
+        impl $name {
+            pub const fn as_str(self) -> &'static str {
+                match self { $(Self::$variant => $text),+ }
+            }
+        }
+        impl ::std::str::FromStr for $name {
+            type Err = ::std::string::String;
+            fn from_str(value: &str) -> Result<Self, Self::Err> {
+                $(if value.eq_ignore_ascii_case($text) { return Ok(Self::$variant); })+
+                Err(format!("unknown {} `{}`", stringify!($name), value))
+            }
+        }
+        impl From<$name> for $crate::ParamValue {
+            fn from(value: $name) -> Self { Self::Str(value.as_str().to_owned()) }
+        }
+    };
 }

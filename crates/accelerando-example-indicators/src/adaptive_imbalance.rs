@@ -1,6 +1,4 @@
-use accelerando_core::{
-    Configurable, Footprint, Indicator, Plot,
-};
+use accelerando_core::{Configurable, Footprint, Indicator, Plot};
 
 pub const BUY_EDGE_PRICE: &str = "adaptive_imbalance_buy_edge_price";
 pub const BUY_EDGE_DELTA: &str = "adaptive_imbalance_buy_edge_delta";
@@ -11,10 +9,11 @@ pub const BAR_THRESHOLD: &str = "adaptive_imbalance_bar_threshold";
 pub const BUY_IMBALANCE: &str = "adaptive_imbalance_buy";
 pub const SELL_IMBALANCE: &str = "adaptive_imbalance_sell";
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum AdaptiveMode {
-    Fixed,
-    Adaptive,
+accelerando_core::choice_enum! {
+    pub enum AdaptiveMode {
+        Fixed => "fixed",
+        Adaptive => "adaptive",
+    }
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -31,7 +30,7 @@ struct EdgeNode {
 
 /// Marks edge delta imbalances with either fixed or history-adaptive thresholds.
 #[derive(Configurable)]
-#[configurable(init = Self::init)]
+#[configurable(init = Self::init, indicator = "adaptive_imbalance")]
 pub struct AdaptiveImbalance {
     #[param(default = "adaptive", choice = ["adaptive", "fixed"])]
     mode: AdaptiveMode,
@@ -68,17 +67,6 @@ impl AdaptiveImbalance {
     }
 }
 
-impl std::str::FromStr for AdaptiveMode {
-    type Err = String;
-    fn from_str(s: &str) -> Result<Self, String> {
-        match s {
-            "adaptive" => Ok(Self::Adaptive),
-            "fixed" => Ok(Self::Fixed),
-            other => Err(format!("unknown AdaptiveMode `{other}`")),
-        }
-    }
-}
-
 impl Indicator for AdaptiveImbalance {
     fn name(&self) -> &str {
         "adaptive_imbalance"
@@ -90,8 +78,7 @@ impl Indicator for AdaptiveImbalance {
         let buy_edge = self.best_buy_edge(fp);
         let sell_edge = self.best_sell_edge(fp);
 
-        fp.values
-            .insert(NODE_THRESHOLD.to_string(), node_threshold);
+        fp.values.insert(NODE_THRESHOLD.to_string(), node_threshold);
         fp.values.insert(BAR_THRESHOLD.to_string(), bar_threshold);
         fp.values.insert(
             BUY_EDGE_PRICE.to_string(),
@@ -114,8 +101,10 @@ impl Indicator for AdaptiveImbalance {
             .is_some_and(|node| node.delta >= node_threshold && fp.delta.abs() >= bar_threshold);
         let sell_imbalance = sell_edge
             .is_some_and(|node| -node.delta >= node_threshold && fp.delta.abs() >= bar_threshold);
-        fp.values
-            .insert(BUY_IMBALANCE.to_string(), if buy_imbalance { 1.0 } else { 0.0 });
+        fp.values.insert(
+            BUY_IMBALANCE.to_string(),
+            if buy_imbalance { 1.0 } else { 0.0 },
+        );
         fp.values.insert(
             SELL_IMBALANCE.to_string(),
             if sell_imbalance { 1.0 } else { 0.0 },
@@ -217,7 +206,10 @@ impl AdaptiveImbalance {
             bar_delta_abs: fp.delta.abs(),
             edge_node_delta_abs: buy.max(sell),
         });
-        let max_keep = self.lookback_bars.saturating_mul(4).max(self.lookback_bars + 1);
+        let max_keep = self
+            .lookback_bars
+            .saturating_mul(4)
+            .max(self.lookback_bars + 1);
         if self.prior.len() > max_keep {
             let remove = self.prior.len() - max_keep;
             self.prior.drain(0..remove);

@@ -8,6 +8,7 @@ pub use accelerando_core::ta::zigzag::{Pivot, PivotConfirmation, PivotKind, ZigZ
 /// Framework indicator wrapper around [`ZigZag`]. Prices are configured in instrument points.
 #[derive(Configurable)]
 #[configurable(init = Self::init)]
+#[configurable(indicator = "zigzag")]
 pub struct ZigZagIndicator {
     #[param(default = 4.0, min = 0.000001, max = 10000.0)]
     reversal: f64,
@@ -21,7 +22,11 @@ pub struct ZigZagIndicator {
 
 impl ZigZagIndicator {
     fn init(&mut self) {
-        self.detector = Some(ZigZag::with_filters(self.reversal, self.min_leg, self.min_leg_bars));
+        self.detector = Some(ZigZag::with_filters(
+            self.reversal,
+            self.min_leg,
+            self.min_leg_bars,
+        ));
     }
 }
 
@@ -31,7 +36,12 @@ impl Indicator for ZigZagIndicator {
     }
 
     fn on_footprint(&mut self, fp: &mut Footprint, _history: &[Footprint]) {
-        if let Some(event) = self.detector.as_mut().expect("built in init").update(self.bar, fp.high, fp.low) {
+        if let Some(event) = self
+            .detector
+            .as_mut()
+            .expect("built in init")
+            .update(self.bar, fp.high, fp.low)
+        {
             fp.values
                 .insert("zigzag_pivot_price".into(), event.pivot.price);
             fp.values

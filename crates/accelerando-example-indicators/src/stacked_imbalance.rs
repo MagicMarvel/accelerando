@@ -20,13 +20,11 @@ const SELL_COLOR: &str = "#ff6d6d";
 /// Histogram bucket cap for the rolling volume-percentile filter (volumes above clamp here).
 const HIST_BUCKETS: usize = 4096;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum VolumeMode {
-    /// Minimum aggressive volume is the fixed `min_volume` parameter.
-    Fixed,
-    /// Minimum aggressive volume is a rolling percentile of recent per-level aggressive
-    /// volumes (floored at `min_volume`), so the filter adapts across instruments.
-    Percentile,
+accelerando_core::choice_enum! {
+    pub enum VolumeMode {
+        Fixed => "fixed",
+        Percentile => "percentile",
+    }
 }
 
 /// One detected stack of same-direction diagonal imbalances inside a single bar.
@@ -50,7 +48,7 @@ struct Stack {
 /// merge into one stacked-imbalance zone, published as values and as `PriceBox` plots
 /// (group `imbalance`) for display on the price chart.
 #[derive(Configurable)]
-#[configurable(init = Self::init)]
+#[configurable(init = Self::init, indicator = "stacked_imbalance")]
 pub struct StackedImbalance {
     #[param(default = 3.0, min = 1.1, max = 20.0)]
     ratio: f64,
@@ -87,17 +85,6 @@ impl StackedImbalance {
         self.lookback_bars = self.lookback_bars.max(1);
         self.max_zones_per_side = self.max_zones_per_side.max(1);
         self.hist = vec![0; HIST_BUCKETS];
-    }
-}
-
-impl std::str::FromStr for VolumeMode {
-    type Err = String;
-    fn from_str(s: &str) -> Result<Self, String> {
-        match s {
-            "percentile" => Ok(Self::Percentile),
-            "fixed" => Ok(Self::Fixed),
-            other => Err(format!("unknown VolumeMode `{other}`")),
-        }
     }
 }
 
@@ -146,7 +133,13 @@ impl StackedImbalance {
         let keyed: Vec<(i64, f64, f64)> = fp
             .ladder
             .iter()
-            .map(|lv| ((lv.price / self.tick).round() as i64, lv.buy_vol, lv.sell_vol))
+            .map(|lv| {
+                (
+                    (lv.price / self.tick).round() as i64,
+                    lv.buy_vol,
+                    lv.sell_vol,
+                )
+            })
             .collect();
         let mut buy_hits: Vec<(i64, f64, f64)> = Vec::new(); // (key, aggr_vol, ratio)
         let mut sell_hits: Vec<(i64, f64, f64)> = Vec::new();
@@ -276,8 +269,8 @@ impl StackedImbalance {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use accelerando_core::Params;
     use accelerando_core::Level;
+    use accelerando_core::Params;
 
     fn fp_with_ladder(levels: &[(f64, f64, f64)]) -> Footprint {
         let ladder: Vec<Level> = levels

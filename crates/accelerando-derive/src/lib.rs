@@ -35,6 +35,11 @@
 //! parameter is declared once, next to its field. Values that depend on several parameters (or
 //! clamps between them) belong in the `init` hook.
 //!
+//! `#[configurable(indicator = "registry_name")]` additionally generates `FooRequest`:
+//! typed setters for declared parameters, `build()` for direct construction and
+//! `Into<IndicatorRequest>` for the existing serializable registry boundary.
+//! Numeric validation and the init hook apply to direct construction as well.
+//!
 //! `fixed` makes any scalar non-searchable. `name = "..."` overrides the parameter name (keeps
 //! old CLI names when renaming a field). `#[param(flatten)]` embeds another `#[derive(Configurable)]`
 //! struct's parameters (e.g. shared session/discipline groups).
@@ -159,8 +164,13 @@ fn parse_container_init(input: &DeriveInput) -> syn::Result<Option<Path>> {
             if meta.path.is_ident("init") {
                 init = Some(meta.value()?.parse::<Path>()?);
                 Ok(())
+            } else if meta.path.is_ident("indicator") {
+                let _: LitStr = meta.value()?.parse()?;
+                Ok(())
             } else {
-                Err(meta.error("unknown #[configurable] key; expected `init = path`"))
+                Err(meta.error(
+                    "unknown #[configurable] key; expected `init = path` or `indicator = \"name\"`",
+                ))
             }
         })?;
     }
@@ -175,12 +185,19 @@ fn time_minutes(expr: &Expr, what: &str) -> syn::Result<i64> {
             format!("`time` parameter `{what}` must be a string literal \"HH:MM\""),
         )
     };
-    let Expr::Lit(syn::ExprLit { lit: syn::Lit::Str(lit), .. }) = expr else {
+    let Expr::Lit(syn::ExprLit {
+        lit: syn::Lit::Str(lit),
+        ..
+    }) = expr
+    else {
         return Err(bad());
     };
     let raw = lit.value();
     let (h, m) = raw.split_once(':').ok_or_else(bad)?;
-    let (h, m): (i64, i64) = (h.trim().parse().map_err(|_| bad())?, m.trim().parse().map_err(|_| bad())?);
+    let (h, m): (i64, i64) = (
+        h.trim().parse().map_err(|_| bad())?,
+        m.trim().parse().map_err(|_| bad())?,
+    );
     if !(0..=24).contains(&h) || !(0..60).contains(&m) || h * 60 + m > 1440 {
         return Err(bad());
     }
@@ -210,6 +227,24 @@ fn expand(input: &DeriveInput) -> syn::Result<TokenStream2> {
     let init = parse_container_init(input)?;
     let core = quote!(::accelerando_core);
 
+    let mut indicator_name = None;
+    for attr in &input.attrs {
+        if attr.path().is_ident("configurable") {
+            attr.parse_nested_meta(|meta| {
+                if meta.path.is_ident("indicator") {
+                    indicator_name = Some(meta.value()?.parse::<LitStr>()?);
+                } else if meta.path.is_ident("init") {
+                    let _: Path = meta.value()?.parse()?;
+                }
+                Ok(())
+            })?;
+        }
+    }
+    let mut request_fields = Vec::new();
+    let mut request_methods = Vec::new();
+    let mut request_reads = Vec::new();
+    let mut request_params = Vec::new();
+    let mut request_validation = Vec::new();
     let mut declares = Vec::new();
     let mut reads = Vec::new();
     for field in &fields.named {
@@ -218,9 +253,16 @@ fn expand(input: &DeriveInput) -> syn::Result<TokenStream2> {
         let attr = parse_param_attr(field)?;
         if !attr.present {
             reads.push(quote!(#fident: ::core::default::Default::default()));
+            request_reads.push(quote!(#fident: ::core::default::Default::default()));
             continue;
         }
         if attr.flatten {
+            if indicator_name.is_some() {
+                return Err(syn::Error::new(
+                    field.span(),
+                    "typed indicator requests do not yet support flatten",
+                ));
+            }
             declares.push(quote!(let spec = <#ty as #core::ParamGroup>::declare_params(spec);));
             reads.push(quote!(#fident: <#ty as #core::ParamGroup>::read_params(params)));
             continue;
@@ -230,12 +272,18 @@ fn expand(input: &DeriveInput) -> syn::Result<TokenStream2> {
         let mut kind = kind_of(ty, &attr)?;
         if attr.int {
             if !matches!(kind, Kind::Float) {
-                return Err(syn::Error::new(span, "`int` is for float fields that hold an integer parameter"));
+                return Err(syn::Error::new(
+                    span,
+                    "`int` is for float fields that hold an integer parameter",
+                ));
             }
             kind = Kind::Int;
         }
         if attr.time && !matches!(kind, Kind::Int) {
-            return Err(syn::Error::new(span, "`time` needs an integer field (it holds minutes)"));
+            return Err(syn::Error::new(
+                span,
+                "`time` needs an integer field (it holds minutes)",
+            ));
         }
         let (declare, read) = match kind {
             Kind::Int if attr.time => {
@@ -244,10 +292,23 @@ fn expand(input: &DeriveInput) -> syn::Result<TokenStream2> {
                 if attr.fixed {
                     (quote!(spec.fixed_int(#pname, #d)), read)
                 } else {
-                    let min = attr.min.as_ref().map(|e| time_minutes(e, "min")).transpose()?.unwrap_or(0);
-                    let max = attr.max.as_ref().map(|e| time_minutes(e, "max")).transpose()?.unwrap_or(1440);
+                    let min = attr
+                        .min
+                        .as_ref()
+                        .map(|e| time_minutes(e, "min"))
+                        .transpose()?
+                        .unwrap_or(0);
+                    let max = attr
+                        .max
+                        .as_ref()
+                        .map(|e| time_minutes(e, "max"))
+                        .transpose()?
+                        .unwrap_or(1440);
                     let step = attr.step.clone().map(|s| quote!(#s)).unwrap_or(quote!(1));
-                    (quote!(spec.time(#pname, #d, #min, #max, (#step) as i64)), read)
+                    (
+                        quote!(spec.time(#pname, #d, #min, #max, (#step) as i64)),
+                        read,
+                    )
                 }
             }
             Kind::Int => {
@@ -274,14 +335,22 @@ fn expand(input: &DeriveInput) -> syn::Result<TokenStream2> {
                     let min = require(&attr.min, "min", span)?;
                     let max = require(&attr.max, "max", span)?;
                     let declare = match &attr.step {
-                        Some(step) => quote!(spec.float_step(#pname, (#d) as f64, (#min) as f64, (#max) as f64, (#step) as f64)),
-                        None => quote!(spec.float(#pname, (#d) as f64, (#min) as f64, (#max) as f64)),
+                        Some(step) => {
+                            quote!(spec.float_step(#pname, (#d) as f64, (#min) as f64, (#max) as f64, (#step) as f64))
+                        }
+                        None => {
+                            quote!(spec.float(#pname, (#d) as f64, (#min) as f64, (#max) as f64))
+                        }
                     };
                     (declare, read)
                 }
             }
             Kind::Bool => {
-                let d = attr.default.clone().map(|d| quote!(#d)).unwrap_or(quote!(false));
+                let d = attr
+                    .default
+                    .clone()
+                    .map(|d| quote!(#d))
+                    .unwrap_or(quote!(false));
                 let declare = if attr.fixed {
                     quote!(spec.fixed_int(#pname, if #d { 1 } else { 0 }))
                 } else {
@@ -321,12 +390,90 @@ fn expand(input: &DeriveInput) -> syn::Result<TokenStream2> {
                 (declare, read)
             }
         };
+        if indicator_name.is_some() {
+            let method = syn::parse_str::<syn::Ident>(&pname).map_err(|_| {
+                syn::Error::new(
+                    span,
+                    "typed request parameter names must be Rust identifiers",
+                )
+            })?;
+            let (setter_type, setter_value) = if attr.int {
+                (quote!(i64), quote!(value as #ty))
+            } else {
+                (quote!(#ty), quote!(value))
+            };
+            request_fields.push(quote!(#fident: Option<#ty>));
+            request_methods.push(quote! {
+                pub fn #method(mut self, value: #setter_type) -> Self {
+                    self.#fident = Some(#setter_value);
+                    self
+                }
+            });
+            request_reads.push(quote!(#fident: self.#fident.unwrap_or_else(|| #read)));
+            let encoded = match kind {
+                Kind::Int => quote!(value as i64),
+                Kind::Float => quote!(value as f64),
+                _ => quote!(value),
+            };
+            if !matches!(kind, Kind::Parsed) {
+                request_validation.push(quote! {
+                    if let Some(value) = self.#fident.clone() {
+                        checks.set(#pname, (#encoded).into());
+                    }
+                });
+            }
+            request_params.push(quote! {
+                if let Some(value) = self.#fident { request = request.param(#pname, #encoded); }
+            });
+        }
         declares.push(quote!(let spec = #declare;));
         reads.push(quote!(#fident: #read));
     }
 
-    let post_init = init.map(|path| quote!(#path(&mut value);));
+    let post_init = init.as_ref().map(|path| quote!(#path(&mut value);));
+    let request = indicator_name.map(|name| {
+        let request_ident = syn::Ident::new(&format!("{}Request", ident), ident.span());
+        let vis = &input.vis;
+        let request_init = init.as_ref().map(|path| {
+            let mut path = path.clone();
+            if path.segments.first().is_some_and(|s| s.ident == "Self") {
+                path.segments.first_mut().unwrap().ident = ident.clone();
+            }
+            quote!(#path(&mut value);)
+        });
+        quote! {
+            /// Typed indicator options. Converts to a registry request only at the configuration boundary.
+            #[derive(Default)]
+            #vis struct #request_ident { #(#request_fields),* }
+            impl #request_ident {
+                pub fn new() -> Self { Self::default() }
+                #(#request_methods)*
+                /// Construct directly, preserving typed options without a Params round trip.
+                pub fn build(self) -> #ident {
+                    let mut checks = #core::Params::default();
+                    #(#request_validation)*
+                    <#ident as #core::Configurable>::param_spec().resolve(&checks)
+                        .unwrap_or_else(|error| panic!("invalid params: {error}"));
+                    let params = &#core::Params::default();
+                    let mut value = #ident { #(#request_reads),* };
+                    #request_init
+                    value
+                }
+            }
+            impl From<#request_ident> for #core::IndicatorRequest {
+                fn from(options: #request_ident) -> Self { options.into_request() }
+            }
+            impl #request_ident {
+                pub fn into_request(self) -> #core::IndicatorRequest {
+                    let mut request = #core::IndicatorRequest::new(#name);
+                    #(#request_params)*
+                    request
+                }
+            }
+        }
+    });
     Ok(quote! {
+        #request
         impl #impl_generics #core::__private::Sealed for #ident #ty_generics #where_clause {}
         impl #impl_generics #core::ParamGroup for #ident #ty_generics #where_clause {
             fn declare_params(spec: #core::ParamSpec) -> #core::ParamSpec {

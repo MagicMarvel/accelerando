@@ -20,7 +20,7 @@ const NS_PER_DAY: i64 = 86_400_000_000_000;
 #[derive(Clone, Debug)]
 struct CalendarEvent {
     ts_ns: i64,
-    impact: String,
+    impact: Option<EventImpact>,
     country: String,
     title: String,
     forecast: String,
@@ -64,13 +64,13 @@ enum SourceKind {
 /// Events that land between bars (overnight, pre-market, weekends) attach to the first bar
 /// after them instead of being dropped.
 #[derive(Configurable)]
-#[configurable(init = Self::init)]
+#[configurable(init = Self::init, indicator = "economic_calendar")]
 pub struct EconomicCalendar {
     /// `tradingview`, a local JSON file, or an `http://` URL (ForexFactory weekly schema).
     #[param(fixed, default = DEFAULT_SOURCE)]
     source: String,
     #[param(default = "High", choice = ["High", "Medium", "Low", "Holiday", "All"])]
-    impact: String,
+    impact: ImpactFilter,
     /// Comma-separated country codes (empty = all; TradingView requests default to US).
     #[param(name = "countries", fixed, default = "")]
     countries_spec: String,
@@ -110,7 +110,7 @@ impl EconomicCalendar {
         };
         self.events = match self.source_kind {
             SourceKind::TradingView => Vec::new(),
-            SourceKind::Static => load_events(&self.source, &self.impact).unwrap_or_else(|err| {
+            SourceKind::Static => load_events(&self.source, self.impact).unwrap_or_else(|err| {
                 eprintln!("economic_calendar: {err}");
                 Vec::new()
             }),
@@ -179,7 +179,7 @@ impl Indicator for EconomicCalendar {
 
 impl EconomicCalendar {
     fn matches_filters(&self, event: &CalendarEvent) -> bool {
-        (self.impact.eq_ignore_ascii_case("All") || event.impact.eq_ignore_ascii_case(&self.impact))
+        self.impact.matches(event.impact)
             && (self.countries.is_empty() || self.countries.contains(&event.country))
     }
 
@@ -208,9 +208,16 @@ impl EconomicCalendar {
         }
     }
 
-    fn load_month(&self, from_ns: i64, to_ns: i64, label: &str) -> Result<Vec<CalendarEvent>, String> {
+    fn load_month(
+        &self,
+        from_ns: i64,
+        to_ns: i64,
+        label: &str,
+    ) -> Result<Vec<CalendarEvent>, String> {
         let safe_countries = self.request_countries.replace(',', "-");
-        let cache = self.cache_dir.join(format!("tv_{safe_countries}_{label}.json"));
+        let cache = self
+            .cache_dir
+            .join(format!("tv_{safe_countries}_{label}.json"));
         let body = match fs::read_to_string(&cache) {
             Ok(body) => body,
             Err(_) => {
@@ -222,7 +229,7 @@ impl EconomicCalendar {
         };
         let value: Value =
             serde_json::from_str(&body).map_err(|e| format!("parse tradingview json: {e}"))?;
-        parse_tradingview_events(&value, &self.impact)
+        parse_tradingview_events(&value, self.impact)
     }
 }
 
@@ -253,7 +260,10 @@ fn fetch_tradingview(from_ns: i64, to_ns: i64, countries: &str) -> Result<String
     Ok(body)
 }
 
-fn parse_tradingview_events(value: &Value, impact: &str) -> Result<Vec<CalendarEvent>, String> {
+fn parse_tradingview_events(
+    value: &Value,
+    impact: ImpactFilter,
+) -> Result<Vec<CalendarEvent>, String> {
     let events = value
         .get("result")
         .and_then(Value::as_array)
@@ -262,15 +272,18 @@ fn parse_tradingview_events(value: &Value, impact: &str) -> Result<Vec<CalendarE
     let mut out = Vec::new();
     for item in events {
         // TradingView importance: 1 = high, 0 = medium, negative = low.
-        let importance = item.get("importance").and_then(Value::as_i64).unwrap_or(i64::MIN);
+        let importance = item
+            .get("importance")
+            .and_then(Value::as_i64)
+            .unwrap_or(i64::MIN);
         let event_impact = if importance >= 1 {
-            "High"
+            EventImpact::High
         } else if importance == 0 {
-            "Medium"
+            EventImpact::Medium
         } else {
-            "Low"
+            EventImpact::Low
         };
-        if !impact.eq_ignore_ascii_case("All") && !event_impact.eq_ignore_ascii_case(impact) {
+        if !impact.matches(Some(event_impact)) {
             continue;
         }
         let Some(ts_ns) = parse_iso_offset_ns(&str_field(item, "date")) else {
@@ -278,7 +291,7 @@ fn parse_tradingview_events(value: &Value, impact: &str) -> Result<Vec<CalendarE
         };
         out.push(CalendarEvent {
             ts_ns,
-            impact: event_impact.to_string(),
+            impact: Some(event_impact),
             country: str_field(item, "country").to_ascii_uppercase(),
             title: str_field(item, "title"),
             forecast: num_field(item, "forecast"),
@@ -289,7 +302,7 @@ fn parse_tradingview_events(value: &Value, impact: &str) -> Result<Vec<CalendarE
     Ok(out)
 }
 
-fn load_events(source: &str, impact: &str) -> Result<Vec<CalendarEvent>, String> {
+fn load_events(source: &str, impact: ImpactFilter) -> Result<Vec<CalendarEvent>, String> {
     let body = if source.starts_with("http://") {
         fetch_http(source)?
     } else if source.starts_with("https://") {
@@ -305,14 +318,17 @@ fn load_events(source: &str, impact: &str) -> Result<Vec<CalendarEvent>, String>
     parse_forex_factory_events(&value, impact)
 }
 
-fn parse_forex_factory_events(value: &Value, impact: &str) -> Result<Vec<CalendarEvent>, String> {
+fn parse_forex_factory_events(
+    value: &Value,
+    impact: ImpactFilter,
+) -> Result<Vec<CalendarEvent>, String> {
     let events = value
         .as_array()
         .ok_or_else(|| "calendar json is not an array".to_string())?;
     let mut out = Vec::new();
     for item in events {
-        let event_impact = str_field(item, "impact");
-        if !impact.eq_ignore_ascii_case("All") && !event_impact.eq_ignore_ascii_case(impact) {
+        let event_impact = str_field(item, "impact").parse::<EventImpact>().ok();
+        if !impact.matches(event_impact) {
             continue;
         }
         let Some(ts_ns) = parse_iso_offset_ns(&str_field(item, "date")) else {
@@ -504,7 +520,92 @@ fn civil_from_days(z: i64) -> (i32, i32, i32) {
 fn month_window(ts_ns: i64) -> (i64, i64, String) {
     let (year, month, _) = civil_from_days(ts_ns.div_euclid(NS_PER_DAY));
     let from_ns = days_from_civil(year, month, 1) * NS_PER_DAY;
-    let (next_year, next_month) = if month == 12 { (year + 1, 1) } else { (year, month + 1) };
+    let (next_year, next_month) = if month == 12 {
+        (year + 1, 1)
+    } else {
+        (year, month + 1)
+    };
     let to_ns = days_from_civil(next_year, next_month, 1) * NS_PER_DAY;
     (from_ns, to_ns, format!("{year:04}-{month:02}"))
+}
+
+accelerando_core::choice_enum! {
+    pub enum EventImpact {
+        High => "High",
+        Medium => "Medium",
+        Low => "Low",
+        Holiday => "Holiday",
+    }
+}
+
+accelerando_core::choice_enum! {
+    pub enum ImpactFilter {
+        High => "High",
+        Medium => "Medium",
+        Low => "Low",
+        Holiday => "Holiday",
+        All => "All",
+    }
+}
+
+impl ImpactFilter {
+    fn matches(self, impact: Option<EventImpact>) -> bool {
+        match self {
+            Self::All => true,
+            Self::High => impact == Some(EventImpact::High),
+            Self::Medium => impact == Some(EventImpact::Medium),
+            Self::Low => impact == Some(EventImpact::Low),
+            Self::Holiday => impact == Some(EventImpact::Holiday),
+        }
+    }
+}
+
+#[cfg(test)]
+mod typed_filter_tests {
+    use super::*;
+
+    #[test]
+    fn forex_factory_filters_known_and_unknown_impacts_without_network() {
+        let events = serde_json::json!([
+            {"date":"2026-01-05T09:00:00-05:00", "impact":"high", "title":"A"},
+            {"date":"2026-01-05T10:00:00-05:00", "impact":"Holiday", "title":"B"},
+            {"date":"2026-01-05T11:00:00-05:00", "impact":"Unknown", "title":"C"}
+        ]);
+        let high = parse_forex_factory_events(&events, ImpactFilter::High).unwrap();
+        assert_eq!(high.len(), 1);
+        assert_eq!(high[0].impact, Some(EventImpact::High));
+        assert_eq!(
+            parse_forex_factory_events(&events, ImpactFilter::Holiday)
+                .unwrap()
+                .len(),
+            1
+        );
+        let all = parse_forex_factory_events(&events, ImpactFilter::All).unwrap();
+        assert_eq!(all.len(), 3);
+        assert_eq!(all[2].impact, None);
+    }
+
+    #[test]
+    fn tradingview_numeric_importance_maps_to_typed_impacts() {
+        let events = serde_json::json!({"result":[
+            {"date":"2026-01-05T09:00:00Z", "importance":1},
+            {"date":"2026-01-05T10:00:00Z", "importance":0},
+            {"date":"2026-01-05T11:00:00Z", "importance":-1}
+        ]});
+        let all = parse_tradingview_events(&events, ImpactFilter::All).unwrap();
+        assert_eq!(
+            all.iter().map(|e| e.impact).collect::<Vec<_>>(),
+            vec![
+                Some(EventImpact::High),
+                Some(EventImpact::Medium),
+                Some(EventImpact::Low)
+            ]
+        );
+        assert_eq!(
+            parse_tradingview_events(&events, ImpactFilter::Medium)
+                .unwrap()
+                .len(),
+            1
+        );
+    }
 }

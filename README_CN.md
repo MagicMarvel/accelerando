@@ -100,8 +100,8 @@ fn main() {
 
 ```rust
 use accelerando_core::ta::{Cross, CrossDir, Ema, SessionVwap};
-use accelerando_core::{BarCtx, Configurable, EntryIntent, Footprint, SessionClock,
-    SessionFilter, Strategy, StrategyOutput, StrategyRequirements, TradeDiscipline, TradeSide};
+use accelerando_core::{Configurable, EntryIntent, Footprint, SessionClock,
+    SessionFilter, Strategy, StrategyContext, StrategyRequirements, TradeDiscipline, TradeSide};
 
 #[derive(Configurable)]                     // 1
 #[configurable(init = Self::init)]
@@ -121,15 +121,17 @@ impl MyStrategy { fn init(&mut self) { self.ema = Ema::new(self.fast); } }
 
 impl Strategy for MyStrategy {
     fn requirements(&self) -> StrategyRequirements {   // 3
-        StrategyRequirements::new().bars("time:60")    // .indicator(..) / .values(&[..])
+        StrategyRequirements::new().bars(accelerando_core::BarSpec::Time { seconds: 60 })    // .indicator(..) / .values(&[..])
     }
-    fn on_footprint(&mut self, fp: &Footprint, ctx: &BarCtx, out: &mut StrategyOutput) {
+    fn on_bar(&mut self, ctx: &mut StrategyContext<'_>) {
+        let fp = ctx.bar();
+        let portfolio = ctx.portfolio();
         let now = self.clock.update(fp.ts_last_ns);    // 2
         self.discipline.on_bar(now.day);
         let vwap = self.vwap.update_bar(now.day, fp);
         let fast = self.ema.update(fp.close);
         let crossed = self.cross.update(fp.close, fast);
-        // ... out.orders.replace(EntryIntent::market(..).tick_bracket(..))
+        // ... ctx.replace_entry(EntryIntent::market(..).tick_bracket(..))
     }
 }
 
@@ -223,23 +225,26 @@ let strategy = registry.build_strategy("my_strategy", &Params::default()).unwrap
 
 ## 写策略时值得知道的机制
 
-- **读写边界**：`Strategy::on_footprint` 接收只读 `BarCtx`（全局 K 线编号 `ctx.bar` + `PortfolioSnapshot`，可直接解引用）和可写
-  `StrategyOutput`；账户状态从 `portfolio` 读取，订单写入 `output.orders`，纯绘图写入
-  `output.visuals`。
-- **持仓可见**：`portfolio.open_position` 包含 `PositionInfo`（方向、均价、持有 bar 数、当前止损
+- **回调上下文**：策略实现 `on_bar(&mut self, ctx: &mut StrategyContext<'_>)`。
+  通过 `ctx.bar()`、`ctx.history()`、`ctx.bar_spec()`、`ctx.portfolio()` 读取行情与账户快照，
+  `ctx.bar_index()` 返回全局 K 线序号。使用 `ctx.replace_entry()`、`ctx.add_entry()`、
+  `ctx.cancel_pending()`、`ctx.exit_position()` 提交交易指令，使用 `ctx.plot()`、`ctx.plot_series()` 绘图。
+  框架在回调结束后处理指令，当前回调里的账户快照保持不变。逐笔策略实现
+  `on_event(&mut self, ctx: &mut StrategyContext<'_>)`，通过 `ctx.event()` 读取事件。
+- **持仓可见**：`ctx.portfolio().open_position` 包含 `PositionInfo`（方向、均价、持有 bar 数、当前止损
   止盈），时间止损直接 `pos.bars_held >= N` 即可；策略还可实现 `on_trade_closed(&Trade)`
   在每笔平仓时收到回调。
 - **类型化入场**：用 `EntryIntent::market(...)` 或 `EntryIntent::limit(...)` 构造订单，通过
-  `output.orders.replace(...)` / `add(...)` 提交；结构止损用 `.price_bracket(...)`，相对 tick
+  `ctx.replace_entry(...)` / `ctx.add_entry(...)` 提交；结构止损用 `.price_bracket(...)`，相对 tick
   距离用 `.tick_bracket(...)`。
-- **撤单与平仓分离**：`output.orders.cancel_pending()` 只撤待成交入场单；
-  `output.orders.exit_position()` 才请求下一根 bar 平仓。
+- **撤单与平仓分离**：`ctx.cancel_pending()` 只撤待成交入场单；
+  `ctx.exit_position()` 才请求下一根 bar 平仓。
 - **成交模型**：第 `i` 根 bar 设定的意图在第 `i+1` 根开盘成交；止损止盈按该 bar 高低价盘中
   检查。同一根 bar 内先止损后止盈（保守假设）；开盘直接跳过止损价时按**开盘价**触发
   （gap-through），不会出现"在市场没到过的价格成交"。滑点（`slippage_ticks`）对所有主动成交收取：
   市价入场/平仓，以及**被触发的止损**（止损触发后即市价单）；止盈是挂单限价，按止盈价原价成交。
   tick 止损止盈以实际（含滑点）入场成交价为锚，与 ATM 下单一致。
-- **线型输出用 series**：`output.visuals.series("vwap", v)` / `series_colored` 每 run 存一份
+- **线型输出用 series**：`ctx.plot_series("vwap", v)` / `ctx.plot_series_colored()` 每 run 存一份
   `BacktestResult.series`，GUI 自动连线渲染（图例按 id 前缀分组开关），别再每根 bar
   push `Plot::Line`。
 - **trade 标签原子化**：标签通过 `EntryIntent::tagged("特征文本")` 与订单一起提交，不会因
@@ -251,7 +256,7 @@ let strategy = registry.build_strategy("my_strategy", &Params::default()).unwrap
 
 ## 在桌面查看器上绘图
 
-通过 `--gui` 打开回测图表。在指标的 `on_footprint` 中把 `Plot` 加入 `fp.plots`，或在策略中调用 `out.visuals.push(plot)`。相同 `id` 的 `Plot::Line` 点会连成一条线。GUI 也支持标记、线段、价格区间和成交量分布。
+通过 `--gui` 打开回测图表。在指标的 `on_footprint` 中把 `Plot` 加入 `fp.plots`，或在策略中调用 `ctx.plot(plot)`。相同 `id` 的 `Plot::Line` 点会连成一条线。GUI 也支持标记、线段、价格区间和成交量分布。
 
 ## 超参搜索（accelerando-hyperopt）
 

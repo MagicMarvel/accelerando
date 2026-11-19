@@ -13,6 +13,7 @@ pub const CHOPPINESS: &str = "regime_choppiness";
 /// consumers fail closed during warmup.
 #[derive(Configurable)]
 #[configurable(init = Self::init)]
+#[configurable(indicator = "regime")]
 pub struct Regime {
     #[param(default = 30, min = 5, max = 500)]
     window: usize,
@@ -138,7 +139,11 @@ mod tests {
             last = Some(f);
         }
         let f = last.unwrap();
-        assert!(f.values[EFFICIENCY_RATIO] > 0.7, "er={}", f.values[EFFICIENCY_RATIO]);
+        assert!(
+            f.values[EFFICIENCY_RATIO] > 0.7,
+            "er={}",
+            f.values[EFFICIENCY_RATIO]
+        );
         assert!(f.values[CHOPPINESS] < 50.0, "chop={}", f.values[CHOPPINESS]);
     }
 
@@ -153,7 +158,11 @@ mod tests {
             last = Some(f);
         }
         let f = last.unwrap();
-        assert!(f.values[EFFICIENCY_RATIO] < 0.2, "er={}", f.values[EFFICIENCY_RATIO]);
+        assert!(
+            f.values[EFFICIENCY_RATIO] < 0.2,
+            "er={}",
+            f.values[EFFICIENCY_RATIO]
+        );
         assert!(f.values[CHOPPINESS] > 60.0, "chop={}", f.values[CHOPPINESS]);
     }
 

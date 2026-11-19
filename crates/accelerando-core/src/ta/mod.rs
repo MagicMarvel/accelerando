@@ -1,7 +1,7 @@
 //! Incremental, causal building blocks for indicators and strategies.
 //!
 //! Every type here is updated one sample at a time and only ever looks at data it has already
-//! seen, so it is safe to use inside `Strategy::on_footprint` / `Indicator::on_footprint` without
+//! seen, so it is safe to use inside `Strategy::on_bar` / `Indicator::on_footprint` without
 //! look-ahead. They are deliberately small and tested so strategies stop re-implementing (and
 //! re-breaking) EMA/VWAP/value-area/ZigZag logic.
 //!
