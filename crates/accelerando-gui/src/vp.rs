@@ -10,15 +10,31 @@ use accelerando_core::{Footprint, VpLevel};
 use eframe::egui::{self, pos2, Align2, Color32, FontId, Painter, Rect, Stroke, StrokeKind};
 
 use crate::chart::{draw_dashes, Mapper};
-use crate::{data, Model};
+use crate::{data, Model, NEGATIVE_DELTA_COLOR, POSITIVE_DELTA_COLOR, TOTAL_VOLUME_COLOR};
 
-const BUY: Color32 = Color32::from_rgb(0x26, 0xa6, 0x9a);
-const SELL: Color32 = Color32::from_rgb(0xef, 0x53, 0x50);
 const POC: Color32 = Color32::from_rgb(0xf5, 0x9e, 0x0b);
 const VAH: Color32 = Color32::from_rgb(0x22, 0xc5, 0x5e);
 const VAL: Color32 = Color32::from_rgb(0xef, 0x44, 0x44);
 const MANUAL_EDGE: Color32 = Color32::from_rgb(0xc7, 0x92, 0xea);
 const SELECTION: Color32 = Color32::from_rgba_premultiplied(90, 70, 130, 60);
+
+struct ProfileColors {
+    positive_delta: Color32,
+    negative_delta: Color32,
+    poc_volume: Color32,
+}
+
+const MANUAL_COLORS: ProfileColors = ProfileColors {
+    positive_delta: POSITIVE_DELTA_COLOR,
+    negative_delta: NEGATIVE_DELTA_COLOR,
+    poc_volume: TOTAL_VOLUME_COLOR,
+};
+
+const STRATEGY_COLORS: ProfileColors = ProfileColors {
+    positive_delta: Color32::from_rgba_unmultiplied_const(0x26, 0xa6, 0x9a, 120),
+    negative_delta: Color32::from_rgba_unmultiplied_const(0xef, 0x53, 0x50, 120),
+    poc_volume: Color32::from_rgba_unmultiplied_const(POC.r(), POC.g(), POC.b(), 200),
+};
 
 /// A profile the user drew: the bars whose first trade is in `[t0, t1]`.
 pub(crate) struct ManualVp {
@@ -163,7 +179,7 @@ impl VpTool {
                 data::format_ts(bars[i0].ts_first_ns, model.tz, false, false),
                 data::format_ts(bars[i1 - 1].ts_last_ns, model.tz, false, false),
             );
-            draw_profile(painter, m, x0, x1, &levels, tick, Some(MANUAL_EDGE), &label);
+            draw_profile(painter, m, x0, x1, &levels, tick, &MANUAL_COLORS, Some(MANUAL_EDGE), &label);
             draw_levels(painter, m, sx0, sx1, stats, self.extend_lines, d);
         }
         // Selection while dragging.
@@ -198,7 +214,7 @@ pub(crate) fn draw_strategy_profiles(painter: &Painter, model: &Model, m: &Mappe
     for profile in &model.overlays.profiles {
         if profile.x1 >= m.x0 && profile.x0 <= m.x1 {
             draw_profile(
-                painter, m, profile.x0, profile.x1, &profile.levels, tick, profile.color, &profile.text,
+                painter, m, profile.x0, profile.x1, &profile.levels, tick, &STRATEGY_COLORS, profile.color, &profile.text,
             );
         }
     }
@@ -226,8 +242,7 @@ fn draw_levels(painter: &Painter, m: &Mapper, sx0: f32, sx1: f32, s: ProfileStat
     }
 }
 
-/// Web-studio style profile over `[x0, x1]`: delta bars grow left from the middle, total
-/// volume right, the POC level is orange, and a dashed box with a label frames it.
+/// Delta bars grow left from the middle and total volume grows right, framed by a dashed box.
 #[allow(clippy::too_many_arguments)]
 fn draw_profile(
     painter: &Painter,
@@ -236,6 +251,7 @@ fn draw_profile(
     x1: f64,
     levels: &[VpLevel],
     tick: f64,
+    colors: &ProfileColors,
     color: Option<Color32>,
     text: &str,
 ) {
@@ -273,22 +289,14 @@ fn draw_profile(
             let dw = half * (delta.abs() / max_delta) as f32;
             let rect = Rect::from_min_max(pos2(mid - dw, ya), pos2(mid, yb)).intersect(clip);
             if dw >= 0.5 && rect.is_positive() {
-                let c = if delta >= 0.0 { BUY } else { SELL };
-                painter.rect_filled(
-                    rect,
-                    0.0,
-                    Color32::from_rgba_unmultiplied(c.r(), c.g(), c.b(), 120),
-                );
+                let fill = if delta > 0.0 { colors.positive_delta } else { colors.negative_delta };
+                painter.rect_filled(rect, 0.0, fill);
             }
         }
         let vw = half * (total / max_total) as f32;
         let rect = Rect::from_min_max(pos2(mid, ya), pos2(mid + vw, yb)).intersect(clip);
         if vw >= 0.5 && rect.is_positive() {
-            let fill = if j == poc {
-                Color32::from_rgba_unmultiplied(POC.r(), POC.g(), POC.b(), 200)
-            } else {
-                crate::TOTAL_VOLUME_COLOR
-            };
+            let fill = if j == poc { colors.poc_volume } else { TOTAL_VOLUME_COLOR };
             painter.rect_filled(
                 rect,
                 0.0,
@@ -321,6 +329,26 @@ mod tests {
     use eframe::egui::Shape;
 
     #[test]
+    fn manual_profile_uses_footprint_colors_for_both_sides_and_poc_volume() {
+        let rect = Rect::from_min_max(pos2(0.0, 0.0), pos2(400.0, 200.0));
+        let mapper = Mapper { rect, x0: 0.0, x1: 1.0, p0: 99.0, p1: 101.0 };
+        let levels = [
+            VpLevel { price: 100.0, buy_vol: 10.0, sell_vol: 2.0 },
+            VpLevel { price: 100.25, buy_vol: 1.0, sell_vol: 6.0 },
+        ];
+        let input = egui::RawInput { screen_rect: Some(rect), ..Default::default() };
+        let mut output = egui::Context::default().run_ui(input, |ui| {
+            draw_profile(ui.painter(), &mapper, 0.0, 1.0, &levels, 0.25, &MANUAL_COLORS, None, "");
+        });
+        output.textures_delta.clear();
+        let fills = output.shapes.iter().filter_map(|entry| match &entry.shape {
+            Shape::Rect(rect) => Some(rect.fill),
+            _ => None,
+        }).collect::<Vec<_>>();
+        assert_eq!(fills, [POSITIVE_DELTA_COLOR, TOTAL_VOLUME_COLOR, NEGATIVE_DELTA_COLOR, TOTAL_VOLUME_COLOR]);
+    }
+
+    #[test]
     fn zoomed_profile_border_only_emits_visible_dashes() {
         let clip = Rect::from_min_max(pos2(0.0, 0.0), pos2(700.0, 100.0));
         let ctx = egui::Context::default();
@@ -329,7 +357,7 @@ mod tests {
             let painter = ui.painter().with_clip_rect(clip);
             let m = Mapper { rect: clip, x0: 0.0, x1: 1.0, p0: 99.0, p1: 101.0 };
             let levels = [VpLevel { price: 100.0, buy_vol: 10.0, sell_vol: 2.0 }];
-            draw_profile(&painter, &m, -10_000.0, 10_001.0, &levels, 0.25, None, "");
+            draw_profile(&painter, &m, -10_000.0, 10_001.0, &levels, 0.25, &MANUAL_COLORS, None, "");
         });
         output.textures_delta.clear();
         let dashes: Vec<_> = output.shapes.iter().filter_map(|entry| {

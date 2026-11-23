@@ -37,6 +37,8 @@ use eframe::egui;
 /// Total executed volume in footprint and volume-profile histograms.
 const TOTAL_VOLUME_COLOR: egui::Color32 =
     egui::Color32::from_rgba_unmultiplied_const(200, 194, 178, 145);
+const POSITIVE_DELTA_COLOR: egui::Color32 = egui::Color32::from_rgb(0x17, 0x3e, 0x76);
+const NEGATIVE_DELTA_COLOR: egui::Color32 = egui::Color32::from_rgb(0x8c, 0x30, 0x3a);
 
 use chart::ChartState;
 pub use bars::{aggregate, BarKind, BarSpec, Rebar};

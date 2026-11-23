@@ -15,7 +15,7 @@ use crate::liquidity_colors::{self, ColorScale};
 use crate::market_history::{self, Viewport};
 use crate::replay_bubbles::{BubbleGroup, BubbleView, ReplayBubbles};
 use crate::vp::VpTool;
-use crate::{ChartMode, Model, Settings};
+use crate::{ChartMode, Model, Settings, NEGATIVE_DELTA_COLOR, POSITIVE_DELTA_COLOR};
 
 const AXIS_W: f32 = 72.0;
 const AXIS_H: f32 = 22.0;
@@ -2003,8 +2003,6 @@ fn draw_bars(painter: &Painter, model: &Model, settings: &Settings, m: &Mapper) 
 /// Bars at least this many pixels apart are drawn as footprints (as in the web studio).
 pub(crate) const FOOTPRINT_MIN_SLOT: f32 = 32.0;
 const FOOTPRINT_TEXT: Color32 = Color32::from_rgb(155, 166, 184);
-const FOOTPRINT_POSITIVE_DELTA: Color32 = Color32::from_rgb(0x17, 0x3e, 0x76);
-const FOOTPRINT_NEGATIVE_DELTA: Color32 = Color32::from_rgb(0x8c, 0x30, 0x3a);
 const FOOTPRINT_BUY: Color32 = Color32::from_rgb(0x78, 0xb0, 0xf5);
 const FOOTPRINT_SELL: Color32 = Color32::from_rgb(0xf0, 0x86, 0x91);
 const BAR_POC: Color32 = Color32::from_rgb(240, 200, 80);
@@ -2157,7 +2155,7 @@ fn draw_footprints(
             let [bid_hit, ask_hit] = settings.footprint_imbalance.at(&fp.ladder, index, model.result.tick_size);
             if delta != 0.0 {
                 let bar_w = (profile_w * (delta.abs() / max_delta) as f32).clamp(1.0, profile_w);
-                let color = if delta > 0.0 { FOOTPRINT_POSITIVE_DELTA } else { FOOTPRINT_NEGATIVE_DELTA };
+                let color = if delta > 0.0 { POSITIVE_DELTA_COLOR } else { NEGATIVE_DELTA_COLOR };
                 painter.rect_filled(
                     Rect::from_min_max(pos2(delta_right - bar_w, ya), pos2(delta_right, yb)),
                     0.0,
@@ -3680,15 +3678,15 @@ mod tests {
         }).collect();
         let find_bar = |color| cells.iter().filter(move |cell| cell.fill == color);
         let volume: Vec<_> = find_bar(crate::TOTAL_VOLUME_COLOR).map(|cell| cell.rect).collect();
-        let delta: Vec<_> = find_bar(FOOTPRINT_POSITIVE_DELTA).map(|cell| cell.rect).collect();
+        let delta: Vec<_> = find_bar(POSITIVE_DELTA_COLOR).map(|cell| cell.rect).collect();
         assert_eq!((delta.len(), volume.len()), (1, 1));
-        assert_eq!(find_bar(FOOTPRINT_NEGATIVE_DELTA).count(), 0);
+        assert_eq!(find_bar(NEGATIVE_DELTA_COLOR).count(), 0);
         assert!(delta[0].right() < volume[0].left());
         let highlight = cells.iter().find(|cell| cell.stroke.color == FOOTPRINT_BUY).unwrap();
         assert_eq!(highlight.rect.right(), delta[0].right());
         assert!(highlight.rect.right() < volume[0].left());
         let sell_y = mapper.sy(99.50);
-        for color in [FOOTPRINT_NEGATIVE_DELTA, FOOTPRINT_SELL] {
+        for color in [NEGATIVE_DELTA_COLOR, FOOTPRINT_SELL] {
             assert!(output.shapes.iter().any(|shape| matches!(&shape.shape, Shape::Rect(rect)
                 if rect.rect.y_range().contains(sell_y) && (rect.fill == color || rect.stroke.color == color))));
         }
