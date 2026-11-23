@@ -1,6 +1,6 @@
 use accelerando_core::{Footprint, OrderFlowEvent, Plot, Side};
 use accelerando_example_indicators::big_trades::{
-    CumulativeTrade, CumulativeTrades, DEFAULT_CUMULATIVE_WINDOW_MS, DEFAULT_MIN_TRADE_SIZE,
+    CumulativeTrade, CumulativeTrades, DEFAULT_CUMULATIVE_WINDOW_MS,
 };
 use eframe::egui::{self, Color32};
 
@@ -48,12 +48,12 @@ impl Default for BigTradeSettings {
         Self {
             visible: true,
             settings_open: false,
-            min_volume: DEFAULT_MIN_TRADE_SIZE,
+            min_volume: 300.0,
             max_volume: 0.0,
             fixed_size: false,
-            base_size: 10.0,
+            base_size: 20.0,
             min_size: 8.0,
-            max_size: 50.0,
+            max_size: 100.0,
             shape: MarkerShape::Circle,
             show_value: true,
             buy_color: BUY_COLOR,
@@ -320,7 +320,7 @@ mod tests {
             print(300_000, 100.5, 10.0, Side::Sell),
             print(400_000, 101.5, 50.0, Side::Buy),
         ]);
-        let settings = BigTradeSettings::default();
+        let settings = BigTradeSettings { min_volume: 25.0, ..Default::default() };
         let markers: Vec<_> = overlay
             .visible(0, 400_000, None, &settings)
             .map(|marker| (marker.ts_ns, marker.price))
@@ -386,15 +386,16 @@ mod tests {
     #[test]
     fn bubble_size_scales_within_bounds_or_uses_the_fixed_diameter() {
         let mut settings = BigTradeSettings::default();
-        assert_eq!(settings.radius(25.0), 5.0);
-        assert_eq!(settings.radius(50.0), 10.0);
-        assert_eq!(settings.radius(100.0), 20.0);
+        assert_eq!(settings.min_volume, 300.0);
+        assert_eq!(settings.radius(300.0), 10.0);
+        assert_eq!(settings.radius(600.0), 20.0);
+        assert_eq!(settings.radius(1200.0), 40.0);
         assert_eq!(settings.radius(1.0), 4.0);
-        assert_eq!(settings.radius(f64::MAX), 25.0);
+        assert_eq!(settings.radius(f64::MAX), 50.0);
         settings.fixed_size = true;
-        assert_eq!(settings.radius(f64::MAX), 5.0);
-        settings.min_size = 12.0;
-        assert_eq!(settings.radius(f64::MAX), 6.0);
+        assert_eq!(settings.radius(f64::MAX), 10.0);
+        settings.min_size = 24.0;
+        assert_eq!(settings.radius(f64::MAX), 12.0);
         settings.transparency = 100;
         assert_eq!(settings.opacity(), 0);
     }

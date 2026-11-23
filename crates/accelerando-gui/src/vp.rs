@@ -7,9 +7,9 @@
 
 use accelerando_core::volume_profile::{self, ProfileStats};
 use accelerando_core::{Footprint, VpLevel};
-use eframe::egui::{self, pos2, Align2, Color32, FontId, Painter, Pos2, Rect, Stroke, StrokeKind};
+use eframe::egui::{self, pos2, Align2, Color32, FontId, Painter, Rect, Stroke, StrokeKind};
 
-use crate::chart::Mapper;
+use crate::chart::{draw_dashes, Mapper};
 use crate::{data, Model};
 
 const BUY: Color32 = Color32::from_rgb(0x26, 0xa6, 0x9a);
@@ -30,8 +30,6 @@ pub(crate) struct ManualVp {
 pub(crate) struct VpTool {
     /// Drag on the chart draws a profile instead of panning.
     pub drawing: bool,
-    /// Gaussian smoothing of drawn profiles, in ticks (0 = raw).
-    pub smooth_ticks: f32,
     /// Value-area share of the volume.
     pub va_fraction: f32,
     /// Peak area = contiguous levels with at least this share of the POC volume (0 = off).
@@ -47,7 +45,6 @@ impl Default for VpTool {
     fn default() -> Self {
         Self {
             drawing: false,
-            smooth_ticks: 4.0,
             va_fraction: 0.70,
             peak_fraction: 0.70,
             extend_lines: true,
@@ -147,8 +144,7 @@ impl VpTool {
             if x0 > m.x1 || (x1 < m.x0 && !self.extend_lines) {
                 continue;
             }
-            let raw = volume_profile::profile_from_footprints(&bars[i0..i1], tick);
-            let levels = volume_profile::smooth_profile(&raw, tick, self.smooth_ticks as f64);
+            let levels = volume_profile::profile_from_footprints(&bars[i0..i1], tick);
             let Some(stats) = volume_profile::value_area(&levels, self.va_fraction as f64) else {
                 continue;
             };
@@ -163,10 +159,9 @@ impl VpTool {
                 }
             }
             let label = format!(
-                "VP {}-{}  σ{:.0}",
+                "VP {}-{}",
                 data::format_ts(bars[i0].ts_first_ns, model.tz, false, false),
                 data::format_ts(bars[i1 - 1].ts_last_ns, model.tz, false, false),
-                self.smooth_ticks,
             );
             draw_profile(painter, m, x0, x1, &levels, tick, Some(MANUAL_EDGE), &label);
             draw_levels(painter, m, sx0, sx1, stats, self.extend_lines, d);
@@ -228,48 +223,6 @@ fn draw_levels(painter: &Painter, m: &Mapper, sx0: f32, sx1: f32, s: ProfileStat
         }
         let x = sx1.max(m.rect.left()).min(m.rect.right() - 90.0);
         painter.text(pos2(x + 4.0, y - 1.0), Align2::LEFT_BOTTOM, format!("{name} {price:.d$}"), FontId::proportional(11.0), color);
-    }
-}
-
-/// Clip each axis-aligned edge before emitting dashes. Keep the phase measured from the
-/// original path so the dash pattern stays anchored when panning or zooming.
-fn draw_dashes(painter: &Painter, points: &[Pos2], stroke: Stroke, dash: f32, gap: f32) {
-    let clip = painter.clip_rect().expand(stroke.width);
-    let period = dash + gap;
-    let mut phase = 0.0;
-    for edge in points.windows(2) {
-        let (from, to) = (edge[0], edge[1]);
-        let horizontal = from.y == to.y;
-        let (start, end, fixed, low, high, fixed_range) = if horizontal {
-            (from.x, to.x, from.y, clip.left(), clip.right(), clip.y_range())
-        } else {
-            (from.y, to.y, from.x, clip.top(), clip.bottom(), clip.x_range())
-        };
-        let length = (end - start).abs();
-        if !length.is_finite() {
-            continue;
-        }
-        let dir = if end >= start { 1.0 } else { -1.0 };
-        let visible_start = start.min(end).max(low);
-        let visible_end = start.max(end).min(high);
-        if visible_start < visible_end && fixed_range.contains(fixed) {
-            let first = if dir > 0.0 { visible_start } else { visible_end };
-            let span = visible_end - visible_start;
-            let mut offset = -(phase + (first - start).abs().rem_euclid(period)).rem_euclid(period);
-            let point = |offset: f32| {
-                let along = first + dir * offset;
-                if horizontal { pos2(along, fixed) } else { pos2(fixed, along) }
-            };
-            while offset < span {
-                let left = offset.max(0.0);
-                let right = (offset + dash).min(span);
-                if left < right {
-                    painter.line_segment([point(left), point(right)], stroke);
-                }
-                offset += period;
-            }
-        }
-        phase = (phase + length.rem_euclid(period)).rem_euclid(period);
     }
 }
 

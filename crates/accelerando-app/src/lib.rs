@@ -468,7 +468,7 @@ impl App {
     /// Parse `std::env::args` (over `accelerando.toml`), run, and exit non-zero on error.
     pub fn run_cli(self) {
         let args: Vec<String> = std::env::args().skip(1).collect();
-        let code = match self.options_from(&args).and_then(|o| self.run(&o)) {
+        let code = match self.options_from(&args).and_then(|o| self.run_with_gui_exit(&o, cfg!(windows))) {
             Ok(()) => 0,
             Err(msg) => {
                 eprintln!("{msg}");
@@ -480,6 +480,10 @@ impl App {
 
     /// Run with explicit options.
     pub fn run(&self, o: &RunOptions) -> Result<(), String> {
+        self.run_with_gui_exit(o, false)
+    }
+
+    fn run_with_gui_exit(&self, o: &RunOptions, exit_on_gui_close: bool) -> Result<(), String> {
         if o.list {
             self.print_list();
             return Ok(());
@@ -579,9 +583,10 @@ impl App {
         }
         println!("elapsed {:.1}s", started.elapsed().as_secs_f64());
 
-        let best = outcomes
+        let (best_index, best) = outcomes
             .iter()
-            .max_by(|a, b| {
+            .enumerate()
+            .max_by(|(_, a), (_, b)| {
                 a.result
                     .metrics
                     .net_pnl
@@ -599,26 +604,29 @@ impl App {
             write_json(path, &best.result)?;
         }
         if o.gui {
-            let result = if best.result.footprints.is_empty() {
+            let RunOutcome { label, params, result } = outcomes.into_iter().nth(best_index)
+                .expect("best index came from outcomes");
+            let result = if result.footprints.is_empty() {
                 // Grid runs drop footprints for memory; rerun the best one for the chart.
-                println!("re-running {} with chart data ...", best.label);
+                println!("re-running {label} with chart data ...");
                 let prepared = self.prepare(o, data_path, &reqs)?;
                 run_prepared_backtest(
                     &prepared.data,
-                    self.build_strategy(strategy, &best.params)?,
+                    self.build_strategy(strategy, &params)?,
                     o.broker(),
                     true,
                 )
             } else {
-                best.result.clone()
+                result
             };
             return gui::view(
                 Arc::clone(&self.registry),
                 o,
                 data_path,
-                &best.label,
+                &label,
                 result,
                 gui_events,
+                exit_on_gui_close,
             );
         }
         Ok(())

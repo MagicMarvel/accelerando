@@ -111,6 +111,7 @@ dependencies = [
  "chrono",
  "eframe",
  "serde_json",
+ "winit",
 ]
 
 [[package]]

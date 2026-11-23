@@ -4,11 +4,12 @@
 
 use std::collections::BTreeMap;
 use std::sync::{mpsc, Arc};
+use std::time::Instant;
 
 use accelerando_core::{Footprint, Level, OrderFlowEvent, Side};
 use eframe::egui;
 
-use crate::Model;
+use crate::{chart::ChartState, Model};
 
 /// One trade of the replay.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -102,8 +103,20 @@ impl ReplayBars {
         self.ladder.clear();
     }
 
-    /// Feed one trade into the bar it belongs to.
-    pub fn apply(&mut self, t: &Tick, full: &[Footprint]) {
+    /// Feed trades in order, then publish the ladder of the remaining partial bar.
+    pub fn apply_ticks(&mut self, ticks: &[Tick], full: &[Footprint]) {
+        if ticks.is_empty() {
+            return;
+        }
+        for tick in ticks {
+            self.apply(tick, full);
+        }
+        if self.partial {
+            self.refresh_ladder();
+        }
+    }
+
+    fn apply(&mut self, t: &Tick, full: &[Footprint]) {
         loop {
             let Some(bar) = full.get(self.done) else { return };
             // The bar is over when the trade is later than its last one - or, for trades sharing
@@ -155,6 +168,10 @@ impl ReplayBars {
         bar.volume += t.size;
         bar.trades += 1;
         bar.delta += buy - sell;
+    }
+
+    fn refresh_ladder(&mut self) {
+        let bar = self.bars.last_mut().expect("partial bar");
         bar.ladder.clear();
         let mut best = f64::NEG_INFINITY;
         for (&k, &(buy_vol, sell_vol)) in &self.ladder {
@@ -178,17 +195,40 @@ impl ReplayBars {
 
 /// Ticks fetched per request.
 const CHUNK: usize = 200_000;
-/// Waits longer than this (in real seconds) are skipped: overnight, weekends, dead minutes.
+/// Bar mode skips waits longer than this many real seconds.
 const MAX_WAIT_SECS: f64 = 1.5;
 pub(crate) const SPEED_RANGE: std::ops::RangeInclusive<f64> = 0.1..=5000.0;
+
+struct PlaybackClock {
+    wall: Instant,
+    market_ns: i64,
+}
+
+impl PlaybackClock {
+    fn target(&self, now: Instant, speed: f64) -> i64 {
+        let elapsed = now.duration_since(self.wall).as_secs_f64();
+        self.market_ns.saturating_add((elapsed * speed * 1e9) as i64)
+    }
+}
+
+/// Keep waits inside the chart's timeline, including intervals with only depth updates.
+fn skip_heatmap_gap(segments: &[crate::data::Segment], target: i64) -> i64 {
+    let next = segments.partition_point(|segment| segment.t0_ns <= target);
+    match segments.get(next) {
+        Some(segment) if next > 0 && target >= segments[next - 1].t1_ns => segment.t0_ns,
+        _ => target,
+    }
+}
 
 /// Playback state and controls.
 pub(crate) struct Replay {
     /// The next click on the chart picks the bar to start from.
     pub picking: bool,
-    pub playing: bool,
+    playing: bool,
     /// Replay seconds per real second.
-    pub speed: f64,
+    speed: f64,
+    speed_changed: bool,
+    clock: Option<PlaybackClock>,
     pub error: Option<String>,
     ticks: Vec<Tick>,
     next: usize,
@@ -203,6 +243,8 @@ impl Default for Replay {
             picking: false,
             playing: false,
             speed: 10.0,
+            speed_changed: false,
+            clock: None,
             error: None,
             ticks: Vec::new(),
             next: 0,
@@ -214,11 +256,14 @@ impl Default for Replay {
 
 impl Replay {
     /// Start replaying in front of bar `index` of the displayed bars.
-    pub fn start(&mut self, model: &mut Model, index: usize) {
+    pub fn start(&mut self, model: &mut Model, index: usize, heatmap: bool) {
         let Some(first) = model.full_bars().get(index).map(|f| f.ts_first_ns) else { return };
         model.start_replay(index);
         self.picking = false;
-        self.playing = true;
+        self.set_playing(true);
+        if !self.speed_changed {
+            self.speed = if heatmap { 1.0 } else { 10.0 };
+        }
         self.error = None;
         self.ticks.clear();
         self.next = 0;
@@ -229,7 +274,7 @@ impl Replay {
     pub fn stop(&mut self, model: &mut Model) {
         model.stop_replay();
         self.picking = false;
-        self.playing = false;
+        self.set_playing(false);
         self.ticks.clear();
         self.next = 0;
         self.fetch_from = None;
@@ -252,13 +297,14 @@ impl Replay {
                 Ok(Err(error)) => {
                     self.pending = None;
                     self.fetch_from = None;
-                    self.playing = false;
+                    self.set_playing(false);
                     self.error = Some(error);
                 }
                 Err(mpsc::TryRecvError::Empty) => {}
                 Err(mpsc::TryRecvError::Disconnected) => {
                     self.pending = None;
                     self.fetch_from = None;
+                    self.set_playing(false);
                     self.error = Some("tick reader stopped".to_string());
                 }
             }
@@ -292,7 +338,7 @@ impl Replay {
 
     /// Advance exactly one trade.
     pub fn step_tick(&mut self, model: &mut Model) {
-        self.playing = false;
+        self.set_playing(false);
         let Some(tick) = self.ticks.get(self.next).copied() else { return };
         model.replay_apply(&[tick], tick.ts_ns);
         self.next += 1;
@@ -300,7 +346,7 @@ impl Replay {
 
     /// Advance to the end of the bar in progress.
     pub fn step_bar(&mut self, model: &mut Model) {
-        self.playing = false;
+        self.set_playing(false);
         if let Some(end) = model.replay_bar_end() {
             self.advance_to(model, end + 1);
         }
@@ -312,21 +358,30 @@ impl Replay {
         model: &mut Model,
         source: &TickSource,
         ctx: &egui::Context,
+        heatmap: bool,
     ) {
         let Some(clock) = model.replay_clock() else { return };
         self.feed(source, ctx);
         if self.playing {
-            let dt = ctx.input(|i| i.stable_dt).min(0.1) as f64;
-            let mut target = clock + (dt * self.speed * 1e9) as i64;
-            if let Some(next) = self.ticks.get(self.next) {
-                // Nothing trades for a while: jump to the next trade.
-                if (next.ts_ns - target) as f64 > MAX_WAIT_SECS * self.speed * 1e9 {
+            let now = Instant::now();
+            let deadline = self.clock.get_or_insert(PlaybackClock { wall: now, market_ns: clock });
+            let elapsed_target = deadline.target(now, self.speed);
+            let mut target = elapsed_target;
+            if heatmap {
+                target = skip_heatmap_gap(&model.axis.segments, target);
+            } else if let Some(next) = self.ticks.get(self.next) {
+                if next.ts_ns.saturating_sub(target) as f64 > MAX_WAIT_SECS * self.speed * 1e9 {
                     target = next.ts_ns;
                 }
             }
             self.advance_to(model, target);
+            let applied = model.replay_clock().unwrap_or(clock);
+            if applied != elapsed_target {
+                // Rebase across skipped gaps and data stalls so they create no catch-up burst.
+                self.clock = Some(PlaybackClock { wall: now, market_ns: applied });
+            }
             if model.replay_finished() {
-                self.playing = false;
+                self.set_playing(false);
             }
             ctx.request_repaint();
         }
@@ -336,11 +391,11 @@ impl Replay {
     }
 
     /// The transport controls shown in the toolbar while a replay is active.
-    pub fn controls(&mut self, ui: &mut egui::Ui, model: &mut Model) {
+    pub fn controls(&mut self, ui: &mut egui::Ui, model: &mut Model, chart: &mut ChartState, heatmap: bool) {
         let finished = model.replay_finished();
         let play = if self.playing { "⏸ Pause" } else { "▶ Play" };
         if ui.add_enabled(!finished, egui::Button::new(play)).on_hover_text("Space").clicked() {
-            self.playing = !self.playing;
+            self.set_playing(!self.playing);
         }
         if ui.add_enabled(!finished, egui::Button::new("Tick ▸")).on_hover_text("Next trade (→)").clicked() {
             self.step_tick(model);
@@ -354,13 +409,28 @@ impl Replay {
                 self.set_speed(self.speed * factor);
             }
         }
-        ui.add(
-            egui::Slider::new(&mut self.speed, SPEED_RANGE)
+        let mut speed = self.speed;
+        if ui.add(
+            egui::Slider::new(&mut speed, SPEED_RANGE)
                 .logarithmic(true)
                 .suffix("x")
                 .max_decimals(1),
         )
-        .on_hover_text("Replay seconds per real second. Quiet stretches are skipped.");
+        .on_hover_text(if heatmap {
+            "Replay seconds per real second. Gaps outside the chart timeline are skipped."
+        } else {
+            "Replay seconds per real second. Quiet stretches are skipped."
+        })
+        .changed() {
+            self.set_speed(speed);
+        }
+        if ui.selectable_label(chart.follow_replay, "Follow")
+            .on_hover_text("Follow the replay position. Drag the chart to explore.")
+            .clicked()
+        {
+            chart.follow_replay = true;
+            chart.sync_replay(model.replay_cut_x());
+        }
         if ui.button("⏮ Pick bar").on_hover_text("Click another bar to restart from it").clicked() {
             self.stop(model);
             self.picking = true;
@@ -383,6 +453,13 @@ impl Replay {
 
     fn set_speed(&mut self, speed: f64) {
         self.speed = speed.clamp(*SPEED_RANGE.start(), *SPEED_RANGE.end());
+        self.speed_changed = true;
+        self.clock = None;
+    }
+
+    fn set_playing(&mut self, playing: bool) {
+        self.playing = playing;
+        self.clock = None;
     }
 
     /// Keyboard shortcuts while a replay is active and no text field has the focus.
@@ -400,7 +477,7 @@ impl Replay {
             )
         });
         if space {
-            self.playing = !self.playing;
+            self.set_playing(!self.playing);
         }
         match (right, shift) {
             (true, true) => self.step_bar(model),
@@ -449,8 +526,7 @@ mod tests {
         let mut r = ReplayBars::new(&full, 1, 0.25);
         assert_eq!((r.bars.len(), r.clock_ns), (1, 9));
 
-        r.apply(&tick(10, 100.0, 2.0, 1), &full);
-        r.apply(&tick(12, 100.5, 3.0, -1), &full);
+        r.apply_ticks(&[tick(10, 100.0, 2.0, 1), tick(12, 100.5, 3.0, -1)], &full);
         let b = r.bars.last().unwrap();
         assert_eq!(r.bars.len(), 2);
         assert_eq!((b.open, b.high, b.low, b.close), (100.0, 100.5, 100.0, 100.5));
@@ -458,7 +534,7 @@ mod tests {
         assert_eq!(b.ladder.len(), 2);
 
         // A trade of the next bar completes this one with the aggregator's own bar.
-        r.apply(&tick(20, 101.0, 1.0, 1), &full);
+        r.apply_ticks(&[tick(20, 101.0, 1.0, 1)], &full);
         assert_eq!(r.bars.len(), 3);
         assert_eq!(r.bars[1].volume, 100.0);
         assert_eq!(r.bars[2].volume, 1.0);
@@ -474,11 +550,35 @@ mod tests {
         // Volume-style bars: the first ends and the second starts at ts 5.
         let full = vec![bar(0, 5, 2), bar(5, 8, 2)];
         let mut r = ReplayBars::new(&full, 0, 0.25);
-        for t in [tick(0, 1.0, 1.0, 1), tick(5, 1.0, 1.0, 1), tick(5, 2.0, 1.0, 1)] {
-            r.apply(&t, &full);
-        }
+        r.apply_ticks(&[tick(0, 1.0, 1.0, 1), tick(5, 1.0, 1.0, 1), tick(5, 2.0, 1.0, 1)], &full);
         assert_eq!(r.bars.len(), 2);
         assert_eq!((r.bars[1].open, r.bars[1].trades), (2.0, 1));
+    }
+
+    #[test]
+    fn playback_clock_keeps_elapsed_time_across_a_slow_frame() {
+        use std::time::Duration;
+
+        let wall = Instant::now();
+        let market_ns = 1_770_000_000_000_000_000;
+        let clock = PlaybackClock { wall, market_ns };
+        assert_eq!(clock.target(wall + Duration::from_millis(16), 1.0), market_ns + 16_000_000);
+        assert_eq!(clock.target(wall + Duration::from_millis(250), 2.0), market_ns + 500_000_000);
+    }
+
+    #[test]
+    fn heatmap_only_skips_time_between_axis_segments() {
+        use crate::data::Segment;
+
+        let segments = [
+            Segment { t0_ns: 10, t1_ns: 20, x0: 0.0 },
+            Segment { t0_ns: 90, t1_ns: 100, x0: 1e-8 },
+        ];
+        assert_eq!(skip_heatmap_gap(&segments, 9), 9);
+        assert_eq!(skip_heatmap_gap(&segments, 19), 19);
+        assert_eq!(skip_heatmap_gap(&segments, 20), 90);
+        assert_eq!(skip_heatmap_gap(&segments, 91), 91);
+        assert_eq!(skip_heatmap_gap(&segments, 100), 100);
     }
 
     #[test]

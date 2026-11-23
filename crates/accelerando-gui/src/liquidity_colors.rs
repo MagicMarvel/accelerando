@@ -1,5 +1,7 @@
 //! Liquidity filters and color mapping in resting-size units.
 
+use std::borrow::Cow;
+
 use crate::data::{RasterSpec, TimeAxis};
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -11,13 +13,13 @@ pub(crate) enum PriceFilter {
 
 impl PriceFilter {
     pub fn sigma(self, tick_pixels: f64, row_pixels: f64, manual_px: f32) -> f32 {
-        if !(row_pixels > 0.0) {
+        if !(tick_pixels > 0.0 && row_pixels > 0.0) {
             return 0.0;
         }
         let pixels = match self {
-            Self::Auto if tick_pixels < 15.0 => 5.0,
+            Self::Auto => (1.0 / (tick_pixels * 0.050_044_1) - 1.0).clamp(0.0, 10.0),
             Self::Gaussian => f64::from(manual_px),
-            _ => 0.0,
+            Self::Off => 0.0,
         };
         (pixels / row_pixels) as f32
     }
@@ -47,68 +49,100 @@ pub(crate) fn column_groups(
         .collect()
 }
 
-pub(crate) fn filter_cells(
-    cells: &mut [f32],
-    columns: usize,
-    time_groups: Option<&[Option<usize>]>,
-    sigma_rows: f32,
-) {
-    if let Some(groups) = time_groups {
-        let mut scratch = vec![0.0; columns];
-        for row in cells.chunks_exact_mut(columns) {
-            scratch.copy_from_slice(row);
-            for (col, value) in row.iter_mut().enumerate() {
-                let Some(group) = groups[col] else { continue };
-                let mut sum = 2.0 * scratch[col];
-                let mut weight = 2.0;
-                for neighbor in [col.checked_sub(1), (col + 1 < columns).then_some(col + 1)]
-                    .into_iter()
-                    .flatten()
-                {
-                    if groups[neighbor] == Some(group) {
-                        sum += scratch[neighbor];
-                        weight += 1.0;
-                    }
-                }
-                *value = sum / weight;
-            }
-        }
-    }
-    if sigma_rows < 0.01 {
-        return;
-    }
-
-    let radius = (sigma_rows * 3.0).ceil().min(32.0) as usize;
-    let weights: Vec<_> = (0..=radius)
-        .map(|distance| (-0.5 * (distance as f32 / sigma_rows).powi(2)).exp())
-        .collect();
-    let rows = cells.len() / columns;
-    let input = cells.to_vec();
-    for row in 0..rows {
-        let first = row.saturating_sub(radius);
-        let end = (row + radius + 1).min(rows);
-        let dest = &mut cells[row * columns..][..columns];
-        dest.fill(0.0);
-        let mut total_weight = 0.0;
-        for neighbor in first..end {
-            let weight = weights[row.abs_diff(neighbor)];
-            total_weight += weight;
-            for (value, &sample) in dest.iter_mut().zip(&input[neighbor * columns..][..columns]) {
-                *value += sample * weight;
-            }
-        }
-        for value in dest {
-            *value /= total_weight;
+pub(crate) fn smooth_time(cells: &mut [f32], columns: usize, groups: &[Option<usize>]) {
+    let mut scratch = vec![0.0; columns];
+    for row in cells.chunks_exact_mut(columns) {
+        scratch.copy_from_slice(row);
+        for (col, value) in row.iter_mut().enumerate() {
+            *value = time_filtered_cell(&scratch, col, time_neighbors(groups, col));
         }
     }
 }
 
+/// Expand price bands to texture rows, then spread each band from its nearest edge.
+/// Return the remaining row repetition so callers can still replicate unsmoothed colors cheaply.
+pub(crate) fn price_pixels(
+    cells: &[f32], columns: usize, repeat: usize, sigma_rows: f32,
+) -> (Cow<'_, [f32]>, usize) {
+    if sigma_rows <= 0.0 {
+        return (Cow::Borrowed(cells), repeat);
+    }
+
+    let sigma = sigma_rows * repeat as f32;
+    let radius = (sigma * 3.0).ceil().min(64.0) as usize;
+    let weights: Vec<_> = (1..=radius)
+        .map(|distance| (-0.5 * (distance as f32 / sigma.max(0.1)).powi(2)).exp())
+        .collect();
+    let height = cells.len() / columns * repeat;
+    let mut pixels = Vec::with_capacity(height * columns);
+    for band in cells.chunks_exact(columns) {
+        for _ in 0..repeat {
+            pixels.extend_from_slice(band);
+        }
+    }
+    // Every pixel within a band starts with the same depth. Only the nearest pixel
+    // of that band can win the weighted maximum, so iterate just outside its edges.
+    for (row, band) in cells.chunks_exact(columns).enumerate() {
+        let start = row * repeat;
+        let end = start + repeat;
+        for (offset, &weight) in weights.iter().enumerate() {
+            let above = start.checked_sub(offset + 1);
+            let below = (end + offset < height).then_some(end + offset);
+            for target in [above, below].into_iter().flatten() {
+                let dest = &mut pixels[target * columns..][..columns];
+                for (value, &sample) in dest.iter_mut().zip(band) {
+                    *value = value.max(sample * weight);
+                }
+            }
+        }
+    }
+    (Cow::Owned(pixels), 1)
+}
+
+pub(crate) fn time_neighbors(groups: &[Option<usize>], col: usize) -> [Option<usize>; 2] {
+    let Some(group) = groups[col] else { return [None; 2] };
+    [col.checked_sub(1), (col + 1 < groups.len()).then_some(col + 1)]
+        .map(|neighbor| neighbor.filter(|&i| groups[i] == Some(group)))
+}
+
+pub(crate) fn time_filtered_cell(row: &[f32], col: usize, neighbors: [Option<usize>; 2]) -> f32 {
+    if neighbors == [None; 2] {
+        return row[col];
+    }
+    let mut sum = 2.0 * row[col];
+    let mut weight = 2.0;
+    for neighbor in neighbors.into_iter().flatten() {
+        sum += row[neighbor];
+        weight += 1.0;
+    }
+    sum / weight
+}
+
+#[derive(Clone, Copy, PartialEq)]
 pub(crate) struct ColorScale {
     low: f32,
     high: f32,
     unit: f32,
     log_span: f32,
     contrast: f32,
+}
+
+const PALETTE_BUCKET_SHIFT: u32 = 19;
+
+/// Thresholds for the 8-bit palette, with a small index that narrows the search
+/// using the exponent and the leading mantissa bits of each positive size.
+pub(crate) struct PaletteBins {
+    thresholds: [u32; 255],
+    buckets: Vec<(u8, u8)>,
+}
+
+impl PaletteBins {
+    pub fn index(&self, value: f32) -> usize {
+        let bits = value.to_bits();
+        let (start, end) = self.buckets[(bits >> PALETTE_BUCKET_SHIFT) as usize];
+        let start = usize::from(start);
+        start + self.thresholds[start..usize::from(end)].partition_point(|&limit| limit <= bits)
+    }
 }
 
 impl ColorScale {
@@ -151,6 +185,34 @@ impl ColorScale {
             .clamp(0.0, 1.0)
             .powf(self.contrast)
     }
+
+    pub fn palette_bins(&self) -> PaletteBins {
+        let mut lower = self.low.to_bits();
+        let thresholds = std::array::from_fn(|i| {
+            // Positive finite f32 values are ordered by their bits. Use the same
+            // forward color mapping to preserve rounding at palette boundaries.
+            let mut upper = self.high.to_bits();
+            while lower < upper {
+                let mid = lower + (upper - lower) / 2;
+                if (self.intensity(f32::from_bits(mid)) * 255.0) as usize > i {
+                    upper = mid;
+                } else {
+                    lower = mid + 1;
+                }
+            }
+            lower
+        });
+        let mut next = 0;
+        let buckets = (0..=(f32::MAX.to_bits() >> PALETTE_BUCKET_SHIFT))
+            .map(|bucket| {
+                let start = next;
+                let end = (bucket + 1) << PALETTE_BUCKET_SHIFT;
+                next += thresholds[start..].partition_point(|&limit| limit < end);
+                (start as u8, next as u8)
+            })
+            .collect();
+        PaletteBins { thresholds, buckets }
+    }
 }
 
 /// Dark blue through teal, gold and red. The brightest liquidity remains distinguishable
@@ -185,20 +247,25 @@ mod tests {
     #[test]
     fn smoothing_spreads_in_price_and_time_but_respects_segment_boundaries() {
         let mut depth = vec![0.0, 8.0, 0.0, 0.0];
-        filter_cells(
+        smooth_time(
             &mut depth,
             4,
-            Some(&[Some(0), Some(0), Some(0), Some(1)]),
-            0.0,
+            &[Some(0), Some(0), Some(0), Some(1)],
         );
         assert_eq!(depth, vec![8.0 / 3.0, 4.0, 8.0 / 3.0, 0.0]);
 
-        let mut depth = vec![0.0, 10.0, 0.0];
-        filter_cells(&mut depth, 1, None, 0.5);
-        assert!(depth[0] > 0.0 && depth[1] < 10.0);
-        assert_eq!(depth[0], depth[2]);
-        assert_eq!(PriceFilter::Auto.sigma(10.0, 10.0, 5.0), 0.5);
-        assert_eq!(PriceFilter::Auto.sigma(15.0, 15.0, 5.0), 0.0);
+        let (pixels, repeat) = price_pixels(&[0.0, 100.0, 0.0], 1, 21, 0.5 / 21.0);
+        assert_eq!(repeat, 1);
+        assert_eq!(pixels.len(), 63);
+        assert!((pixels[20] - 100.0 * (-2.0_f32).exp()).abs() < 1e-5);
+        assert_eq!(&pixels[21..42], &[100.0; 21]);
+        assert_eq!(pixels[20], pixels[42]);
+        assert_eq!(pixels[18], 0.0);
+        assert!((PriceFilter::Auto.sigma(10.0, 10.0, 1.5) - 0.0998).abs() < 0.0001);
+        assert_eq!(PriceFilter::Auto.sigma(20.0, 20.0, 1.5), 0.0);
+        assert_eq!(PriceFilter::Auto.sigma(1.0, 1.0, 1.5), 10.0);
+        assert!((PriceFilter::Auto.sigma(2.0, 2.0, 1.5) - 4.4956).abs() < 0.0001);
+        assert_eq!(PriceFilter::Gaussian.sigma(2.0, 2.0, 1.5), 0.75);
     }
 
     #[test]
@@ -208,5 +275,22 @@ mod tests {
         assert!(scale.intensity(150.0) < scale.intensity(190.0));
         assert!(scale.intensity(190.0) < 1.0);
         assert_eq!(palette(scale.intensity(200.0)), [235, 54, 36]);
+    }
+
+    #[test]
+    fn palette_bins_match_the_original_mapping_at_float_boundaries() {
+        let values: Vec<_> = (1..=4000).map(|value| value as f32 / 7.0).collect();
+        for contrast in [0.25, 1.0, 4.0, 8.0] {
+            for (low, high) in [(0.0, 100.0), (2.0, 99.5), (75.0, 95.0)] {
+                let scale = ColorScale::from_cells(&values, low, high, contrast);
+                let bins = scale.palette_bins();
+                let boundaries = bins.thresholds.iter().flat_map(|&bits| {
+                    [bits - 1, bits, bits + 1].map(f32::from_bits)
+                });
+                for value in values.iter().copied().chain(boundaries).chain([f32::MAX]) {
+                    assert_eq!(bins.index(value), (scale.intensity(value) * 255.0) as usize);
+                }
+            }
+        }
     }
 }

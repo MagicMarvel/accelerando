@@ -18,16 +18,20 @@
 pub mod bars;
 mod chart;
 pub mod data;
+mod heatmap_studies;
 mod liquidity_colors;
 mod market_history;
+#[cfg(windows)]
+mod native_windows;
 mod big_trades;
 mod overlay;
 pub mod replay;
+mod replay_bubbles;
 mod vp;
 
 use std::sync::{mpsc, Arc};
 
-use accelerando_core::{BacktestResult, DepthHistory, DepthStore, DepthWindow, Footprint};
+use accelerando_core::{BacktestResult, DepthHistory, DepthStore, DepthWindow, Footprint, LiquidityLevel, PreparedEventData};
 use eframe::egui;
 
 /// Total executed volume in footprint and volume-profile histograms.
@@ -69,7 +73,7 @@ pub struct ViewerOptions {
     /// Builds bars of another type for display (usually [`aggregate`] over the raw trades). Without
     /// it the bar-type chooser is disabled.
     pub rebar: Option<Rebar>,
-    /// Open showing these bars instead of the strategy's own (needs `rebar`).
+    /// Initial display bars. `None` uses five-minute bars if a bar builder is available.
     pub display_bars: Option<BarSpec>,
     /// Reads raw trades for the tick-by-tick replay (usually [`ticks_from`] over the raw events).
     /// Without it the replay button is disabled.
@@ -98,7 +102,7 @@ impl Default for ViewerOptions {
 ///
 /// Must be called from the main thread (a windowing-system requirement).
 pub fn view(result: BacktestResult, options: ViewerOptions) -> std::io::Result<()> {
-    view_with_trade_quotes(result, options, &[])
+    open_viewer(result, options, &[], None, false)
 }
 
 /// Open the viewer with trade bubbles and trade-derived quotes when depth is absent.
@@ -121,8 +125,10 @@ pub fn view_with_trade_quotes(
             multiplier: result.multiplier,
         });
     }
-    let tape = accelerando_core::PreparedEventData::from_events(tape).ok().map(Arc::new);
-    open_viewer(result, options, data::trade_quotes(events), tape, Default::default())
+    match PreparedEventData::from_events(tape) {
+        Ok(tape) => view_with_market_history(result, options, Some(Arc::new(tape)), DepthStore::default()),
+        Err(_) => open_viewer(result, options, &data::trade_quotes(events), None, false),
+    }
 }
 
 /// Open the native viewer with original trade timestamps and sparse L2 history.
@@ -133,21 +139,65 @@ pub fn view_with_trade_quotes(
 pub fn view_with_market_history(
     result: BacktestResult,
     options: ViewerOptions,
-    trades: Option<std::sync::Arc<accelerando_core::PreparedEventData>>,
+    trades: Option<Arc<PreparedEventData>>,
     depth: impl Into<DepthStore>,
 ) -> std::io::Result<()> {
-    let quotes = trades.as_ref().map_or_else(Vec::new, |tape| data::trade_quotes(tape.events()));
-    open_viewer(result, options, quotes, trades, depth.into())
+    let depth = depth.into();
+    if trades.is_none() && depth.is_empty() {
+        return view(result, options);
+    }
+    open_viewer(result, options, &[], Some(MarketLoad {
+        load: Box::new(move || Ok((trades, depth))),
+        enable_trade_controls: false,
+    }), false)
+}
+
+type MarketHistory = (Option<Arc<PreparedEventData>>, DepthStore);
+
+struct MarketLoad {
+    load: Box<dyn FnOnce() -> Result<MarketHistory, String> + Send>,
+    enable_trade_controls: bool,
+}
+
+/// Open on the backtest chart while loading market history in the background. Use the returned
+/// raw trades for bar switching and tick replay when no custom sources are supplied.
+pub fn view_with_market_loader(
+    result: BacktestResult,
+    options: ViewerOptions,
+    load: impl FnOnce() -> Result<(Arc<PreparedEventData>, DepthStore), String> + Send + 'static,
+) -> std::io::Result<()> {
+    open_with_market_loader(result, options, load, false)
+}
+
+/// Open the viewer for a standalone CLI. On Windows a native close request terminates
+/// the current process with exit code 0. Complete any required writes before calling.
+pub fn view_cli_with_market_loader(
+    result: BacktestResult,
+    options: ViewerOptions,
+    load: impl FnOnce() -> Result<(Arc<PreparedEventData>, DepthStore), String> + Send + 'static,
+) -> std::io::Result<()> {
+    open_with_market_loader(result, options, load, true)
+}
+
+fn open_with_market_loader(
+    result: BacktestResult,
+    options: ViewerOptions,
+    load: impl FnOnce() -> Result<(Arc<PreparedEventData>, DepthStore), String> + Send + 'static,
+    exit_on_close: bool,
+) -> std::io::Result<()> {
+    open_viewer(result, options, &[], Some(MarketLoad {
+        load: Box::new(move || load().map(|(trades, depth)| (Some(trades), depth))),
+        enable_trade_controls: true,
+    }), exit_on_close)
 }
 
 fn open_viewer(
     result: BacktestResult,
     options: ViewerOptions,
-    quotes: Vec<data::TradeQuote>,
-    trades: Option<std::sync::Arc<accelerando_core::PreparedEventData>>,
-    depth: DepthStore,
+    quotes: &[data::TradeQuote],
+    load: Option<MarketLoad>,
+    _exit_on_close: bool,
 ) -> std::io::Result<()> {
-    let tape = trades.map(|trades| market_history::TradeTape::new(trades, &quotes));
     let native = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_title(options.title.clone())
@@ -155,16 +205,20 @@ fn open_viewer(
         ..Default::default()
     };
     let title = options.title.clone();
-    eframe::run_native(
-        &title,
-        native,
-        Box::new(move |cc| {
-            cc.egui_ctx.set_theme(egui::Theme::Dark);
-            install_cjk_font(&cc.egui_ctx);
-            Ok(Box::new(Viewer::new(result, options, &quotes, tape, depth)))
-        }),
-    )
-    .map_err(|e| std::io::Error::other(e.to_string()))
+    let create = move |cc: &eframe::CreationContext<'_>| {
+        cc.egui_ctx.set_theme(egui::Theme::Dark);
+        install_cjk_font(&cc.egui_ctx);
+        let mut viewer = Viewer::new(result, options.clone(), quotes, None, DepthStore::default());
+        if let Some(load) = load {
+            viewer.load_market(load, options, &cc.egui_ctx);
+        }
+        viewer
+    };
+    #[cfg(windows)]
+    let result = native_windows::run(&title, native, create, _exit_on_close);
+    #[cfg(not(windows))]
+    let result = eframe::run_native(&title, native, Box::new(move |cc| Ok(Box::new(create(cc)))));
+    result.map_err(|e| std::io::Error::other(e.to_string()))
 }
 
 /// Add a system CJK font as a fallback so Chinese strategy labels render (egui's built-in fonts
@@ -198,10 +252,11 @@ const BAR_GAP_SECS: i64 = 1800;
 const BAR_GAP_SLOTS: f64 = 3.0;
 /// Bars in view when the window opens (wide enough for the footprint view).
 const INITIAL_BARS: f64 = 20.0;
+const DEFAULT_DISPLAY_BARS: BarSpec = BarSpec { kind: BarKind::Time, size: 300 };
 
 /// Everything derived once from the result at startup.
 pub(crate) struct Model {
-    pub result: BacktestResult,
+    pub result: Arc<BacktestResult>,
     /// Per-second grid axis of the heatmap and bid/ask lines (independent of the display axis).
     pub axis: TimeAxis,
     pub bounds: Vec<(usize, usize)>,
@@ -244,6 +299,59 @@ pub(crate) struct Model {
     pub display: Option<(BarSpec, Vec<Footprint>)>,
 }
 
+struct MarketData {
+    axis: TimeAxis,
+    bounds: Vec<(usize, usize)>,
+    grid: BookGrid,
+    bid_smooth: Vec<f32>,
+    ask_smooth: Vec<f32>,
+    has_trade_quotes: bool,
+    trade_volume: Vec<data::TradeVolume>,
+    big_trades: big_trades::BigTradeOverlay,
+    tape: Option<market_history::TradeTape>,
+    depth: DepthStore,
+}
+
+impl MarketData {
+    fn build(
+        result: &BacktestResult,
+        axis: &TimeAxis,
+        max_gap_ns: i64,
+        quotes: &[data::TradeQuote],
+        tape: Option<market_history::TradeTape>,
+        depth: DepthStore,
+    ) -> Self {
+        let snapshots = &result.liquidity_heatmap.snapshots;
+        let axis = axis.with_market_activity(
+            depth.quote_changes().iter().map(|&(ts, _)| ts),
+            quotes.iter().map(|quote| quote.ts_ns),
+            max_gap_ns,
+        );
+        let bounds = axis.bounds();
+        let mut grid = if snapshots.is_empty() && depth.is_empty() && quotes.is_empty() {
+            BookGrid::default()
+        } else {
+            BookGrid::build(&axis, snapshots)
+        };
+        if !depth.is_empty() {
+            market_history::fill_overview_quotes(&mut grid, &axis, &depth);
+        }
+        let has_trade_quotes = depth.is_empty() && snapshots.is_empty() && !quotes.is_empty();
+        let trade_volume = grid.apply_trade_samples(&axis, &bounds, quotes, has_trade_quotes);
+        let big_trades = big_trades::BigTradeOverlay::build(tape.as_ref(), &result.footprints);
+        Self {
+            axis, bounds, grid, bid_smooth: Vec::new(), ask_smooth: Vec::new(), has_trade_quotes,
+            trade_volume, big_trades, tape, depth,
+        }
+    }
+
+    fn smooth(&mut self, window: u32) {
+        let smooth = if self.has_trade_quotes { data::smooth_estimates } else { data::smooth };
+        self.bid_smooth = smooth(&self.grid.bid, &self.bounds, window as usize);
+        self.ask_smooth = smooth(&self.grid.ask, &self.bounds, window as usize);
+    }
+}
+
 impl Model {
     fn new(
         result: BacktestResult,
@@ -253,25 +361,20 @@ impl Model {
         depth: DepthStore,
     ) -> Self {
         let snapshots = &result.liquidity_heatmap.snapshots;
-        let mut intervals: Vec<(i64, i64)> = Vec::with_capacity(
-            snapshots.len() + quotes.len() + result.footprints.len() + result.equity.len() + result.trades.len(),
+        let mut intervals = Vec::with_capacity(
+            snapshots.len() + result.footprints.len() + result.equity.len() + 2 * result.trades.len(),
         );
         intervals.extend(snapshots.iter().map(|s| (s.ts_ns, s.ts_ns)));
-        intervals.extend(depth.quote_changes().iter().map(|&(ts, _)| (ts, ts)));
-        intervals.extend(quotes.iter().map(|q| (q.ts_ns, q.ts_ns)));
         intervals.extend(result.footprints.iter().map(|f| (f.ts_first_ns, f.ts_last_ns)));
         intervals.extend(result.equity.iter().map(|e| (e.ts_ns, e.ts_ns)));
         intervals.extend(result.trades.iter().map(|t| (t.entry_ts_ns, t.entry_ts_ns)));
         intervals.extend(result.trades.iter().map(|t| (t.exit_ts_ns, t.exit_ts_ns)));
-        let axis = TimeAxis::build(intervals, options.max_gap_secs.max(1) * SEC_NS);
-        let bounds = axis.bounds();
-        let mut grid = BookGrid::build(&axis, snapshots);
-        if !depth.is_empty() {
-            market_history::fill_overview_quotes(&mut grid, &axis, &depth);
-        }
-        let has_trade_quotes = depth.is_empty() && snapshots.is_empty() && !quotes.is_empty();
-        let trade_volume = grid.apply_trade_samples(&axis, &bounds, quotes, has_trade_quotes);
-        let big_trades = big_trades::BigTradeOverlay::build(tape.as_ref(), &result.footprints);
+        let max_gap_ns = options.max_gap_secs.max(1) * SEC_NS;
+        let axis = TimeAxis::build(intervals, max_gap_ns);
+        let MarketData {
+            axis, bounds, grid, bid_smooth, ask_smooth, has_trade_quotes, trade_volume,
+            big_trades, tape, depth,
+        } = MarketData::build(&result, &axis, max_gap_ns, quotes, tape, depth);
         let tick = result.tick_size;
         let price_decimals = if tick > 0.0 && tick < 1.0 {
             (1..=6)
@@ -283,16 +386,9 @@ impl Model {
         } else {
             2
         };
-        let mode = options.axis_mode.unwrap_or(
-            if result.footprints.is_empty() || !depth.is_empty() || !snapshots.is_empty() || !quotes.is_empty() {
-                AxisMode::Time
-            } else {
-                AxisMode::Bars
-            },
-        );
         let mut model = Self {
-            bid_smooth: Vec::new(),
-            ask_smooth: Vec::new(),
+            bid_smooth,
+            ask_smooth,
             xmap: XMap::Time(axis.clone()),
             sessions: Vec::new(),
             session_x: Vec::new(),
@@ -304,7 +400,7 @@ impl Model {
             trade_x: Vec::new(),
             overlays: Overlays::default(),
             big_trades,
-            result,
+            result: Arc::new(result),
             axis,
             bounds,
             grid,
@@ -319,8 +415,17 @@ impl Model {
             median_bar_secs: 60.0,
             display: None,
         };
+        let mode = options.axis_mode.unwrap_or_else(|| model.default_axis_mode());
         model.set_axis_mode(mode);
         model
+    }
+
+    fn default_axis_mode(&self) -> AxisMode {
+        if self.result.footprints.is_empty() || self.has_heatmap() || !self.trade_volume.is_empty() {
+            AxisMode::Time
+        } else {
+            AxisMode::Bars
+        }
     }
 
     /// The bars on screen: the display bars if any, else the strategy's own - during a replay
@@ -358,9 +463,7 @@ impl Model {
             None => &self.result.footprints,
         };
         let Some(replay) = self.replay.as_mut() else { return };
-        for tick in ticks {
-            replay.apply(tick, full);
-        }
+        replay.apply_ticks(ticks, full);
         replay.set_clock(clock_ns, full);
         self.sync_replay();
     }
@@ -379,7 +482,7 @@ impl Model {
         self.replay.as_ref().and_then(|r| r.bar_end_ns(self.full_bars()))
     }
 
-    /// x of the replay position: the chart is blank to the right of it.
+    /// x of the replay position: time-based layers stop here.
     pub fn replay_cut_x(&self) -> Option<f64> {
         let replay = self.replay.as_ref()?;
         Some(match self.xmap.mode() {
@@ -503,6 +606,37 @@ impl Model {
         !self.depth.is_empty() || !self.result.liquidity_heatmap.snapshots.is_empty()
     }
 
+    fn replay_snapshots(&self, clock: Option<i64>) -> &[accelerando_core::LiquiditySnapshot] {
+        let heat = &self.result.liquidity_heatmap;
+        let Some(clock) = clock else { return &heat.snapshots };
+        // Fixed-grid snapshots store the end-of-bucket book at the bucket's start.
+        let end = heat.snapshots.partition_point(|s| s.ts_ns.saturating_add(heat.interval_ns.max(0)) <= clock);
+        &heat.snapshots[..end]
+    }
+
+    fn replay_depth(&self, clock: i64, low: f64, high: f64) -> Option<Vec<LiquidityLevel>> {
+        if self.depth.is_empty() {
+            let segment = self.axis.segments.partition_point(|s| s.t0_ns <= clock);
+            let levels = self.replay_snapshots(Some(clock)).last().filter(|snapshot| {
+                segment > 0 && snapshot.ts_ns >= self.axis.segments[segment - 1].t0_ns
+            })
+                .map_or(&[][..], |snapshot| snapshot.levels.as_slice());
+            return Some(levels.iter().copied().filter(|l| (low..=high).contains(&l.price)).collect());
+        }
+
+        let (depth, window) = self.depth_at(clock, clock.saturating_add(1));
+        // Overview buckets can include updates after the replay clock.
+        if window.is_none() && !self.depth.is_exact() {
+            return None;
+        }
+        Some(depth.levels_between(low, high).filter_map(|(price, level)| {
+            let changes = level.changes();
+            let index = changes.partition_point(|change| change.0 <= clock).checked_sub(1)?;
+            let [bid_size, ask_size] = changes[index].1;
+            (bid_size > 0.0 || ask_size > 0.0).then_some(LiquidityLevel { price, bid_size, ask_size })
+        }).collect())
+    }
+
     /// The heatmap and bid/ask lines live on the per-second grid: time axis only.
     pub fn book_visible(&self) -> bool {
         (self.has_heatmap() || self.has_trade_quotes) && self.xmap.mode() == AxisMode::Time
@@ -577,6 +711,10 @@ pub(crate) struct Settings {
     pub show_markers: bool,
     pub show_equity: bool,
     pub heat_metric: HeatMetric,
+    pub heat_layers: [bool; heatmap_studies::Study::COUNT],
+    pub heat_studies: heatmap_studies::Studies,
+    pub flow_marker_minimum: [u32; 3],
+    pub flow_marker_limit: usize,
     pub heat_smooth: bool,
     pub price_filter: PriceFilter,
     pub price_filter_px: f32,
@@ -588,6 +726,17 @@ pub(crate) struct Settings {
 }
 
 impl Settings {
+    fn heat_layer_enabled(&self, study: heatmap_studies::Study) -> bool {
+        self.heat_layers[study.index()]
+    }
+
+    fn heat_layers_lookback(&self) -> Option<i64> {
+        heatmap_studies::Study::ALL.into_iter().filter_map(|study| {
+            let settings = heatmap_studies::Studies { study, ..self.heat_studies };
+            (self.heat_layer_enabled(study) && settings.active()).then(|| settings.lookback_ns())
+        }).max()
+    }
+
     fn select_mode(&mut self, mode: ChartMode, has_bubbles: bool) {
         self.mode = mode;
         self.show_bbo = mode == ChartMode::Heatmap;
@@ -599,6 +748,18 @@ impl Settings {
 enum ToolbarPopup {
     Settings,
     Heatmap,
+}
+
+struct LoadedMarket {
+    data: MarketData,
+    options: ViewerOptions,
+    smoothing_secs: u32,
+}
+
+#[derive(Clone, Copy)]
+struct DisplayBarRequest {
+    spec: BarSpec,
+    fit_latest: bool,
 }
 
 struct Viewer {
@@ -617,10 +778,10 @@ struct Viewer {
     rebar: Option<Rebar>,
     bar_dialog_open: bool,
     bar_draft: BarSpec,
-    pending: Option<(BarSpec, mpsc::Receiver<Result<Vec<Footprint>, String>>)>,
+    pending: Option<(DisplayBarRequest, mpsc::Receiver<Result<Vec<Footprint>, String>>)>,
     bar_error: Option<String>,
-    /// Requested at the first frame (needs the egui context).
-    startup_bars: Option<BarSpec>,
+    /// Requested once the bar builder becomes available.
+    startup_bars: Option<DisplayBarRequest>,
     /// Profiles drawn by hand and their tool settings.
     vp: VpTool,
     /// Tick-by-tick replay and the host's tick reader.
@@ -628,6 +789,8 @@ struct Viewer {
     ticks: Option<TickSource>,
     /// Background load of exact depth: the requested range and its result.
     depth_loading: Option<((i64, i64), mpsc::Receiver<Result<DepthWindow, String>>)>,
+    market_loading: Option<mpsc::Receiver<Result<LoadedMarket, String>>>,
+    market_error: Option<String>,
 }
 
 impl Viewer {
@@ -670,29 +833,26 @@ impl Viewer {
             show_markers: false,
             show_equity: false,
             heat_metric: HeatMetric::Total,
+            heat_layers: [true, false, false, false, false],
+            heat_studies: Default::default(),
+            flow_marker_minimum: [40; 3],
+            flow_marker_limit: 35,
             heat_smooth: true,
             price_filter: PriceFilter::Auto,
-            price_filter_px: 5.0,
+            price_filter_px: 1.5,
             heat_low_pct: 2.0,
             heat_high_pct: 99.5,
-            heat_contrast: 1.2,
+            heat_contrast: 4.0,
             smoothing_secs,
             red_up: options.red_up,
         };
         let mut chart = ChartState::new(model.xmap.total(), model.xmap.mode());
-        match options.initial_span_secs.filter(|s| *s > 0.0) {
+        let initial_span = options.initial_span_secs.filter(|s| *s > 0.0);
+        match initial_span {
             Some(span) => chart.show_latest(model.span_x(span)),
-            // Like the web studio: open on the latest bars, zoomed in far enough for footprints.
-            None if !model.bars().is_empty() => {
-                let bars = INITIAL_BARS.min(model.bars().len() as f64);
-                let span = match model.xmap.mode() {
-                    AxisMode::Bars => bars,
-                    AxisMode::Time => bars * model.median_bar_secs,
-                };
-                chart.show_latest(span.max(5.0));
-            }
-            None => {}
+            None => Self::fit_latest_bars(&model, &mut chart),
         }
+        let initial_bars = options.display_bars.unwrap_or(DEFAULT_DISPLAY_BARS);
         Self {
             model,
             settings,
@@ -707,14 +867,136 @@ impl Viewer {
             strategy_spec: options.bar_spec,
             rebar: options.rebar.clone(),
             bar_dialog_open: false,
-            bar_draft: options.bar_spec.unwrap_or(BarSpec::new(BarKind::Time, 60)),
+            bar_draft: initial_bars,
             pending: None,
             bar_error: None,
-            startup_bars: options.display_bars.filter(|spec| Some(*spec) != options.bar_spec),
+            startup_bars: (Some(initial_bars) != options.bar_spec).then_some(DisplayBarRequest {
+                spec: initial_bars,
+                fit_latest: initial_span.is_none() && options.display_bars.is_none(),
+            }),
             vp: VpTool::default(),
             replay: Replay::default(),
             ticks: options.ticks.clone(),
             depth_loading: None,
+            market_loading: None,
+            market_error: None,
+        }
+    }
+
+    fn fit_latest_bars(model: &Model, chart: &mut ChartState) {
+        if !model.bars().is_empty() {
+            let bars = INITIAL_BARS.min(model.bars().len() as f64);
+            let span = match model.xmap.mode() {
+                AxisMode::Bars => bars,
+                AxisMode::Time => bars * model.median_bar_secs,
+            };
+            chart.show_latest(span.max(5.0));
+        }
+    }
+
+    fn load_market(&mut self, load: MarketLoad, mut options: ViewerOptions, ctx: &egui::Context) {
+        let (tx, rx) = mpsc::channel();
+        let result = Arc::clone(&self.model.result);
+        let axis = self.model.axis.clone();
+        let ctx = ctx.clone();
+        std::thread::spawn(move || {
+            let loaded = (load.load)().map(|(trades, depth)| {
+                if let Some(events) = trades.as_ref().filter(|_| load.enable_trade_controls) {
+                    if options.rebar.is_none() {
+                        let events = Arc::clone(events);
+                        options.rebar = Some(Arc::new(move |spec| Ok(aggregate(events.events(), spec))));
+                    }
+                    if options.ticks.is_none() {
+                        let events = Arc::clone(events);
+                        options.ticks = Some(Arc::new(move |from, max| Ok(ticks_from(events.events(), from, max))));
+                    }
+                }
+                let quotes = trades.as_ref().map_or_else(Vec::new, |events| data::trade_quotes(events.events()));
+                let tape = trades.map(|events| market_history::TradeTape::new(events, &quotes));
+                let mut data = MarketData::build(
+                    &result, &axis, options.max_gap_secs.max(1) * SEC_NS, &quotes, tape, depth,
+                );
+                let smoothing_secs = if data.has_trade_quotes { 3 } else { options.smoothing_secs };
+                data.smooth(smoothing_secs);
+                LoadedMarket { data, options, smoothing_secs }
+            });
+            if tx.send(loaded).is_ok() {
+                ctx.request_repaint();
+            }
+        });
+        self.market_loading = Some(rx);
+    }
+
+    fn poll_market(&mut self) {
+        let Some(rx) = &self.market_loading else { return };
+        let loaded = match rx.try_recv() {
+            Ok(loaded) => loaded,
+            Err(mpsc::TryRecvError::Empty) => return,
+            Err(mpsc::TryRecvError::Disconnected) => Err("Market data loader stopped".to_string()),
+        };
+        self.market_loading = None;
+        match loaded {
+            Ok(loaded) => self.apply_market(loaded),
+            Err(error) => {
+                eprintln!("Market data unavailable: {error}");
+                self.market_error = Some(error);
+            }
+        }
+    }
+
+    fn apply_market(&mut self, loaded: LoadedMarket) {
+        let LoadedMarket { data, options, smoothing_secs } = loaded;
+        let model = &mut self.model;
+        let old_mode = model.xmap.mode();
+        let old_total = model.xmap.total();
+        let showing_all = self.chart.x0 <= 0.0 && self.chart.x1 >= old_total;
+        let had_book = model.book_visible();
+        let had_bubbles = !model.trade_volume.is_empty();
+        let visible = [self.chart.x0, self.chart.x1].map(|x| model.xmap.to_ts(x));
+        let axis_changed = model.axis != data.axis;
+        model.axis = data.axis;
+        model.bounds = data.bounds;
+        model.grid = data.grid;
+        model.bid_smooth = data.bid_smooth;
+        model.ask_smooth = data.ask_smooth;
+        model.has_trade_quotes = data.has_trade_quotes;
+        model.trade_volume = data.trade_volume;
+        model.big_trades = data.big_trades;
+        model.tape = data.tape;
+        model.depth = data.depth;
+        model.depth_window = None;
+        self.depth_loading = None;
+        self.rebar = options.rebar;
+        self.ticks = options.ticks;
+        if self.settings.smoothing_secs == options.smoothing_secs {
+            self.settings.smoothing_secs = smoothing_secs;
+        }
+        self.applied_smoothing = smoothing_secs;
+        model.filtered_bubble_volume = None;
+        self.applied_bubble_min_trade_size = 0.0;
+
+        let mode = options.axis_mode.unwrap_or_else(|| model.default_axis_mode());
+        let remap = mode != old_mode || (mode == AxisMode::Time && axis_changed);
+        if remap {
+            model.set_axis_mode(mode);
+        }
+        self.chart.set_total(model.xmap.total(), mode);
+        if old_total <= 0.0 {
+            self.chart.fit_all();
+            if let Some(span) = options.initial_span_secs.filter(|span| *span > 0.0) {
+                self.chart.show_latest(model.span_x(span));
+            }
+        } else if remap && showing_all {
+            self.chart.show_range(0.0, model.xmap.total());
+        } else if remap {
+            let [x0, x1] = visible.map(|ts| model.xmap.to_x(ts));
+            self.chart.show_range(x0, x1);
+        }
+        let has_bubbles = !model.trade_volume.is_empty();
+        if !had_book && model.book_visible() && model.bars().is_empty() {
+            self.settings.select_mode(ChartMode::Heatmap, has_bubbles);
+        } else if self.settings.mode == ChartMode::Heatmap && !had_bubbles && has_bubbles {
+            self.settings.show_trade_bubbles = true;
         }
     }
 
@@ -754,9 +1036,15 @@ impl Viewer {
                 .selectable_label(self.toolbar_popup == Some(ToolbarPopup::Heatmap), "⚙")
                 .on_hover_text("Heatmap settings");
             self.show_toolbar_popup(&settings, &heatmap_gear);
-            if let Some((spec, _)) = &self.pending {
+            if self.market_loading.is_some() {
                 ui.spinner();
-                ui.label(format!("building {} bars ...", spec.label()));
+                ui.label("Loading market data…");
+            } else if let Some(error) = &self.market_error {
+                ui.label("Market data unavailable").on_hover_text(error);
+            }
+            if let Some((request, _)) = &self.pending {
+                ui.spinner();
+                ui.label(format!("building {} bars ...", request.spec.label()));
             }
             ui.separator();
             ui.checkbox(&mut self.chart.auto_y, "Auto Y")
@@ -770,14 +1058,6 @@ impl Viewer {
             egui::Popup::from_toggle_button_response(&vp_settings)
                 .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
                 .show(|ui| self.vp.controls(ui));
-            ui.label("σ");
-            ui.add(
-                egui::DragValue::new(&mut self.vp.smooth_ticks)
-                    .range(0.0..=30.0)
-                    .speed(0.1)
-                    .suffix(" t"),
-            )
-            .on_hover_text("Gaussian smoothing of drawn profiles, in ticks (0 = raw).");
             let n = self.vp.items.len();
             if ui.add_enabled(n > 0, egui::Button::new(format!("Clear VPs ({n})"))).clicked() {
                 self.vp.items.clear();
@@ -805,7 +1085,8 @@ impl Viewer {
             }
         });
         if self.model.replay_clock().is_some() {
-            ui.horizontal(|ui| self.replay.controls(ui, &mut self.model));
+            let heatmap = self.settings.mode == ChartMode::Heatmap;
+            ui.horizontal_wrapped(|ui| self.replay.controls(ui, &mut self.model, &mut self.chart, heatmap));
         }
     }
 
@@ -831,7 +1112,7 @@ impl Viewer {
                     for kind in BarKind::ALL {
                         if ui.selectable_label(draft.kind == kind, kind.name()).clicked() && draft.kind != kind {
                             draft.kind = kind;
-                            draft.size = kind.presets()[1];
+                            draft.size = if kind == BarKind::Time { DEFAULT_DISPLAY_BARS.size } else { kind.presets()[1] };
                         }
                     }
                 });
@@ -877,28 +1158,31 @@ impl Viewer {
         self.bar_dialog_open = open;
         match apply {
             Some(Some(spec)) if Some(spec) == self.strategy_spec => self.show_bars(None),
-            Some(Some(spec)) => self.request_bars(spec, ctx),
+            Some(Some(spec)) => self.request_bars(DisplayBarRequest { spec, fit_latest: false }, ctx),
             Some(None) => self.show_bars(None),
             None => {}
         }
     }
 
-    /// Build `spec` bars on a background thread (they arrive in [`Self::poll_bars`]).
-    fn request_bars(&mut self, spec: BarSpec, ctx: &egui::Context) {
+    /// Build display bars on a background thread (they arrive in [`Self::poll_bars`]).
+    fn request_bars(&mut self, request: DisplayBarRequest, ctx: &egui::Context) {
         let Some(rebar) = self.rebar.clone() else { return };
         self.bar_error = None;
         let (tx, rx) = mpsc::channel();
         let ctx = ctx.clone();
         std::thread::spawn(move || {
-            let _ = tx.send(rebar(&spec));
+            let _ = tx.send(rebar(&request.spec));
             ctx.request_repaint();
         });
-        self.pending = Some((spec, rx));
+        self.pending = Some((request, rx));
     }
 
-    fn poll_bars(&mut self) {
-        let Some((spec, rx)) = &self.pending else { return };
-        let spec = *spec;
+    fn poll_bars(&mut self, ctx: &egui::Context) {
+        if let Some(request) = self.rebar.as_ref().and_then(|_| self.startup_bars.take()) {
+            self.request_bars(request, ctx);
+        }
+        let Some((request, rx)) = &self.pending else { return };
+        let DisplayBarRequest { spec, fit_latest } = *request;
         match rx.try_recv() {
             Ok(Ok(bars)) if bars.is_empty() => {
                 self.pending = None;
@@ -907,6 +1191,9 @@ impl Viewer {
             Ok(Ok(bars)) => {
                 self.pending = None;
                 self.show_bars(Some((spec, bars)));
+                if fit_latest {
+                    Self::fit_latest_bars(&self.model, &mut self.chart);
+                }
             }
             Ok(Err(error)) => {
                 self.pending = None;
@@ -971,6 +1258,7 @@ impl Viewer {
         let book_visible = self.model.book_visible();
         let has_bubbles = !self.model.trade_volume.is_empty();
         let has_tape = self.model.tape.is_some();
+        let has_depth = !self.model.depth.is_empty();
         let s = &mut self.settings;
         if !has_heat && !has_quotes {
             ui.weak("No order-book or trade-derived quote data in this result.");
@@ -1005,7 +1293,10 @@ impl Viewer {
                  overview bid/ask lines. Close zoom uses event-time quotes.",
             );
             ui.add_enabled_ui(s.mode == ChartMode::Heatmap, |ui| {
-                ui.checkbox(&mut s.show_heat, "Liquidity heatmap");
+                ui.checkbox(&mut s.show_heat, "Heatmap layers");
+                if s.show_heat {
+                    heatmap_study_controls(ui, s, has_depth, has_tape);
+                }
             });
             egui::ComboBox::from_label("heat")
                 .selected_text(match s.heat_metric {
@@ -1018,24 +1309,26 @@ impl Viewer {
                     ui.selectable_value(&mut s.heat_metric, HeatMetric::Bid, "Bid");
                     ui.selectable_value(&mut s.heat_metric, HeatMetric::Ask, "Ask");
                 });
-            ui.checkbox(&mut s.heat_smooth, "Time smoothing");
-            egui::ComboBox::from_label("Price smoothing")
-                .selected_text(match s.price_filter {
-                    PriceFilter::Off => "Off",
-                    PriceFilter::Auto => "Auto",
-                    PriceFilter::Gaussian => "Gaussian",
-                })
-                .show_ui(ui, |ui| {
-                    ui.selectable_value(&mut s.price_filter, PriceFilter::Off, "Off");
-                    ui.selectable_value(&mut s.price_filter, PriceFilter::Auto, "Auto");
-                    ui.selectable_value(&mut s.price_filter, PriceFilter::Gaussian, "Gaussian");
-                });
-            if s.price_filter == PriceFilter::Gaussian {
-                ui.add(egui::Slider::new(&mut s.price_filter_px, 0.5..=15.0).suffix(" px").text("σ"));
-            }
+            ui.add_enabled_ui(s.heat_layer_enabled(heatmap_studies::Study::Resting), |ui| {
+                ui.checkbox(&mut s.heat_smooth, "Time smoothing");
+                egui::ComboBox::from_label("Price smoothing")
+                    .selected_text(match s.price_filter {
+                        PriceFilter::Off => "Off",
+                        PriceFilter::Auto => "Auto",
+                        PriceFilter::Gaussian => "Gaussian",
+                    })
+                    .show_ui(ui, |ui| {
+                        ui.selectable_value(&mut s.price_filter, PriceFilter::Off, "Off");
+                        ui.selectable_value(&mut s.price_filter, PriceFilter::Auto, "Auto");
+                        ui.selectable_value(&mut s.price_filter, PriceFilter::Gaussian, "Gaussian");
+                    });
+                if s.price_filter == PriceFilter::Gaussian {
+                    ui.add(egui::Slider::new(&mut s.price_filter_px, 0.5..=15.0).suffix(" px").text("σ"));
+                }
+            });
             ui.add(egui::Slider::new(&mut s.heat_low_pct, 0.0..=30.0).suffix("%").text("Lower cutoff"));
             ui.add(egui::Slider::new(&mut s.heat_high_pct, 80.0..=100.0).suffix("%").text("Upper cutoff"));
-            ui.add(egui::Slider::new(&mut s.heat_contrast, 0.5..=4.0).text("Contrast"));
+            ui.add(egui::Slider::new(&mut s.heat_contrast, 0.5..=10.0).text("Contrast"));
         });
     }
 
@@ -1120,9 +1413,8 @@ impl Viewer {
         }
     }
 
-    /// Apply settings that require rebuilding derived data.
-    /// Keep exact depth loaded for the visible stretch of a chunked store. Zoomed out beyond
-    /// [`EXACT_DEPTH_SPAN_NS`] the overview is drawn and the window is released.
+    /// Load exact depth for a close time viewport or for the replay clock.
+    /// Wide time views use the overview for history and load only the replay clock's chunk.
     fn sync_depth(&mut self, ctx: &egui::Context) {
         let model = &mut self.model;
         if model.depth.is_exact() {
@@ -1142,18 +1434,35 @@ impl Viewer {
                 Err(mpsc::TryRecvError::Disconnected) => self.depth_loading = None,
             }
         }
-        if model.xmap.mode() != AxisMode::Time || model.axis.total() <= 0.0 {
-            return;
-        }
+        let replay = model.replay_clock();
         let total = model.axis.total();
-        let from = model.axis.to_ts(self.chart.x0.clamp(0.0, total));
-        let until = model.axis.to_ts(self.chart.x1.clamp(0.0, total)) + 1;
-        let span = until - from;
-        if span > EXACT_DEPTH_SPAN_NS {
-            if span > 2 * EXACT_DEPTH_SPAN_NS {
-                model.depth_window = None;
+        let mut from = model.axis.to_ts(self.chart.x0.clamp(0.0, total));
+        let mut until = model.axis.to_ts(self.chart.x1.clamp(0.0, total)).saturating_add(1);
+        if let Some(clock) = replay {
+            // Keep the current book available while the chart is panned near the cursor.
+            from = from.min(clock);
+            until = until.max(clock.saturating_add(1));
+        }
+        let span = until.saturating_sub(from);
+        let time_view = model.xmap.mode() == AxisMode::Time && total > 0.0;
+        let cursor_only = !time_view || span > EXACT_DEPTH_SPAN_NS;
+        if cursor_only {
+            let Some(clock) = replay else {
+                if time_view && span > 2 * EXACT_DEPTH_SPAN_NS {
+                    model.depth_window = None;
+                }
+                return;
+            };
+            // A wide chart can use the overview while the replay edge still uses exact depth.
+            from = clock;
+            until = clock.saturating_add(1);
+        }
+        if !cursor_only && self.settings.mode == ChartMode::Heatmap && self.settings.show_heat {
+            if let Some(lookback) = self.settings.heat_layers_lookback() {
+                let margin = span / 16;
+                from = from.saturating_sub(margin + lookback);
+                until = until.saturating_add(margin + lookback);
             }
-            return;
         }
         let covered = |range: (i64, i64)| range.0 <= from && until <= range.1;
         if model.depth_window.as_ref().is_some_and(|w| w.covers(from, until))
@@ -1162,7 +1471,8 @@ impl Viewer {
             return;
         }
         // Load some margin so panning does not reload at once.
-        let range = (from - span / 2, until + span / 2);
+        let margin = if cursor_only { 0 } else { span / 2 };
+        let range = (from.saturating_sub(margin), until.saturating_add(margin));
         let (tx, rx) = mpsc::channel();
         let (store, ctx) = (model.depth.clone(), ctx.clone());
         std::thread::spawn(move || {
@@ -1185,6 +1495,68 @@ impl Viewer {
                 .map(|tape| tape.filtered_volume(&self.model.axis, self.model.trade_volume.len(), min_size));
         }
     }
+}
+
+fn heatmap_study_controls(ui: &mut egui::Ui, settings: &mut Settings, has_depth: bool, has_tape: bool) {
+    use heatmap_studies::Study;
+
+    ui.indent("heatmap-studies", |ui| {
+        for study in Study::ALL {
+            let enabled = study == Study::Resting || (has_depth && (!study.requires_trades() || has_tape));
+            let mut label = egui::RichText::new(study.label());
+            if study != Study::Resting {
+                label = label.color(chart::study_color(study, 1.0));
+            }
+            let response = ui.add_enabled(enabled, egui::Checkbox::new(&mut settings.heat_layers[study.index()], label));
+            if enabled && study.requires_trades() {
+                response.on_hover_text(match study {
+                    Study::Net => "Added minus estimated cancellations per fixed 5-second window. Blue is positive, lilac is negative.",
+                    _ => "Subtracts matching executions up to 10 ms before the depth decrease.",
+                });
+            } else if !enabled {
+                response.on_disabled_hover_text("Requires event-time depth and, for cancellation estimates, a trade tape.");
+            }
+        }
+        let mut has_markers = false;
+        for (index, label) in ["Minimum resting increase / 5 s", "Minimum resting decrease / 5 s", "Minimum estimated cancelled / 5 s"]
+            .into_iter().enumerate()
+        {
+            let study = heatmap_studies::MARKER_STUDIES[index];
+            if has_depth && settings.heat_layer_enabled(study) && (!study.requires_trades() || has_tape) {
+                has_markers = true;
+                let response = ui.add(egui::Slider::new(&mut settings.flow_marker_minimum[index], 1..=10_000)
+                    .logarithmic(true).text(label));
+                if matches!(study, Study::Added | Study::Decreased) {
+                    response.on_hover_text("Compare resting size at the start and end of the window. The marker is placed where the change crossed the threshold and held through the close.");
+                }
+            }
+        }
+        if has_markers {
+            ui.add(egui::Slider::new(&mut settings.flow_marker_limit, 1..=100).text("Maximum markers per layer"));
+        }
+        if has_depth && settings.heat_layer_enabled(Study::Resting) {
+            let filter = &mut settings.heat_studies;
+            ui.checkbox(&mut filter.filter_levels, "Filter price levels");
+            if filter.filter_levels {
+                ui.add(egui::Slider::new(&mut filter.min_size, 0..=10_000)
+                    .logarithmic(true).text("Minimum level size"));
+                let hold_time = egui::Slider::from_get_set(0.0..=1800.0, |seconds| {
+                    if let Some(seconds) = seconds {
+                        filter.hold_ms = (seconds * 1_000.0).round() as u32;
+                    }
+                    f64::from(filter.hold_ms) / 1_000.0
+                })
+                .logarithmic(true)
+                .smallest_positive(0.001)
+                .max_decimals(3)
+                .suffix(" s")
+                .text("Minimum hold time");
+                ui.add(hold_time).on_hover_text(
+                    "Show a bid or ask level after its size has been positive and met the minimum for this long. Enter up to 1800 seconds (30 minutes).",
+                );
+            }
+        }
+    });
 }
 
 fn trade_bubble_controls(ui: &mut egui::Ui, settings: &mut Settings, has_tape: bool) {
@@ -1217,13 +1589,13 @@ fn trade_bubble_controls(ui: &mut egui::Ui, settings: &mut Settings, has_tape: b
 
 impl eframe::App for Viewer {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
-        egui::Panel::top("toolbar").show(ui, |ui| self.toolbar(ui));
-        let ctx = ui.ctx().clone();
-        if let Some(spec) = self.startup_bars.take() {
-            self.bar_draft = spec;
-            self.request_bars(spec, &ctx);
+        if ui.input(|input| input.viewport().close_requested()) {
+            return;
         }
-        self.poll_bars();
+        self.poll_market();
+        let ctx = ui.ctx().clone();
+        self.poll_bars(&ctx);
+        egui::Panel::top("toolbar").show(ui, |ui| self.toolbar(ui));
         self.bar_dialog(&ctx);
         self.metrics_window(&ctx);
         self.trades_window(&ctx);
@@ -1233,7 +1605,8 @@ impl eframe::App for Viewer {
         }
         if let Some(source) = self.ticks.clone() {
             self.replay.shortcuts(&ctx, &mut self.model);
-            self.replay.update(&mut self.model, &source, &ctx);
+            let heatmap = self.settings.mode == ChartMode::Heatmap;
+            self.replay.update(&mut self.model, &source, &ctx, heatmap);
         }
         self.chart.sync_replay(self.model.replay_cut_x());
         self.sync_depth(&ctx);
@@ -1260,8 +1633,9 @@ impl eframe::App for Viewer {
             ctx.request_repaint();
         }
         if let Some(index) = chart.inner {
-            self.replay.start(&mut self.model, index);
-            self.chart.follow_replay = true;
+            let heatmap = self.settings.mode == ChartMode::Heatmap;
+            self.replay.start(&mut self.model, index, heatmap);
+            self.chart.follow_new_replay();
             ctx.request_repaint();
         }
     }
@@ -1309,9 +1683,8 @@ mod tests {
     use super::*;
     use accelerando_core::{OrderFlowEvent, Side};
 
-    #[test]
-    fn toolbar_switches_modes_and_gear_overlays_work_in_bar_mode() {
-        let result = BacktestResult {
+    fn sample_result() -> BacktestResult {
+        BacktestResult {
             metrics: Default::default(),
             trades: Vec::new(),
             equity: Vec::new(),
@@ -1321,7 +1694,60 @@ mod tests {
             counters: Default::default(),
             tick_size: 0.25,
             multiplier: 50.0,
-        };
+        }
+    }
+
+    #[test]
+    fn viewer_can_show_backtest_bars_while_market_data_is_loading() {
+        let ctx = egui::Context::default();
+        let options = ViewerOptions::default();
+        let mut viewer = Viewer::new(sample_result(), options.clone(), &[], None, DepthStore::default());
+        let (release, wait) = mpsc::channel();
+        viewer.load_market(MarketLoad {
+            load: Box::new(move || {
+                wait.recv().map_err(|error| error.to_string())?;
+                let events = PreparedEventData::from_events(vec![
+                    OrderFlowEvent::Contract { tick_size: 0.25, multiplier: 50.0 },
+                    OrderFlowEvent::Trade { ts_ns: SEC_NS / 2, price: 100.0, size: 310.0, aggressor: Side::Buy },
+                ])?;
+                Ok((Some(Arc::new(events)), DepthStore::default()))
+            }),
+            enable_trade_controls: true,
+        }, options, &ctx);
+
+        viewer.poll_market();
+        assert!(viewer.market_loading.is_some());
+        assert_eq!(viewer.model.bars().len(), 1);
+        assert_eq!(viewer.model.xmap.mode(), AxisMode::Bars);
+        assert!(!viewer.model.book_visible());
+        assert!(viewer.ticks.is_none());
+        assert!(viewer.rebar.is_none());
+
+        release.send(()).unwrap();
+        let loaded = viewer.market_loading.take().unwrap()
+            .recv_timeout(std::time::Duration::from_secs(5)).unwrap().unwrap();
+        viewer.apply_market(loaded);
+        assert_eq!(viewer.model.bars().len(), 1);
+        assert!(viewer.model.book_visible());
+        assert!(viewer.model.big_trades.available());
+        assert!(viewer.ticks.is_some());
+        assert!(viewer.rebar.is_some());
+        assert_eq!(viewer.settings.smoothing_secs, 3);
+        assert_eq!(viewer.chart.x1, viewer.model.xmap.total());
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        viewer.poll_bars(&ctx);
+        while viewer.pending.is_some() && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(1));
+            viewer.poll_bars(&ctx);
+        }
+        assert_eq!(viewer.current_bar_label(), "5m");
+        assert_eq!(viewer.model.result.footprints.len(), 1);
+    }
+
+    #[test]
+    fn toolbar_switches_modes_and_gear_overlays_work_in_bar_mode() {
+        let result = sample_result();
         let quotes = data::trade_quotes(&[OrderFlowEvent::Trade {
             ts_ns: 500_000_000,
             price: 100.0,
@@ -1382,5 +1808,13 @@ mod tests {
 
         click(&mut viewer, "Bar");
         assert!(!viewer.settings.show_bbo && !viewer.settings.show_trade_bubbles);
+
+        viewer.model.start_replay(0);
+        viewer.chart.follow_replay = false;
+        let before = (viewer.chart.x0, viewer.chart.x1);
+        click(&mut viewer, "Follow");
+        assert!(viewer.chart.follow_replay);
+        assert_ne!((viewer.chart.x0, viewer.chart.x1), before);
+        assert!((viewer.chart.x1 - viewer.chart.x0 - (before.1 - before.0)).abs() < 1e-9);
     }
 }

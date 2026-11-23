@@ -33,7 +33,7 @@ impl Segment {
 }
 
 /// Compressed time axis: x is "seconds of recorded activity since the start of the data".
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct TimeAxis {
     pub segments: Vec<Segment>,
     total: f64,
@@ -49,6 +49,33 @@ impl TimeAxis {
             *b = (end.div_euclid(SEC_NS) + 1) * SEC_NS;
         }
         intervals.sort_unstable();
+        Self::from_ordered_intervals(intervals, max_gap_ns)
+    }
+
+    /// Add chronologically ordered market activity without sorting a copy of every tick.
+    pub(crate) fn with_market_activity(
+        &self,
+        depth_times: impl Iterator<Item = i64>,
+        trade_times: impl Iterator<Item = i64>,
+        max_gap_ns: i64,
+    ) -> Self {
+        let points = |ts: i64| {
+            let second = ts.div_euclid(SEC_NS) * SEC_NS;
+            (second, second + SEC_NS)
+        };
+        let depth = Self::from_ordered_intervals(depth_times.map(points), max_gap_ns);
+        let trades = Self::from_ordered_intervals(trade_times.map(points), max_gap_ns);
+        let mut intervals: Vec<_> = self.segments.iter().chain(&depth.segments).chain(&trades.segments)
+            .map(|segment| (segment.t0_ns, segment.t1_ns))
+            .collect();
+        intervals.sort_unstable();
+        Self::from_ordered_intervals(intervals, max_gap_ns)
+    }
+
+    fn from_ordered_intervals(
+        intervals: impl IntoIterator<Item = (i64, i64)>,
+        max_gap_ns: i64,
+    ) -> Self {
         let mut merged: Vec<(i64, i64)> = Vec::new();
         for (a, b) in intervals {
             match merged.last_mut() {
@@ -240,6 +267,16 @@ pub enum HeatMetric {
     Ask,
 }
 
+impl HeatMetric {
+    pub(crate) fn size(self, [bid, ask]: [f64; 2]) -> f64 {
+        match self {
+            Self::Total => bid + ask,
+            Self::Bid => bid,
+            Self::Ask => ask,
+        }
+    }
+}
+
 /// Directed trades aggregated to a one-second bucket.
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct TradeQuote {
@@ -312,6 +349,7 @@ pub(crate) struct QuoteColumn {
     pub x: f64,
     pub prices: [f64; 2],
     pub bubble: Option<TradeBubble>,
+    pub trade_bounds: Option<(i64, i64)>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -331,7 +369,7 @@ impl TradeBubble {
         if delta { (self.buy - self.sell).abs() } else { self.total() }
     }
 
-    fn merge(self, other: Self) -> Self {
+    pub(crate) fn merge(self, other: Self) -> Self {
         let weight = other.total() / (self.total() + other.total());
         Self {
             x: self.x + (other.x - self.x) * weight,
@@ -460,7 +498,7 @@ impl<T: Ord> PartialEq for Scored<T> {
 }
 impl<T: Ord> Eq for Scored<T> {}
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq)]
 pub(crate) struct BubbleClustering {
     pub strength: u32,
     pub target: f64,
@@ -597,6 +635,7 @@ pub(crate) fn quote_columns(
                     QuoteColumn {
                         x: cell as f64 + (end - cell) as f64 * 0.5,
                         prices: std::array::from_fn(|side| sums[side] / counts[side] as f64),
+                        trade_bounds: None,
                         bubble: (total > 0.0).then(|| TradeBubble {
                             x: time_sum / total,
                             price: notional / total,
@@ -820,9 +859,21 @@ impl RasterSpec {
     }
 
     /// Use event-time columns when the source retains the original order-book updates.
-    pub fn with_event_time(mut self, x0: f64, x1: f64, width_px: f32) -> Self {
+    pub fn with_event_time(
+        mut self,
+        x0: f64,
+        x1: f64,
+        width_px: f32,
+        previous_width: Option<f64>,
+    ) -> Self {
         let width = f64::from(width_px).clamp(16.0, 2046.0);
         self.col_w = ((x1 - x0) / width).max(1e-9);
+        // Following the clock translates both endpoints. Keep the grid stable when
+        // subtracting those endpoints changes the span only by floating-point roundoff.
+        let roundoff = x0.abs().max(x1.abs()) * f64::EPSILON * 4.0 / width;
+        if let Some(previous) = previous_width.filter(|old| (*old - self.col_w).abs() <= roundoff) {
+            self.col_w = previous;
+        }
         self.c_lo = (x0 / self.col_w).floor() as i64;
         let c_hi = (x1 / self.col_w).ceil() as i64;
         self.cols = ((c_hi - self.c_lo).max(1) as usize).min(2048);
@@ -865,11 +916,14 @@ pub fn rasterize(
         let mut last = NO_SNAPSHOT;
         for sec in (ia..ib).step_by(stride) {
             let idx = grid.snap_at[sec];
-            if idx == NO_SNAPSHOT || idx == last {
+            if idx == last {
                 continue;
             }
+            let Some(snapshot) = snapshots.get(idx as usize) else {
+                continue;
+            };
             last = idx;
-            for lv in &snapshots[idx as usize].levels {
+            for lv in &snapshot.levels {
                 let v = match metric {
                     HeatMetric::Total => lv.bid_size + lv.ask_size,
                     HeatMetric::Bid => lv.bid_size,
@@ -1107,6 +1161,23 @@ mod tests {
         assert_eq!(overlap[0].clustering_volume(true), 4.0);
         assert_eq!(overlap[0].clustering_volume(false), 8.0);
         assert_eq!(cluster_bubbles(dots.into_iter(), [100.0, 8.0], 0.0, options).len(), 3);
+    }
+
+    #[test]
+    fn compact_market_activity_matches_sorting_every_timestamp() {
+        let second = SEC_NS;
+        let max_gap = 3 * second;
+        let base = vec![(20 * second, 21 * second), (0, 0)];
+        let depth = [-1, 0, 1, 4 * second, 4 * second + 1, 12 * second, 100 * second];
+        let trades = [8 * second, 16 * second, 100 * second + 1];
+        let compact = TimeAxis::build(base.clone(), max_gap)
+            .with_market_activity(depth.into_iter(), trades.into_iter(), max_gap);
+        let mut all = base;
+        all.extend(depth.into_iter().chain(trades).map(|ts| (ts, ts)));
+        assert_eq!(compact, TimeAxis::build(all, max_gap));
+        assert_eq!(compact.segments.len(), 2);
+        assert_eq!(compact.segments[0].t1_ns, 22 * second);
+        assert_eq!(compact.segments[1].t0_ns, 100 * second);
     }
 
     #[test]

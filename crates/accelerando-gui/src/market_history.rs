@@ -9,16 +9,71 @@ use crate::data::{
     SEC_NS,
 };
 
+#[derive(Clone)]
 pub(crate) struct TradeTape {
     data: Arc<PreparedEventData>,
     first: usize,
-    index: Option<Vec<usize>>,
-    last_per_second: [Vec<i64>; 2],
+    index: Option<Arc<[usize]>>,
+    last_per_second: [Arc<[i64]>; 2],
 }
 
 impl TradeTape {
     pub fn events(&self) -> &[OrderFlowEvent] {
         self.data.events()
+    }
+
+    pub(crate) fn trades_between(
+        &self,
+        from: i64,
+        until: i64,
+    ) -> impl Iterator<Item = (i64, f64, f64, Side)> + '_ {
+        (self.lower_bound(from)..self.lower_bound(until)).map(|i| self.get(i))
+    }
+
+    pub(crate) fn volume_between(&self, from: i64, until: i64, min_size: f64) -> Option<[f64; 2]> {
+        let mut volume = [0.0; 2];
+        for (_, _, size, side) in self.trades_between(from, until) {
+            if size >= min_size {
+                if let Some(side) = side_index(side) {
+                    volume[1 - side] += size;
+                }
+            }
+        }
+        (volume[0] + volume[1] > 0.0).then_some(volume)
+    }
+
+    pub(crate) fn bubble_columns(
+        &self,
+        segment: &Segment,
+        from: i64,
+        until: i64,
+        width_ns: i64,
+        min_size: f64,
+    ) -> Vec<TradeBubble> {
+        let mut columns = Vec::new();
+        let mut current: Option<(i64, TradeBubble)> = None;
+        for (ts, price, size, side) in self.trades_between(from, until) {
+            if size < min_size || !size.is_finite() || size <= 0.0 || !price.is_finite() {
+                continue;
+            }
+            let (buy, sell) = match side {
+                Side::Buy => (size, 0.0),
+                Side::Sell => (0.0, size),
+                Side::Unknown => continue,
+            };
+            let column = (ts - segment.t0_ns) / width_ns;
+            let trade = TradeBubble { x: at_ts(segment, ts), price, buy, sell };
+            if let Some((index, bubble)) = &mut current {
+                if *index == column {
+                    *bubble = bubble.merge(trade);
+                    continue;
+                }
+                columns.push(*bubble);
+            }
+            current = Some((column, trade));
+        }
+        columns.extend(current.map(|(_, bubble)| bubble));
+        columns
     }
 
     pub fn filtered_volume(&self, axis: &TimeAxis, cells: usize, min_size: f64) -> Vec<TradeVolume> {
@@ -69,7 +124,7 @@ impl TradeTape {
     fn len(&self) -> usize {
         self.index
             .as_ref()
-            .map_or(self.data.events().len() - self.first, Vec::len)
+            .map_or(self.data.events().len() - self.first, |index| index.len())
     }
 
     fn get(&self, i: usize) -> (i64, f64, f64, Side) {
@@ -160,7 +215,7 @@ fn is_trade(event: &OrderFlowEvent) -> bool {
     matches!(event, OrderFlowEvent::Trade { .. })
 }
 
-fn at_x(segment: &Segment, x: f64) -> i64 {
+pub(crate) fn at_x(segment: &Segment, x: f64) -> i64 {
     segment.t0_ns + ((x - segment.x0) * SEC_NS as f64).round() as i64
 }
 
@@ -279,6 +334,7 @@ pub(crate) fn fine_columns(
                 columns.push(QuoteColumn {
                     x: (at_ts(seg, from) + at_ts(seg, until)) * 0.5,
                     prices: last,
+                    trade_bounds: Some((from, until)),
                     bubble: (total > 0.0).then(|| TradeBubble {
                         x: at_ts(seg, from) + time / total / SEC_NS as f64,
                         price: notional / total,
@@ -296,14 +352,65 @@ pub(crate) fn fine_columns(
 /// Integrate resting sizes over each pixel's time span, including exact depth clears.
 pub(crate) fn rasterize_depth(
     spec: &RasterSpec,
-    axis: &TimeAxis,
+    times: &[Option<(i64, i64)>],
     depth: &DepthHistory,
     metric: HeatMetric,
-    replay_ns: Option<i64>,
+) -> Vec<f32> {
+    rasterize_depth_with(spec, times, depth, metric, |level, from, until| {
+        level.mean_size(from, until)
+    })
+}
+
+pub(crate) fn rasterize_preview_depth(
+    spec: &RasterSpec,
+    times: &[Option<(i64, i64)>],
+    depth: &DepthHistory,
+    metric: HeatMetric,
+) -> Vec<f32> {
+    // Spend the preview budget on price resolution. A single sample within each
+    // causal time interval keeps this path cheap without skipping any price levels.
+    rasterize_depth_with(spec, times, depth, metric, |level, from, until| {
+        let midpoint = from + (until - from) / 2;
+        let changes = level.changes();
+        let end = changes.partition_point(|change| change.0 <= midpoint);
+        end.checked_sub(1).map_or([0.0; 2], |last| changes[last].1)
+    })
+}
+
+fn rasterize_depth_with(
+    spec: &RasterSpec,
+    times: &[Option<(i64, i64)>],
+    depth: &DepthHistory,
+    metric: HeatMetric,
+    size_at: impl Fn(&accelerando_core::depth_history::DepthLevelHistory, i64, i64) -> [f64; 2],
 ) -> Vec<f32> {
     let mut cells = vec![0.0_f32; spec.cols * spec.rows];
     let (top, bottom) = spec.price_range();
-    let times: Vec<_> = (0..spec.cols)
+    let columns: Vec<_> = times
+        .iter()
+        .enumerate()
+        .filter_map(|(col, time)| time.map(|(from, until)| (col, from, until)))
+        .collect();
+    for (price, level) in depth.levels_between(bottom, top) {
+        let row = spec.k_hi - (price / spec.row_p).round() as i64;
+        if !(0..spec.rows as i64).contains(&row) {
+            continue;
+        }
+        let row = &mut cells[row as usize * spec.cols..][..spec.cols];
+        for &(col, from, until) in &columns {
+            let size = metric.size(size_at(level, from, until));
+            row[col] = row[col].max(size as f32);
+        }
+    }
+    cells
+}
+
+pub(crate) fn raster_times(
+    spec: &RasterSpec,
+    axis: &TimeAxis,
+    replay_ns: Option<i64>,
+) -> Vec<Option<(i64, i64)>> {
+    (0..spec.cols)
         .map(|col| {
             let lo = (spec.c_lo + col as i64) as f64 * spec.col_w;
             let hi = lo + spec.col_w;
@@ -321,32 +428,34 @@ pub(crate) fn rasterize_depth(
                 .min(replay_ns.map_or(i64::MAX, |ts| ts.saturating_add(1)));
             (from < until).then_some((from, until))
         })
-        .collect();
-    for (price, level) in depth.levels_between(bottom, top) {
-        let row = spec.k_hi - (price / spec.row_p).round() as i64;
-        if !(0..spec.rows as i64).contains(&row) {
-            continue;
-        }
-        let row = &mut cells[row as usize * spec.cols..][..spec.cols];
-        for (cell, &interval) in row.iter_mut().zip(&times) {
-            let Some((from, until)) = interval else {
-                continue;
-            };
-            let [bid, ask] = level.mean_size(from, until);
-            let size = match metric {
-                HeatMetric::Total => bid + ask,
-                HeatMetric::Bid => bid,
-                HeatMetric::Ask => ask,
-            };
-            *cell = cell.max(size as f32);
-        }
-    }
-    cells
+        .collect()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn preview_keeps_isolated_levels_and_samples_before_the_replay_cutoff() {
+        struct Source(Vec<OrderFlowEvent>);
+        impl accelerando_core::DataSource for Source {
+            fn events(self: Box<Self>) -> Box<dyn Iterator<Item = OrderFlowEvent>> {
+                Box::new(self.0.into_iter())
+            }
+        }
+        let level = |ts_ns, index, size| OrderFlowEvent::SetLevel {
+            ts_ns, price: 99.0 + f64::from(index) * 0.25, size, side: Side::Buy,
+        };
+        let mut events = vec![OrderFlowEvent::Contract { tick_size: 0.25, multiplier: 50.0 }];
+        events.extend((0..220).map(|index| level(0, index, if index == 101 { 200.0 } else { 1.0 })));
+        events.push(level(50, 101, 0.0));
+        let (_, depth) = accelerando_core::prepare_market_history(Box::new(Source(events)));
+        let spec = RasterSpec { c_lo: 0, cols: 2, col_w: 1.0, k_hi: 615, rows: 220, row_p: 0.25 };
+        let cells = rasterize_preview_depth(&spec, &[Some((0, 50)), Some((50, 100))], &depth, HeatMetric::Bid);
+        let strong_row = 219 - 101;
+        assert_eq!(&cells[2 * strong_row..2 * strong_row + 2], &[200.0, 0.0]);
+        assert_eq!(&cells[2 * (strong_row - 1)..2 * strong_row], &[1.0, 1.0]);
+    }
 
     #[test]
     fn raster_uses_nanosecond_book_updates_and_replay_cutoff() {
@@ -378,11 +487,11 @@ mod tests {
             row_p: 0.25,
         };
         assert_eq!(
-            rasterize_depth(&spec, &axis, &depth, HeatMetric::Bid, None),
+            rasterize_depth(&spec, &raster_times(&spec, &axis, None), &depth, HeatMetric::Bid),
             vec![6.0, 9.0, 0.0]
         );
         assert_eq!(
-            rasterize_depth(&spec, &axis, &depth, HeatMetric::Bid, Some(105)),
+            rasterize_depth(&spec, &raster_times(&spec, &axis, Some(105)), &depth, HeatMetric::Bid),
             vec![16.0 / 3.0, 0.0, 0.0]
         );
     }
