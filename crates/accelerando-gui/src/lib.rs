@@ -36,7 +36,7 @@ use eframe::egui;
 
 /// Total executed volume in footprint and volume-profile histograms.
 const TOTAL_VOLUME_COLOR: egui::Color32 =
-    egui::Color32::from_rgba_unmultiplied_const(181, 143, 235, 145);
+    egui::Color32::from_rgba_unmultiplied_const(200, 194, 178, 145);
 
 use chart::ChartState;
 pub use bars::{aggregate, BarKind, BarSpec, Rebar};
@@ -690,6 +690,7 @@ pub(crate) enum ChartMode {
 pub(crate) struct Settings {
     pub mode: ChartMode,
     pub big_trades: big_trades::BigTradeSettings,
+    pub footprint_imbalance: chart::FootprintImbalance,
     pub show_heat: bool,
     pub show_bbo: bool,
     pub show_trade_bubbles: bool,
@@ -813,6 +814,7 @@ impl Viewer {
         let settings = Settings {
             mode,
             big_trades: Default::default(),
+            footprint_imbalance: Default::default(),
             show_heat: true,
             show_bbo: mode == ChartMode::Heatmap,
             show_trade_bubbles: mode == ChartMode::Heatmap && !model.trade_volume.is_empty(),

@@ -2,7 +2,7 @@
 
 use std::sync::{mpsc, Arc};
 
-use accelerando_core::{volume_profile, DepthStore, DepthWindow, Footprint, LiquidityLevel, VpLevel};
+use accelerando_core::{volume_profile, DepthStore, DepthWindow, Footprint, Level, LiquidityLevel, VpLevel};
 use eframe::egui::{
     self, pos2, Align2, Color32, ColorImage, FontId, Painter, Pos2, Rect, Sense, Shape, Stroke,
     StrokeKind, TextureHandle, TextureOptions,
@@ -1093,6 +1093,29 @@ fn indicator_legend(
                 .show(ui.ctx(), |ui| settings.big_trades.controls(ui, &model.big_trades));
             settings.big_trades.settings_open = open;
         }
+        if settings.mode == ChartMode::Bar {
+            let imbalance = &mut settings.footprint_imbalance;
+            if let Some(gear) = legend_row(ui, "Diagonal Imbalance", &mut imbalance.visible, true, true) {
+                let mut open = imbalance.settings_open ^ gear.clicked();
+                egui::Window::new("Diagonal Imbalance")
+                    .default_pos(gear.rect.left_bottom())
+                    .collapsible(false)
+                    .resizable(false)
+                    .open(&mut open)
+                    .show(ui.ctx(), |ui| {
+                        ui.horizontal(|ui| {
+                            ui.label("Minimum ratio");
+                            ui.add(egui::DragValue::new(&mut imbalance.ratio)
+                                .range(1.0..=f64::MAX)
+                                .speed(0.1)
+                                .suffix("×"));
+                        });
+                        ui.checkbox(&mut imbalance.ignore_zero, "Ignore zero values")
+                            .on_hover_text("Skip diagonal comparisons against zero volume or an untraded price inside the bar.");
+                    });
+                imbalance.settings_open = open;
+            }
+        }
     });
 }
 
@@ -1979,7 +2002,11 @@ fn draw_bars(painter: &Painter, model: &Model, settings: &Settings, m: &Mapper) 
 
 /// Bars at least this many pixels apart are drawn as footprints (as in the web studio).
 pub(crate) const FOOTPRINT_MIN_SLOT: f32 = 32.0;
-const FOOTPRINT_TEXT: Color32 = Color32::from_rgb(225, 230, 240);
+const FOOTPRINT_TEXT: Color32 = Color32::from_rgb(155, 166, 184);
+const FOOTPRINT_POSITIVE_DELTA: Color32 = Color32::from_rgb(0x17, 0x3e, 0x76);
+const FOOTPRINT_NEGATIVE_DELTA: Color32 = Color32::from_rgb(0x8c, 0x30, 0x3a);
+const FOOTPRINT_BUY: Color32 = Color32::from_rgb(0x78, 0xb0, 0xf5);
+const FOOTPRINT_SELL: Color32 = Color32::from_rgb(0xf0, 0x86, 0x91);
 const BAR_POC: Color32 = Color32::from_rgb(240, 200, 80);
 const BAR_VALUE_AREA: Color32 = Color32::from_rgb(110, 164, 235);
 const BAR_VALUE_AREA_FRACTION: f64 = 0.70;
@@ -2004,11 +2031,50 @@ fn draw_bar_value_area(painter: &Painter, m: &Mapper, fp: &Footprint, left: f32,
     }
 }
 
-/// Footprint view: per traded price level a delta profile (left of the bar's middle, green /
-/// red by sign) and a volume profile (right), the same shape at every zoom level; delta and
-/// volume numbers appear once rows and bars are big enough. A thin candle at the bar's left edge
-/// keeps open/close readable. POC and value area can be shown independently. Returns `false`
-/// when the visible bars carry no ladders (the caller then draws candles).
+pub(crate) struct FootprintImbalance {
+    visible: bool,
+    ratio: f64,
+    ignore_zero: bool,
+    settings_open: bool,
+}
+
+impl Default for FootprintImbalance {
+    fn default() -> Self {
+        Self { visible: true, ratio: 3.0, ignore_zero: true, settings_open: false }
+    }
+}
+
+impl FootprintImbalance {
+    /// Compare bid to ask one tick higher and ask to bid one tick lower. The ladder is ascending.
+    fn at(&self, ladder: &[Level], index: usize, tick: f64) -> [bool; 2] {
+        if !self.visible || !tick.is_finite() || tick <= 0.0 {
+            return [false; 2];
+        }
+        let level = ladder[index];
+        let key = (level.price / tick).round();
+        let hits = |volume: f64, opposite: f64| {
+            volume > 0.0 && if opposite == 0.0 {
+                !self.ignore_zero
+            } else {
+                volume >= self.ratio * opposite
+            }
+        };
+        // A gap within the bar has zero volume; a price beyond the traded range has no pair.
+        let bid = ladder.get(index + 1).is_some_and(|above| {
+            let opposite = if (above.price / tick).round() == key + 1.0 { above.buy_vol } else { 0.0 };
+            hits(level.sell_vol, opposite)
+        });
+        let ask = index.checked_sub(1).is_some_and(|below| {
+            let below = ladder[below];
+            let opposite = if (below.price / tick).round() == key - 1.0 { below.sell_vol } else { 0.0 };
+            hits(level.buy_vol, opposite)
+        });
+        [bid, ask]
+    }
+}
+
+/// Delta profile behind Bid / Ask, and volume profile behind Volume / Delta.
+/// Returns `false` when no ladder has trades and the caller should draw candles.
 #[allow(clippy::too_many_arguments)]
 fn draw_footprints(
     painter: &Painter,
@@ -2021,32 +2087,35 @@ fn draw_footprints(
     slot: f32,
 ) -> bool {
     let fps = &model.bars()[i0..i1];
-    let (mut max_side, mut max_total, mut max_delta) = (0f64, 0f64, 0f64);
+    let (mut max_total, mut max_delta) = (0f64, 0f64);
     for fp in fps {
         for lv in &fp.ladder {
-            max_side = max_side.max(lv.buy_vol).max(lv.sell_vol);
             max_total = max_total.max(lv.buy_vol + lv.sell_vol);
             max_delta = max_delta.max((lv.buy_vol - lv.sell_vol).abs());
         }
     }
-    if max_side <= 0.0 {
+    if max_total <= 0.0 {
         return false;
     }
     let (up, down) = if settings.red_up { (RED, GREEN) } else { (GREEN, RED) };
-    // Aggressor colors stay fixed: buyers green-ish, sellers red-ish, whatever the candle style.
-    let (buy_c, sell_c) = (GREEN, RED);
     let tick = model.result.tick_size.abs().max(1e-9);
     let row_px = m.rect.height() * (tick / (m.p1 - m.p0)) as f32;
     let width = slot * 0.88;
     let candle_w = (width * 0.08).clamp(3.0, 6.0);
-    let cells_w = width - candle_w - 2.0;
-    let text = row_px >= 11.0 && cells_w >= 90.0;
+    let text = row_px >= 11.0;
     let font = FontId::monospace((row_px - 1.0).clamp(8.0, 11.0));
 
     for (k, fp) in fps.iter().enumerate() {
-        let x_left = center_px(i0 + k) - width * 0.5;
+        let center = center_px(i0 + k);
+        let mut width = width;
+        for adjacent in [k.checked_sub(1), Some(k + 1)].into_iter().flatten() {
+            if adjacent < fps.len() {
+                width = width.min((center - center_px(i0 + adjacent)).abs() * 0.88);
+            }
+        }
+        let candle_w = candle_w.min(width * 0.35);
+        let x_left = center - width * 0.5;
         let cells_x0 = x_left + candle_w + 2.0;
-        let mid = cells_x0 + cells_w * 0.5;
         let dir = if fp.close >= fp.open { up } else { down };
 
         // Thin candle at the left edge.
@@ -2060,11 +2129,21 @@ fn draw_footprints(
             dir,
         );
 
+        let cells_w = width - candle_w - 2.0;
+        let profile_gap = 3.0;
+        let profile_w = (cells_w - profile_gap) * 0.5;
+        if profile_w < 1.0 {
+            continue;
+        }
+        let delta_right = cells_x0 + profile_w;
+        let volume_left = delta_right + profile_gap;
+        let side_w = (profile_w - 1.0) * 0.5;
+        let numbers = text && side_w >= 14.0;
         if settings.show_bar_value_area {
             draw_bar_value_area(painter, m, fp, cells_x0, cells_x0 + cells_w, tick);
         }
         let mut poc: Option<(f64, f64)> = None;
-        for lv in &fp.ladder {
+        for (index, lv) in fp.ladder.iter().enumerate() {
             let total = lv.buy_vol + lv.sell_vol;
             if settings.show_bar_poc && poc.is_none_or(|(_, v)| total > v) {
                 poc = Some((lv.price, total));
@@ -2074,38 +2153,46 @@ fn draw_footprints(
                 continue;
             }
             let (ya, yb) = (ya + 0.5, (yb - 0.5).max(ya + 1.0));
-            // Delta profile growing left from the middle, volume profile growing right. The
-            // shape stays the same at every zoom; numbers are added once rows are tall enough.
             let delta = lv.buy_vol - lv.sell_vol;
-            let half_w = cells_w * 0.5;
-            let dw = (half_w * (delta.abs() / max_delta.max(1e-9)) as f32).max(1.0);
-            painter.rect_filled(
-                Rect::from_min_max(pos2(mid - dw, ya), pos2(mid, yb)),
-                0.0,
-                with_alpha(if delta >= 0.0 { buy_c } else { sell_c }, 170),
-            );
-            let vw = (half_w * (total / max_total) as f32).max(1.0);
-            painter.rect_filled(
-                Rect::from_min_max(pos2(mid, ya), pos2(mid + vw, yb)),
-                0.0,
-                crate::TOTAL_VOLUME_COLOR,
-            );
-            if text {
-                let y = (ya + yb) * 0.5;
-                painter.text(
-                    pos2(mid - 3.0, y),
-                    Align2::RIGHT_CENTER,
-                    format_size(delta),
-                    font.clone(),
-                    FOOTPRINT_TEXT,
+            let [bid_hit, ask_hit] = settings.footprint_imbalance.at(&fp.ladder, index, model.result.tick_size);
+            if delta != 0.0 {
+                let bar_w = (profile_w * (delta.abs() / max_delta) as f32).clamp(1.0, profile_w);
+                let color = if delta > 0.0 { FOOTPRINT_POSITIVE_DELTA } else { FOOTPRINT_NEGATIVE_DELTA };
+                painter.rect_filled(
+                    Rect::from_min_max(pos2(delta_right - bar_w, ya), pos2(delta_right, yb)),
+                    0.0,
+                    color,
                 );
-                painter.text(
-                    pos2(mid + 3.0, y),
-                    Align2::LEFT_CENTER,
-                    format_size(total),
-                    font.clone(),
-                    FOOTPRINT_TEXT,
+            }
+            if total > 0.0 {
+                let bar_w = (profile_w * (total / max_total) as f32).clamp(1.0, profile_w);
+                painter.rect_filled(
+                    Rect::from_min_max(pos2(volume_left, ya), pos2(volume_left + bar_w, yb)),
+                    0.0,
+                    crate::TOTAL_VOLUME_COLOR,
                 );
+            }
+            let cells = [
+                (cells_x0, side_w, lv.sell_vol, FOOTPRINT_SELL, bid_hit),
+                (delta_right - side_w, side_w, lv.buy_vol, FOOTPRINT_BUY, ask_hit),
+                (volume_left, profile_w * 0.5, total, FOOTPRINT_TEXT, false),
+                (volume_left + profile_w * 0.5, profile_w * 0.5, delta, FOOTPRINT_TEXT, false),
+            ];
+            for (x, cell_w, value, color, highlight) in cells {
+                let cell = Rect::from_min_max(pos2(x, ya), pos2(x + cell_w, yb));
+                if highlight {
+                    painter.rect(
+                        cell, 0.0, with_alpha(color, 45), Stroke::new(1.0, color), StrokeKind::Inside,
+                    );
+                }
+                if numbers {
+                    let text_color = if highlight { color } else { FOOTPRINT_TEXT };
+                    let label = painter.layout_no_wrap(format_size(value), font.clone(), text_color);
+                    if label.size().x + 3.0 <= cell_w {
+                        let pos = Align2::CENTER_CENTER.anchor_size(cell.center(), label.size()).min;
+                        painter.galley(pos, label, text_color);
+                    }
+                }
             }
         }
         if let Some((price, _)) = poc {
@@ -2119,9 +2206,9 @@ fn draw_footprints(
                 StrokeKind::Inside,
             );
         }
-        let delta_color = if fp.delta >= 0.0 { buy_c } else { sell_c };
+        let delta_color = if fp.delta >= 0.0 { FOOTPRINT_BUY } else { FOOTPRINT_SELL };
         painter.text(
-            pos2(mid, m.sy(fp.low - tick * 0.5) + 3.0),
+            pos2(cells_x0 + cells_w * 0.5, m.sy(fp.low - tick * 0.5) + 3.0),
             Align2::CENTER_TOP,
             format!("Δ{}", format_size(fp.delta)),
             FontId::monospace(10.0),
@@ -2775,10 +2862,11 @@ fn draw_crosshair(
         let tick = model.result.tick_size.abs().max(1e-9);
         if let Some(lv) = fp.ladder.iter().find(|lv| (lv.price - price).abs() <= tick * 0.5) {
             info.push_str(&format!(
-                "   @{:.d$}  sell {}  buy {}  Δ {}",
+                "   @{:.d$}  Bid {}  Ask {}  Vol {}  Δ {}",
                 lv.price,
                 format_size(lv.sell_vol),
                 format_size(lv.buy_vol),
+                format_size(lv.buy_vol + lv.sell_vol),
                 format_size(lv.buy_vol - lv.sell_vol),
             ));
         }
@@ -3528,6 +3616,90 @@ mod tests {
         let mut volumes: Vec<_> = visible.iter().map(|(marker, _)| marker.volume as usize).collect();
         volumes.sort_unstable();
         assert_eq!(volumes, [30_023, 30_024]);
+    }
+
+    #[test]
+    fn footprint_imbalance_uses_adjacent_ticks_and_live_settings() {
+        let ladder = [
+            Level { price: 100.0, buy_vol: 2.0, sell_vol: 21.0 },
+            Level { price: 100.25, buy_vol: 7.0, sell_vol: 4.0 },
+            Level { price: 100.50, buy_vol: 0.0, sell_vol: 0.0 },
+            Level { price: 101.0, buy_vol: 8.0, sell_vol: 4.0 },
+        ];
+        let mut settings = FootprintImbalance::default();
+        assert_eq!(settings.at(&ladder, 0, 0.25), [true, false]); // Exactly 3×.
+        assert_eq!(settings.at(&ladder, 1, 0.25), [false, false]); // Explicit zero ask.
+        assert_eq!(settings.at(&ladder, 3, 0.25), [false, false]); // Gap below.
+        settings.ratio = 3.1;
+        assert_eq!(settings.at(&ladder, 0, 0.25), [false, false]);
+        settings.ignore_zero = false;
+        assert_eq!(settings.at(&ladder, 0, 0.25), [false, false]); // No pair below the bar.
+        assert_eq!(settings.at(&ladder, 1, 0.25), [true, false]);
+        assert_eq!(settings.at(&ladder, 2, 0.25), [false, false]); // Zero source never highlights.
+        assert_eq!(settings.at(&ladder, 3, 0.25), [false, true]);
+        settings.visible = false;
+        assert_eq!(settings.at(&ladder, 3, 0.25), [false, false]);
+    }
+
+    #[test]
+    fn footprint_draws_four_numbers_over_two_profiles() {
+        let fp = accelerando_core::testkit::bar(0)
+            .level(99.50, 0.0, 12.0)
+            .level(99.75, 3.0, 7.0)
+            .level(100.0, 21.0, 5.0)
+            .level(100.25, 2.0, 0.0)
+            .build();
+        let result = accelerando_core::BacktestResult {
+            metrics: Default::default(),
+            trades: Vec::new(),
+            equity: Vec::new(),
+            footprints: vec![fp],
+            liquidity_heatmap: Default::default(),
+            series: Vec::new(),
+            counters: Default::default(),
+            tick_size: 0.25,
+            multiplier: 50.0,
+        };
+        let viewer = crate::Viewer::new(result, Default::default(), &[], None, Default::default());
+        let mapper = Mapper {
+            rect: Rect::from_min_size(Pos2::ZERO, egui::vec2(400.0, 300.0)),
+            x0: 0.0,
+            x1: viewer.model.xmap.total(),
+            p0: 99.0,
+            p1: 101.0,
+        };
+        let mut output = egui::Context::default().run_ui(
+            egui::RawInput { screen_rect: Some(mapper.rect), ..Default::default() },
+            |ui| draw_bars(ui.painter(), &viewer.model, &viewer.settings, &mapper),
+        );
+        output.textures_delta.clear();
+        let row_y = mapper.sy(100.0);
+        let cells: Vec<_> = output.shapes.iter().filter_map(|shape| match &shape.shape {
+            Shape::Rect(rect) if rect.rect.y_range().contains(row_y) => Some(rect),
+            _ => None,
+        }).collect();
+        let find_bar = |color| cells.iter().filter(move |cell| cell.fill == color);
+        let volume: Vec<_> = find_bar(crate::TOTAL_VOLUME_COLOR).map(|cell| cell.rect).collect();
+        let delta: Vec<_> = find_bar(FOOTPRINT_POSITIVE_DELTA).map(|cell| cell.rect).collect();
+        assert_eq!((delta.len(), volume.len()), (1, 1));
+        assert_eq!(find_bar(FOOTPRINT_NEGATIVE_DELTA).count(), 0);
+        assert!(delta[0].right() < volume[0].left());
+        let highlight = cells.iter().find(|cell| cell.stroke.color == FOOTPRINT_BUY).unwrap();
+        assert_eq!(highlight.rect.right(), delta[0].right());
+        assert!(highlight.rect.right() < volume[0].left());
+        let sell_y = mapper.sy(99.50);
+        for color in [FOOTPRINT_NEGATIVE_DELTA, FOOTPRINT_SELL] {
+            assert!(output.shapes.iter().any(|shape| matches!(&shape.shape, Shape::Rect(rect)
+                if rect.rect.y_range().contains(sell_y) && (rect.fill == color || rect.stroke.color == color))));
+        }
+        let mut labels: Vec<_> = output.shapes.iter().filter_map(|shape| match &shape.shape {
+            Shape::Text(text) if delta[0].y_range().contains(text.pos.y) => {
+                Some((text.pos.x, text.galley.text()))
+            }
+            _ => None,
+        }).collect();
+        labels.sort_by(|a, b| a.0.total_cmp(&b.0));
+        assert_eq!(labels.into_iter().map(|(_, label)| label).collect::<Vec<_>>(), ["5", "21", "26", "16"]);
     }
 
     #[test]
