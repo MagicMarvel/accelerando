@@ -169,6 +169,10 @@ impl BubbleFrame {
     pub fn groups(&self) -> impl Iterator<Item = &BubbleGroup> {
         self.sessions.iter().map(|session| &session.group)
     }
+
+    pub fn cutoff(&self, axis: &TimeAxis) -> i64 {
+        self.view.clock.min(axis.to_ts(self.view.x[1]))
+    }
 }
 
 struct Job {
@@ -220,6 +224,10 @@ pub(crate) struct ReplayBubbles {
 }
 
 impl ReplayBubbles {
+    pub fn pending(&self) -> bool {
+        self.worker.as_ref().is_some_and(|worker| worker.pending)
+    }
+
     pub fn reset(&mut self) {
         self.generation = self.generation.wrapping_add(1);
         self.ready = None;

@@ -15,7 +15,7 @@
 //! backtests keep reading the source directly.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
-use std::io::Write;
+use std::io::{BufReader, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -146,6 +146,40 @@ impl DepthStore {
             until: chunks.get(last + 1).map_or(i64::MAX, |c| c.t0),
             history,
         })
+    }
+
+    /// Read only the requested timestamps and the book state at the start of the window.
+    /// Returns `None` when the change budget is exceeded. Works with existing chunk files.
+    pub fn load_bounded_window(
+        &self,
+        from: i64,
+        until: i64,
+        max_changes: usize,
+    ) -> Result<Option<DepthWindow>, String> {
+        if from >= until {
+            return Err("depth window must have a non-empty time range".into());
+        }
+        let chunks = &self.inner.chunks;
+        let Some(dir) = self.inner.dir.as_ref().filter(|_| !chunks.is_empty()) else {
+            return Err("depth store has no chunks to load".into());
+        };
+        let first = chunks.partition_point(|c| c.t0 <= from).saturating_sub(1);
+        let last = chunks.partition_point(|c| c.t0 < until).saturating_sub(1).max(first);
+        let mut history = DepthHistory {
+            tick: self.inner.overview.tick,
+            levels: BTreeMap::new(),
+            quotes: Vec::new(),
+        };
+        let mut remaining = max_changes;
+        for chunk in &chunks[first..=last] {
+            let path = chunk_path(dir, chunk.t0);
+            let append = read_chunk_range(&path, &mut history.levels, from, until, &mut remaining)
+                .map_err(|e| format!("read {}: {e}", path.display()))?;
+            if !append {
+                return Ok(None);
+            }
+        }
+        Ok(Some(DepthWindow { from, until, history }))
     }
 
     /// One pass over `source`: trades for the tape, depth into `dir` (a fresh temporary
@@ -516,6 +550,98 @@ fn read_chunk(path: &Path, levels: &mut BTreeMap<i64, DepthLevelHistory>) -> Res
     }
 }
 
+fn read_chunk_range(
+    path: &Path,
+    levels: &mut BTreeMap<i64, DepthLevelHistory>,
+    from: i64,
+    until: i64,
+    remaining: &mut usize,
+) -> std::io::Result<bool> {
+    const RECORD_BYTES: u64 = 16;
+    let file = std::fs::File::open(path)?;
+    let len = file.metadata()?.len();
+    let mut file = BufReader::new(file);
+    let invalid = || std::io::Error::new(std::io::ErrorKind::InvalidData, "invalid depth chunk");
+    let mut header = [0; 16];
+    file.read_exact(&mut header)?;
+    if &header[..8] != CHUNK_MAGIC {
+        return Err(invalid());
+    }
+    let level_count = u64::from_le_bytes(header[8..].try_into().unwrap());
+    let mut offset = 16_u64;
+    for _ in 0..level_count {
+        file.seek(SeekFrom::Start(offset))?;
+        file.read_exact(&mut header)?;
+        let key = i64::from_le_bytes(header[..8].try_into().unwrap());
+        let count = u64::from_le_bytes(header[8..].try_into().unwrap());
+        let start = offset + 16;
+        offset = count
+            .checked_mul(RECORD_BYTES)
+            .and_then(|bytes| start.checked_add(bytes))
+            .filter(|&end| end <= len)
+            .ok_or_else(invalid)?;
+        if count == 0 {
+            continue;
+        }
+        let record_at = |file: &mut BufReader<std::fs::File>, index| {
+            file.seek(SeekFrom::Start(start + index * RECORD_BYTES))?;
+            read_depth_record(file)
+        };
+        let partition = |file: &mut BufReader<std::fs::File>, cutoff, inclusive| {
+            let (mut lo, mut hi) = (0, count);
+            while lo < hi {
+                let mid = lo + (hi - lo) / 2;
+                let (ts, _) = record_at(file, mid)?;
+                if ts < cutoff || (inclusive && ts == cutoff) {
+                    lo = mid + 1;
+                } else {
+                    hi = mid;
+                }
+            }
+            Ok::<_, std::io::Error>(lo)
+        };
+        // The preceding record supplies the book at `from`, even after a quiet period.
+        let first = partition(&mut file, from, true)?;
+        let last = if first == count { count } else { partition(&mut file, until, false)? };
+        let seed = if first > 0 {
+            let (_, value) = record_at(&mut file, first - 1)?;
+            (value != [0.0; 2]).then_some(value)
+        } else {
+            None
+        };
+        let needed = last.saturating_sub(first) + u64::from(seed.is_some());
+        if needed > *remaining as u64 {
+            return Ok(false);
+        }
+        *remaining -= needed as usize;
+        if needed == 0 {
+            continue;
+        }
+        let level = levels.entry(key).or_default();
+        if let Some(value) = seed {
+            level.push(from, value);
+        }
+        file.seek(SeekFrom::Start(start + first * RECORD_BYTES))?;
+        for _ in first..last {
+            let (ts, value) = read_depth_record(&mut file)?;
+            level.push(ts, value);
+        }
+    }
+    if offset != len {
+        return Err(invalid());
+    }
+    Ok(true)
+}
+
+fn read_depth_record(file: &mut impl Read) -> std::io::Result<(i64, [f64; 2])> {
+    let mut bytes = [0; 16];
+    file.read_exact(&mut bytes)?;
+    let ts = i64::from_le_bytes(bytes[..8].try_into().unwrap());
+    let bid = f32::from_le_bytes(bytes[8..12].try_into().unwrap());
+    let ask = f32::from_le_bytes(bytes[12..].try_into().unwrap());
+    Ok((ts, [f64::from(bid), f64::from(ask)]))
+}
+
 struct Reader<'a> {
     bytes: &'a [u8],
 }
@@ -652,6 +778,26 @@ mod tests {
         }
         drop((store, reopened));
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn bounded_windows_match_exact_depth_and_stop_at_the_budget() {
+        let (_, store) =
+            DepthStore::build_with(Box::new(Events(feed())), None, 50_000, 700).unwrap();
+        for (from, until) in [(0, 8_500), (74_000, 74_001), (123_987, 215_555), (400_000, 470_000)] {
+            let exact = store.load_window(from, until).unwrap();
+            let bounded = store.load_bounded_window(from, until, 20_000).unwrap().unwrap();
+            assert_eq!((bounded.from, bounded.until), (from, until));
+            for (price, level) in exact.history.levels_between(90.0, 110.0) {
+                let loaded = bounded.history.levels_between(price, price).next();
+                for t in (from..until).step_by(997) {
+                    let probe = (t + 1_500).min(until);
+                    let mean = loaded.map_or([0.0; 2], |(_, l)| l.mean_size(t, probe));
+                    assert!(close(mean, level.mean_size(t, probe)), "price {price} at {t}");
+                }
+            }
+        }
+        assert!(store.load_bounded_window(0, 100_000, 10).unwrap().is_none());
     }
 
     #[test]

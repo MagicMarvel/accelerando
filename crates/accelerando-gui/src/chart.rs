@@ -1,6 +1,7 @@
 //! Painting and interaction for the price panel and the equity panel.
 
-use std::sync::{mpsc, Arc};
+use std::sync::{mpsc, Arc, OnceLock};
+use std::time::Instant;
 
 use accelerando_core::{volume_profile, DepthStore, DepthWindow, Footprint, Level, LiquidityLevel, VpLevel};
 use eframe::egui::{
@@ -13,6 +14,7 @@ use crate::big_trades::{BigTradeSettings, Marker, MarkerShape};
 use crate::heatmap_studies::{self, FlowMarker, FlowQuery, Studies, Study};
 use crate::liquidity_colors::{self, ColorScale};
 use crate::market_history::{self, Viewport};
+use crate::performance::{FrameTiming, Phase};
 use crate::replay_bubbles::{BubbleGroup, BubbleView, ReplayBubbles};
 use crate::vp::VpTool;
 use crate::{ChartMode, Model, Settings, NEGATIVE_DELTA_COLOR, POSITIVE_DELTA_COLOR};
@@ -20,6 +22,8 @@ use crate::{ChartMode, Model, Settings, NEGATIVE_DELTA_COLOR, POSITIVE_DELTA_COL
 const AXIS_W: f32 = 72.0;
 const AXIS_H: f32 = 22.0;
 const REPLAY_DEPTH_W: f32 = 132.0;
+const DEPTH_NEIGHBOR_TICKS: usize = 4;
+const DEPTH_PROMINENCE_RATIO: f64 = 1.5;
 const REPLAY_FRACTION: f64 = 0.85;
 
 const BACKGROUND: Color32 = Color32::from_rgb(8, 12, 24);
@@ -63,7 +67,42 @@ pub(crate) struct ChartState {
     heat_preview: Option<HeatPreview>,
     flow_heat: Option<FlowHeatCache>,
     flow_worker: Option<FlowHeatWorker>,
+    hover_depth: HoverDepth,
     replay_bubbles: ReplayBubbles,
+}
+
+#[derive(Default)]
+struct HoverDepth {
+    loading: Option<(i64, mpsc::Receiver<Option<DepthWindow>>)>,
+    ready: Option<(i64, Option<DepthWindow>)>,
+}
+
+impl HoverDepth {
+    fn request(&mut self, ctx: &egui::Context, store: &DepthStore, ts: i64) {
+        if let Some((start, receiver)) = &self.loading {
+            let window = match receiver.try_recv() {
+                Ok(window) => window,
+                Err(mpsc::TryRecvError::Disconnected) => None,
+                Err(mpsc::TryRecvError::Empty) => return,
+            };
+            self.ready = Some((*start, window));
+            self.loading = None;
+        }
+        let start = ts.div_euclid(data::SEC_NS) * data::SEC_NS;
+        if self.ready.as_ref().is_some_and(|(loaded, _)| *loaded == start) {
+            return;
+        }
+        let (send, receive) = mpsc::channel();
+        let (store, ctx) = (store.clone(), ctx.clone());
+        std::thread::spawn(move || {
+            let until = start.saturating_add(data::SEC_NS);
+            let window = store.load_bounded_window(start, until, crate::DEPTH_WINDOW_MAX_CHANGES);
+            if send.send(window.ok().flatten()).is_ok() {
+                ctx.request_repaint();
+            }
+        });
+        self.loading = Some((start, receive));
+    }
 }
 
 #[derive(Clone, PartialEq)]
@@ -523,6 +562,7 @@ impl ChartState {
             heat_preview: None,
             flow_heat: None,
             flow_worker: None,
+            hover_depth: HoverDepth::default(),
             replay_bubbles: ReplayBubbles::default(),
         }
     }
@@ -550,6 +590,7 @@ impl ChartState {
         self.heat_preview = None;
         self.flow_heat = None;
         self.flow_worker = None;
+        self.hover_depth = HoverDepth::default();
         self.replay_bubbles.reset();
     }
 
@@ -691,6 +732,7 @@ pub(crate) fn price_panel(
     selected_trade: Option<usize>,
     vp: &mut VpTool,
     pick_bar: bool,
+    mut timing: Option<&mut FrameTiming>,
 ) -> egui::InnerResponse<Option<usize>> {
     let outer = ui.available_rect_before_wrap();
     let area = ui.allocate_rect(outer, Sense::hover());
@@ -727,6 +769,7 @@ pub(crate) fn price_panel(
     let event_time = seconds_per_pixel < 1.0 && (model.tape.is_some() || !model.depth.is_empty());
     let aggregate_bubbles = show_bubbles && (replay_bubble_source.is_none() || state.auto_y);
     let query_hover_trade = event_time && replay_bubble_source.is_some() && !aggregate_bubbles;
+    let columns_start = timing.as_ref().map(|_| Instant::now());
     let columns = if show_quotes || aggregate_bubbles || (heat_visible && state.auto_y)
         || (query_hover_trade && hover.is_some())
     {
@@ -772,6 +815,9 @@ pub(crate) fn price_panel(
             state.p1 = hi + pad;
         }
     }
+    if let (Some(timing), Some(start)) = (timing.as_deref_mut(), columns_start) {
+        timing.finish(Phase::Columns, start);
+    }
     let m = Mapper { rect: plot, x0: state.x0, x1: state.x1, p0: state.p0, p1: state.p1 };
 
     let axis_painter = ui.painter_at(outer);
@@ -779,6 +825,8 @@ pub(crate) fn price_panel(
     painter.rect_filled(plot, 0.0, BACKGROUND);
 
     let heat_edge = replay_x.map(|x| m.sx(x)).filter(|x| plot.x_range().contains(*x) && *x < plot.right());
+    let heat_start = timing.as_ref().filter(|_| heat_visible || depth_width > 0.0)
+        .map(|_| Instant::now());
     if heat_visible && model.has_heatmap() {
         let heat_painter = replay_x.map_or_else(|| painter.clone(), |x| {
             painter.with_clip_rect(Rect::from_min_max(
@@ -793,12 +841,24 @@ pub(crate) fn price_panel(
     });
     let replay_levels = replay_clock.filter(|_| depth_width > 0.0).and_then(|clock| {
         let (top, bottom) = edge_spec.as_ref().map_or((m.p1, m.p0), RasterSpec::price_range);
-        model.replay_depth(clock, m.p0.min(bottom), m.p1.max(top))
+        let margin = model.result.tick_size.abs() * DEPTH_NEIGHBOR_TICKS as f64;
+        model.replay_depth(clock, bottom.min(m.p0 - margin), top.max(m.p1 + margin))
     });
     if let (Some((left, cache)), Some(spec), Some(levels)) = (edge, edge_spec, &replay_levels) {
         let sigma_rows = price_sigma_rows(ui.ctx(), settings, &m, model.result.tick_size, spec.row_p);
         let repeat = price_row_repeat(&spec, physical_pixels_per_price(ui.ctx(), &m));
         draw_heat_depth(&painter, &m, left, cache, &spec, levels, repeat, sigma_rows);
+    }
+    if let (Some(timing), Some(start)) = (timing.as_deref_mut(), heat_start) {
+        timing.finish(Phase::Heatmap, start);
+        if heat_visible && settings.heat_layer_enabled(Study::Resting) {
+            timing.heat_lag_ns = state.heat.as_ref().and_then(|cache| {
+                let end = model.axis.to_ts(m.x1);
+                let clock = cache.key.replay_ns?;
+                Some(replay_clock?.min(end).saturating_sub(clock.min(end)))
+            });
+            timing.heat_pending = state.heat_worker.as_ref().is_some_and(|worker| worker.pending.is_some());
+        }
     }
     draw_axes(&axis_painter, &painter, model, &m, price_axis_left);
     // Time-based layers stop at the replay cursor.
@@ -824,6 +884,7 @@ pub(crate) fn price_panel(
     if show_quotes {
         draw_quote_columns(&painter, &m, &columns);
     }
+    let bubbles_start = timing.as_ref().filter(|_| show_bubbles).map(|_| Instant::now());
     let hovered_bubble = if show_bubbles {
         let bubble_pointer = hover.filter(|_| !pick_bar && !drawing_vp && !response.dragged());
         if let Some((clock, tape)) = replay_bubble_source {
@@ -837,6 +898,10 @@ pub(crate) fn price_panel(
                 clustering: bubble_clustering(settings),
             };
             state.replay_bubbles.update(ui.ctx(), view, &model.axis, tape).and_then(|frame| {
+                if let Some(timing) = timing.as_deref_mut() {
+                    let end = model.axis.to_ts(view.x[1]);
+                    timing.bubbles_lag_ns = Some(view.clock.min(end).saturating_sub(frame.cutoff(&model.axis)));
+                }
                 draw_trade_bubbles(&painter, &m, frame.groups(), settings, bubble_pointer)
             })
         } else {
@@ -846,6 +911,10 @@ pub(crate) fn price_panel(
     } else {
         None
     };
+    if let (Some(timing), Some(start)) = (timing, bubbles_start) {
+        timing.finish(Phase::Bubbles, start);
+        timing.bubbles_pending = replay_bubble_source.is_some() && state.replay_bubbles.pending();
+    }
     if show_quotes {
         let legend = plot.right_top() + egui::vec2(-8.0, 6.0);
         let painter = &full_painter;
@@ -920,6 +989,13 @@ pub(crate) fn price_panel(
         } else if !heat_visible || replay_x.is_some_and(|x| m.x_at(pos.x) > x) {
             None
         } else {
+            if let Some(ts) = model.book_hover_time(m.x_at(pos.x)).filter(|&ts| {
+                !model.depth.is_exact()
+                    && model.exact_depth_window(ts, ts.saturating_add(1)).is_none()
+                    && state.heat.as_ref().is_some_and(|cache| !cache.key.studies.active())
+            }) {
+                state.hover_depth.request(ui.ctx(), &model.depth, ts);
+            }
             heatmap_tooltip(state, model, &m, pos, settings.heat_metric)
         };
         let trade = hovered_bubble.map(|dot| bubble_tooltip(model, dot, settings.bubble_delta));
@@ -982,48 +1058,133 @@ fn draw_replay_depth(ui: &egui::Ui, rect: Rect, m: &Mapper, model: &Model, level
     };
     let tick = model.result.tick_size.abs();
     let row_height = (m.sy(m.p0) - m.sy(m.p0 + tick)).max(0.0);
-    let visible_levels = levels.iter().filter(|level| (m.p0..=m.p1).contains(&level.price));
-    let largest = visible_levels.clone().max_by(|a, b| {
-        (a.bid_size + a.ask_size).total_cmp(&(b.bid_size + b.ask_size))
-    }).filter(|level| level.bid_size + level.ask_size > 0.0);
-    let max_size = largest.map_or(0.0, |level| level.bid_size + level.ask_size);
+    let visible_levels = levels.iter().enumerate().filter(|(_, level)| (m.p0..=m.p1).contains(&level.price));
+    let max_size = visible_levels.clone().map(|(_, level)| level.bid_size + level.ask_size).fold(0.0, f64::max);
     let right = rect.right() - 4.0;
     let bar_space = rect.width() - 8.0;
     let height = (row_height - 1.0).clamp(1.0, 23.0);
-    for level in visible_levels {
+    for (index, level) in visible_levels.clone() {
         let y = m.sy(level.price);
-        let highlight = largest.is_some_and(|largest| std::ptr::eq(largest, level));
+        let prominent = prominent_depth_sides(levels, index, tick);
         let mut offset = 0.0;
-        for (size, color) in [(level.ask_size, ask_color), (level.bid_size, bid_color)] {
+        for (side, (size, color)) in [(level.ask_size, ask_color), (level.bid_size, bid_color)]
+            .into_iter()
+            .enumerate()
+        {
             if size <= 0.0 {
                 continue;
             }
+            let highlight = prominent[side];
             let width = (bar_space * (size / max_size) as f32).max(1.0);
             let end = right - offset;
             painter.rect_filled(
                 Rect::from_min_max(pos2(end - width, y - height * 0.5), pos2(end, y + height * 0.5)),
                 0.0, if highlight { color } else { color.gamma_multiply(0.58) },
             );
-            if !highlight && row_height >= 12.0 && (offset == 0.0 || width >= 32.0) {
-                painter.text(pos2(end - 3.0, y), Align2::RIGHT_CENTER, tooltip_size(size), font.clone(), Color32::WHITE);
-            }
             offset += width;
         }
     }
-    if let Some(level) = largest {
-        let text = painter.layout_no_wrap(tooltip_size(max_size), font, Color32::WHITE);
+
+    let label_height = ui.fonts_mut(|fonts| fonts.row_height(&font)) + 2.0;
+    if rows.height() >= label_height {
+        let groups = replay_depth_label_rows(
+            *m, rows, tick, label_height, visible_levels.map(|(_, level)| level),
+        );
         let padding = egui::vec2(3.0, 1.0);
-        let size = text.size() + padding * 2.0;
-        let y = m.sy(level.price).clamp(rows.top() + size.y * 0.5, rows.bottom() - size.y * 0.5);
-        let label = Rect::from_min_size(pos2(rows.left() + 4.0, y - size.y * 0.5), size);
-        painter.rect_filled(label, 2.0, BACKGROUND);
-        painter.galley(label.min + padding, text, Color32::WHITE);
+        for (y, [bid, ask]) in groups {
+            let count = if bid > 0.0 && ask > 0.0 { 2.0 } else { 1.0 };
+            let gap = 1.0;
+            let max_text_width = (rows.width() - 8.0 - gap * (count - 1.0)) / count - 2.0 * padding.x;
+            let mut x = rows.left() + 4.0;
+            for (value, color) in [(ask, ask_color), (bid, bid_color)] {
+                if value <= 0.0 {
+                    continue;
+                }
+                let value = tooltip_size(value);
+                let mut text = painter.layout_no_wrap(value.clone(), font.clone(), color);
+                if text.size().x > max_text_width && max_text_width > 0.0 {
+                    let fitted_font = FontId::monospace(font.size * max_text_width / text.size().x);
+                    text = painter.layout_no_wrap(value, fitted_font, color);
+                }
+                if text.size().x > max_text_width {
+                    continue;
+                }
+                let size = text.size() + padding * 2.0;
+                let label = Rect::from_min_size(pos2(x, y - size.y * 0.5), size);
+                painter.rect_filled(label, 2.0, BACKGROUND);
+                painter.galley(label.min + padding, text, color);
+                x = label.right() + gap;
+            }
+        }
     }
     if let Some(pos) = ui.input(|i| i.pointer.hover_pos()).filter(|pos| rows.contains(*pos)) {
         if let Some(info) = depth_tooltip(model, m, pos.y, levels) {
             draw_chart_tooltip(ui.painter(), pos, info);
         }
     }
+}
+
+/// Group nearby ticks around price anchors and keep the largest size on each side.
+fn replay_depth_label_rows<'a>(
+    m: Mapper,
+    rows: Rect,
+    tick: f64,
+    label_height: f32,
+    levels: impl Iterator<Item = &'a LiquidityLevel>,
+) -> impl Iterator<Item = (f32, [f64; 2])> {
+    let min_spacing = label_height + 1.0;
+    let price_spacing = (m.p1 - m.p0) / f64::from(m.rect.height()) * f64::from(min_spacing);
+    let step = if tick > 0.0 { (price_spacing / tick).ceil().max(1.0) * tick } else { price_spacing };
+    let half_height = label_height * 0.5;
+    let first = (m.p_at(rows.bottom() - half_height) / step).ceil() as i64;
+    let last = (m.p_at(rows.top() + half_height) / step).floor() as i64;
+    let mut groups = std::collections::BTreeMap::<i64, [f64; 2]>::new();
+    for level in levels {
+        let group = if first <= last {
+            ((level.price / step + 0.5).floor() as i64).clamp(first, last)
+        } else {
+            0
+        };
+        let [bid, ask] = groups.entry(group).or_default();
+        *bid = bid.max(level.bid_size);
+        *ask = ask.max(level.ask_size);
+    }
+    let center = rows.center().y;
+    groups.into_iter().map(move |(group, sizes)| {
+        let y = if first <= last { m.sy(group as f64 * step) } else { center };
+        (y, sizes)
+    })
+}
+
+/// Compare to nearby positive sizes on the same side, excluding this price.
+fn prominent_depth_sides(levels: &[LiquidityLevel], index: usize, tick: f64) -> [bool; 2] {
+    let level = &levels[index];
+    let radius = tick * (DEPTH_NEIGHBOR_TICKS as f64 + 0.01);
+    let mut samples = [[0.0; 2 * DEPTH_NEIGHBOR_TICKS]; 2];
+    let mut counts = [0; 2];
+    let neighbors = levels[..index].iter().rev().take(DEPTH_NEIGHBOR_TICKS)
+        .chain(levels[index + 1..].iter().take(DEPTH_NEIGHBOR_TICKS))
+        .filter(|other| (other.price - level.price).abs() <= radius);
+    for other in neighbors {
+        for (side, size) in [other.ask_size, other.bid_size].into_iter().enumerate() {
+            if size <= 0.0 {
+                continue;
+            }
+            samples[side][counts[side]] = size;
+            counts[side] += 1;
+        }
+    }
+    let sizes = [level.ask_size, level.bid_size];
+    std::array::from_fn(|side| {
+        let count = counts[side];
+        if sizes[side] <= 0.0 || count == 0 {
+            return sizes[side] > 0.0;
+        }
+        let nearby = &mut samples[side][..count];
+        nearby.sort_unstable_by(f64::total_cmp);
+        let median = nearby[(count - 1) / 2].midpoint(nearby[count / 2]);
+        sizes[side] >= DEPTH_PROMINENCE_RATIO * median
+    })
 }
 
 fn depth_tooltip(model: &Model, m: &Mapper, y: f32, levels: &[LiquidityLevel]) -> Option<String> {
@@ -1055,8 +1216,8 @@ fn indicator_legend(
         ui.spacing_mut().item_spacing.y = 2.0;
 
         let overlays = &model.overlays;
-        if !overlays.lines.is_empty()
-            || overlays.boxes.iter().any(|plot| plot.group.is_none())
+        if overlays.lines().next().is_some()
+            || overlays.boxes.values().any(|plot| plot.group.is_none())
             || overlays.segments.iter().any(|plot| plot.group.is_none())
         {
             legend_row(ui, "Overlays (zones, lines)", &mut settings.show_overlays, true, false);
@@ -1309,13 +1470,17 @@ fn draw_heatmap(
     let total = model.axis.total();
     let at = |x: f64| model.axis.to_ts(x.clamp(0.0, total));
     let from = at(xa);
-    let until = at(xb).min(model.replay_clock().unwrap_or(i64::MAX)).max(from).saturating_add(1);
+    let replay_until = model.replay_clock().map_or(i64::MAX, |clock| clock.saturating_add(1));
+    let until = at(xb).saturating_add(1).min(replay_until);
     let lookback = settings.heat_layers_lookback();
-    let depth = (!model.depth.is_empty()).then(|| {
-        let start = from.saturating_sub(lookback.unwrap_or_default());
-        model.depth_at(start, until.saturating_add(lookback.unwrap_or_default()))
-    });
-    let depth_window = depth.and_then(|(_, window)| window);
+    let lookback_ns = lookback.unwrap_or_default();
+    let depth_from = from.saturating_sub(lookback_ns);
+    let depth_until = until.saturating_add(lookback_ns).min(replay_until);
+    let window = (depth_from < depth_until)
+        .then(|| model.exact_depth_window(depth_from, depth_until)).flatten();
+    let depth = (!model.depth.is_empty())
+        .then(|| window.map_or_else(|| model.depth.overview(), |window| &window.history));
+    let depth_window = window.map(|window| (window.from, window.until));
     let view_span = at(m.x1).saturating_add(1) - at(m.x0);
     let exact = depth.is_some()
         && (model.depth.is_exact()
@@ -1323,6 +1488,8 @@ fn draw_heatmap(
     if lookback.is_some() && !exact {
         let notice = if view_span > crate::EXACT_DEPTH_SPAN_NS {
             "Zoom to 12 hours or less for event-time layers."
+        } else if model.depth_limited.is_some_and(|(start, end)| start <= depth_from && depth_until <= end) {
+            "Zoom in to try loading exact event-time depth."
         } else {
             "Waiting for event-time depth."
         };
@@ -1354,7 +1521,7 @@ fn draw_heatmap(
         state.heat_worker = None;
         state.heat_preview = None;
     } else {
-        update_resting_heat(ctx, model, state, &key, &spec, depth.map(|(history, _)| history), pixels_per_price);
+        update_resting_heat(ctx, model, state, &key, &spec, depth, pixels_per_price);
         let visible = heat_clip(painter.clip_rect().intersect(m.rect), m, &model.axis, key.replay_ns);
         let detailed_clip = state.heat.as_ref().map(|cache| {
             let cutoff = cache.key.replay_ns
@@ -1377,7 +1544,7 @@ fn draw_heatmap(
     }
 
     let available = |study: Study| {
-        exact && settings.heat_layer_enabled(study) && (!study.requires_trades() || model.tape.is_some())
+        settings.heat_layer_enabled(study) && (!study.requires_trades() || model.tape.is_some())
     };
     let markers = std::array::from_fn(|index| {
         available(heatmap_studies::MARKER_STUDIES[index]).then_some(settings.flow_marker_minimum[index])
@@ -1414,8 +1581,7 @@ fn draw_heatmap(
         });
         state.flow_heat = Some(FlowHeatCache { key: ready.key, markers: ready.layers.markers, net: ready.layers.net, texture });
     }
-    if !worker.pending && state.flow_heat.as_ref().is_none_or(|cache| cache.key != flow_key) {
-        let replay_until = flow_key.heat.replay_ns.map_or(i64::MAX, |ts| ts.saturating_add(1));
+    if exact && !worker.pending && state.flow_heat.as_ref().is_none_or(|cache| cache.key != flow_key) {
         let (top, bottom) = spec.price_range();
         let query = FlowQuery {
             prices: if show_net { (prices.0.min(bottom), prices.1.max(top)) } else { prices },
@@ -1432,7 +1598,7 @@ fn draw_heatmap(
         };
         let job = FlowHeatJob {
             key: flow_key, query, trades_from: from.saturating_sub(heatmap_studies::FLOW_LOOKBACK_NS),
-            axis: model.axis.clone(), store: model.depth.clone(), window: depth_window.and(model.depth_window.clone()),
+            axis: model.axis.clone(), store: model.depth.clone(), window: window.cloned(),
             tape: model.tape.as_ref().filter(|_| show_net || markers[2].is_some()).cloned(),
         };
         if worker.jobs.send(job).is_ok() {
@@ -2221,7 +2387,7 @@ fn overlay_visible(settings: &Settings, group: Option<&str>, ungrouped: bool) ->
 }
 
 fn draw_boxes(painter: &Painter, model: &Model, settings: &Settings, m: &Mapper) {
-    for b in &model.overlays.boxes {
+    for b in model.overlays.boxes.values() {
         if b.x1 < m.x0 || b.x0 > m.x1
             || !overlay_visible(settings, b.group.as_deref(), settings.show_overlays)
         {
@@ -2340,7 +2506,7 @@ fn draw_big_trade_marker(
 fn draw_overlays(painter: &Painter, model: &Model, m: &Mapper, settings: &Settings) {
     let overlays = &model.overlays;
     let max_points = (m.rect.width() * 4.0) as usize;
-    for line in overlays.lines.iter().filter(|_| settings.show_overlays) {
+    for line in overlays.lines().filter(|_| settings.show_overlays) {
         let i0 = line.points.partition_point(|p| p.0 < m.x0).saturating_sub(1);
         let i1 = (line.points.partition_point(|p| p.0 <= m.x1) + 1).min(line.points.len());
         if i1 <= i0 + 1 {
@@ -2593,8 +2759,14 @@ fn bubble_tooltip(model: &Model, dot: PlottedBubble, delta: bool) -> String {
     info
 }
 
-fn resting_liquidity_tooltip(model: &Model, m: &Mapper, pointer: Pos2, metric: HeatMetric) -> Option<String> {
-    let (price, [bid, ask]) = model.resting_liquidity_at(m.x_at(pointer.x), m.p_at(pointer.y))?;
+fn resting_liquidity_tooltip(
+    model: &Model,
+    m: &Mapper,
+    pointer: Pos2,
+    metric: HeatMetric,
+    hover_window: Option<&DepthWindow>,
+) -> Option<String> {
+    let (price, [bid, ask]) = model.resting_liquidity_at(m.x_at(pointer.x), m.p_at(pointer.y), hover_window)?;
     let visible_size = match metric {
         HeatMetric::Total => bid + ask,
         HeatMetric::Bid => bid,
@@ -2625,7 +2797,10 @@ fn heatmap_tooltip(
             if let Some(value) = heat_cell(&cache.key.spec, &depth.cells, m, pointer) {
                 lines.push(format!("Filtered resting liquidity  {}", tooltip_size(f64::from(value))));
             }
-        } else if let Some(info) = resting_liquidity_tooltip(model, m, pointer, metric) {
+        } else if let Some(info) = resting_liquidity_tooltip(
+            model, m, pointer, metric,
+            state.hover_depth.ready.as_ref().and_then(|(_, window)| window.as_ref()),
+        ) {
             lines.push(info);
         }
     }
@@ -2696,8 +2871,79 @@ fn bubble_color(buy_share: f32, [buy, sell]: [Color32; 2]) -> Color32 {
     )
 }
 
-/// Shade each side of a mixed sphere separately using Bookmap's lighting constants.
+const SPHERE_SIDES: usize = 36;
+const SPHERE_RINGS: [f32; 4] = [0.35, 0.65, 0.86, 1.0];
+const SPHERE_FRINGE: f32 = 0.75;
+
+struct SingleColorSphere {
+    directions: [egui::Vec2; SPHERE_SIDES + 1],
+    colors: Vec<Color32>,
+    indices: Vec<u32>,
+}
+
+impl SingleColorSphere {
+    fn new(buy_share: f32, colors: [Color32; 2]) -> Self {
+        let mut mesh = egui::Mesh::default();
+        add_shaded_sphere(&mut mesh, Pos2::ZERO, 1.0, buy_share, 255, colors);
+        let stride = SPHERE_SIDES + 1;
+        let edge = 1 + (SPHERE_RINGS.len() - 1) * stride;
+        // The outer opaque ring of a unit sphere stores the original radial directions.
+        let directions = std::array::from_fn(|i| mesh.vertices[edge + i].pos.to_vec2());
+        let colors = mesh.vertices[..edge + stride].iter().map(|vertex| vertex.color).collect();
+        Self { directions, colors, indices: mesh.indices }
+    }
+
+    fn append(&self, mesh: &mut egui::Mesh, center: Pos2, radius: f32, opacity: u8) {
+        let base = mesh.vertices.len() as u32;
+        let with_opacity = |color: Color32| {
+            Color32::from_rgba_unmultiplied(color.r(), color.g(), color.b(), opacity)
+        };
+        mesh.vertices.reserve(self.colors.len() + self.directions.len());
+        mesh.colored_vertex(center, with_opacity(self.colors[0]));
+        for (ring, colors) in SPHERE_RINGS.into_iter().zip(self.colors[1..].chunks_exact(self.directions.len())) {
+            let distance = ring * radius;
+            for (&direction, &color) in self.directions.iter().zip(colors) {
+                mesh.colored_vertex(center + direction * distance, with_opacity(color));
+            }
+        }
+        let fringe = (1.0 + SPHERE_FRINGE / radius) * radius;
+        for &direction in &self.directions {
+            mesh.colored_vertex(center + direction * fringe, Color32::TRANSPARENT);
+        }
+        mesh.indices.extend(self.indices.iter().map(|&index| base + index));
+    }
+}
+
 fn add_sphere(
+    mesh: &mut egui::Mesh, center: Pos2, radius: f32, buy_share: f32, opacity: u8,
+    colors: [Color32; 2],
+) {
+    let side = match buy_share {
+        1.0 => Some(0),
+        0.0 => Some(1),
+        _ => None,
+    };
+    let palette = if colors == BOOKMAP_BUBBLES {
+        Some(0)
+    } else if colors == CYAN_VIOLET_BUBBLES {
+        Some(1)
+    } else {
+        None
+    };
+    if let (Some(side), Some(palette)) = (side, palette) {
+        static TEMPLATES: OnceLock<[[SingleColorSphere; 2]; 2]> = OnceLock::new();
+        let templates = TEMPLATES.get_or_init(|| {
+            [BOOKMAP_BUBBLES, CYAN_VIOLET_BUBBLES]
+                .map(|colors| [1.0, 0.0].map(|share| SingleColorSphere::new(share, colors)))
+        });
+        templates[palette][side].append(mesh, center, radius, opacity);
+    } else {
+        add_shaded_sphere(mesh, center, radius, buy_share, opacity, colors);
+    }
+}
+
+/// Shade each side of a mixed sphere separately using Bookmap's lighting constants.
+fn add_shaded_sphere(
     mesh: &mut egui::Mesh, center: Pos2, radius: f32, buy_share: f32, opacity: u8,
     [buy, sell]: [Color32; 2],
 ) {
@@ -2712,7 +2958,7 @@ fn add_sphere(
         if arc <= 0.0 {
             continue;
         }
-        let sides = ((arc / TAU * 36.0).ceil() as u32).max(1);
+        let sides = ((arc / TAU * SPHERE_SIDES as f32).ceil() as u32).max(1);
         let stride = sides + 1;
         let base = mesh.vertices.len() as u32;
         let shade = |x: f32, y: f32, alpha: u8| {
@@ -2723,9 +2969,9 @@ fn add_sphere(
             Color32::from_rgba_unmultiplied(channel(color.r()), channel(color.g()), channel(color.b()), alpha)
         };
         mesh.colored_vertex(center, shade(0.0, 0.0, opacity));
-        for (ring, r) in [0.35, 0.65, 0.86, 1.0, 1.0 + 0.75 / radius].into_iter().enumerate() {
+        for (ring, r) in SPHERE_RINGS.into_iter().chain([1.0 + SPHERE_FRINGE / radius]).enumerate() {
             let ring_start = base + 1 + ring as u32 * stride;
-            let alpha = if ring < 4 { opacity } else { 0 };
+            let alpha = if ring < SPHERE_RINGS.len() { opacity } else { 0 };
             for i in 0..=sides {
                 let angle = start + arc * i as f32 / sides as f32;
                 let (y, x) = angle.sin_cos();
@@ -3287,6 +3533,7 @@ mod tests {
                     ] },
                     LiquiditySnapshot { ts_ns: start + second, levels: vec![level(100.25, 0.0, 35.0)] },
                     LiquiditySnapshot { ts_ns: start + 2 * second, levels: Vec::new() },
+                    LiquiditySnapshot { ts_ns: start + 3 * second, levels: vec![level(100.25, 20.0, 35.0)] },
                 ],
             },
             series: Vec::new(),
@@ -3308,11 +3555,11 @@ mod tests {
             if viewer.model.replay_clock().is_none_or(|previous| previous > ts_ns) {
                 viewer.model.start_replay(0);
             }
-            viewer.model.replay_apply(&[crate::Tick { ts_ns, price: 100.0, size: 1.0, side: 1 }], ts_ns);
+            viewer.model.replay_apply(&[crate::Tick { ts_ns, price: 100.0, size: 1.0, side: 1 }], ts_ns, None);
             viewer.settings.mode = mode;
             let input = egui::RawInput { screen_rect: Some(screen), ..Default::default() };
             let mut output = ctx.run_ui(input, |ui| {
-                price_panel(ui, &viewer.model, &mut viewer.settings, &mut viewer.chart, None, &mut VpTool::default(), false);
+                price_panel(ui, &viewer.model, &mut viewer.settings, &mut viewer.chart, None, &mut VpTool::default(), false, None);
             });
             output.textures_delta.clear();
             output.shapes
@@ -3337,21 +3584,37 @@ mod tests {
                 _ => None,
             }).collect::<Vec<_>>()
         };
+        let depth_label = |shapes: &[egui::epaint::ClippedShape], size: &str| {
+            shapes.iter().find_map(|entry| match &entry.shape {
+                Shape::Text(text)
+                    if text.galley.text() == size && (plot_right..axis_left).contains(&text.pos.x) =>
+                {
+                    Some(text.pos)
+                }
+                _ => None,
+            })
+        };
         for mode in [ChartMode::Heatmap, ChartMode::Bar] {
             let bid = draw(mode, second);
             let ask = draw(mode, 2 * second);
             let cleared = draw(mode, 3 * second);
+            let both = draw(mode, 4 * second);
             let bid_bars = depth_bars(&bid);
             let ask_bars = depth_bars(&ask);
             assert_eq!((bid_bars.len(), ask_bars.len()), (1, 1));
-            assert_eq!(bid_bars[0].0, CYAN_VIOLET_BUBBLES[0]);
+            assert!(bid_bars.iter().all(|bar| bar.0 == CYAN_VIOLET_BUBBLES[0]));
             assert_eq!(ask_bars[0].0, CYAN_VIOLET_BUBBLES[1]);
             assert!(ask_bars[0].1 < bid_bars[0].1);
             assert!(depth_bars(&cleared).is_empty());
-            for (shapes, size) in [(&bid, "20"), (&ask, "35")] {
-                assert!(shapes.iter().any(|shape| matches!(&shape.shape, Shape::Text(text)
-                    if text.galley.text() == size && (plot_right..axis_left).contains(&text.pos.x))));
-            }
+            let bid_label = depth_label(&bid, "20").unwrap();
+            let ask_label = depth_label(&ask, "35").unwrap();
+            let divider = (plot_right + axis_left) * 0.5;
+            assert_eq!(bid_label.x, ask_label.x);
+            let both_bid = depth_label(&both, "20").unwrap();
+            assert!(ask_label.x < both_bid.x && both_bid.x < divider);
+            assert_eq!(depth_label(&both, "35"), Some(ask_label));
+            assert!(!bid.iter().any(|shape| matches!(&shape.shape, Shape::Text(text)
+                if text.galley.text() == "8" && (plot_right..axis_left).contains(&text.pos.x))));
             assert!(bid.iter().any(|shape| matches!(&shape.shape, Shape::Text(text)
                 if text.galley.text() == "100.00" && text.pos.x >= axis_left)));
             if mode == ChartMode::Heatmap {
@@ -3363,6 +3626,43 @@ mod tests {
                 assert!(heat_rows(&cleared).is_empty());
             }
         }
+    }
+
+    #[test]
+    fn replay_depth_groups_keep_the_largest_size_on_each_side() {
+        let rect = Rect::from_min_size(Pos2::ZERO, egui::vec2(132.0, 200.0));
+        let mut mapper = Mapper { rect, x0: 0.0, x1: 1.0, p0: 94.0, p1: 106.0 };
+        let levels = [
+            LiquidityLevel { price: 99.75, bid_size: 80.0, ask_size: 300.0 },
+            LiquidityLevel { price: 100.0, bid_size: 240.0, ask_size: 0.0 },
+            LiquidityLevel { price: 100.25, bid_size: 130.0, ask_size: 20.0 },
+            LiquidityLevel { price: 101.0, bid_size: 40.0, ask_size: 60.0 },
+        ];
+        let rows = replay_depth_label_rows(mapper, rect, 0.25, 14.0, levels.iter()).collect::<Vec<_>>();
+        assert_eq!(rows, [(mapper.sy(100.0), [240.0, 300.0]), (mapper.sy(101.0), [40.0, 60.0])]);
+
+        (mapper.p0, mapper.p1) = (99.25, 101.75);
+        let rows = replay_depth_label_rows(mapper, rect, 0.25, 14.0, levels.iter()).collect::<Vec<_>>();
+        assert_eq!(rows.len(), levels.len());
+        for ((y, sizes), level) in rows.into_iter().zip(levels) {
+            assert_eq!((y, sizes), (mapper.sy(level.price), [level.bid_size, level.ask_size]));
+        }
+    }
+
+    #[test]
+    fn replay_depth_highlights_local_peaks_and_skips_large_flat_clusters() {
+        let levels: Vec<_> = (0..48).map(|i| LiquidityLevel {
+            price: 100.0 + f64::from(i) * 0.25,
+            bid_size: if i < 36 && i % 6 == 3 { 30.0 } else if i >= 36 { 100.0 } else { 10.0 },
+            ask_size: if i == 12 { 200.0 } else { 50.0 },
+        }).collect();
+        let bid_peak_indices: Vec<_> = (0..levels.len())
+            .filter(|&i| prominent_depth_sides(&levels, i, 0.25)[1])
+            .collect();
+        assert_eq!(&bid_peak_indices[..6], [3, 9, 15, 21, 27, 33]);
+        assert!(!bid_peak_indices.contains(&42));
+        assert_eq!(prominent_depth_sides(&levels, 12, 0.25), [true, false]);
+        assert_eq!(prominent_depth_sides(&levels, 13, 0.25), [false, false]);
     }
 
     #[test]
@@ -3385,7 +3685,7 @@ mod tests {
         let mut viewer = crate::Viewer::new(result, options, &[], None, Default::default());
         viewer.model.start_replay(0);
         let ts_ns = viewer.model.full_bars()[0].ts_first_ns;
-        viewer.model.replay_apply(&[crate::Tick { ts_ns, price: 100.0, size: 10.0, side: 1 }], ts_ns);
+        viewer.model.replay_apply(&[crate::Tick { ts_ns, price: 100.0, size: 10.0, side: 1 }], ts_ns, None);
         assert_eq!(viewer.model.bars().len(), 1);
 
         let mut state = ChartState::new(viewer.model.xmap.total(), AxisMode::Time);
@@ -3395,7 +3695,7 @@ mod tests {
         let screen = Rect::from_min_size(Pos2::ZERO, egui::vec2(680.0, 420.0));
         let input = egui::RawInput { screen_rect: Some(screen), ..Default::default() };
         let mut output = egui::Context::default().run_ui(input, |ui| {
-            price_panel(ui, &viewer.model, &mut viewer.settings, &mut state, None, &mut VpTool::default(), false);
+            price_panel(ui, &viewer.model, &mut viewer.settings, &mut state, None, &mut VpTool::default(), false, None);
         });
         output.textures_delta.clear();
         let footprints: Vec<_> = output.shapes.iter().filter_map(|entry| {
@@ -3910,7 +4210,7 @@ mod tests {
             p0: 99.0,
             p1: 101.0,
         };
-        let hover = |x, price, metric| resting_liquidity_tooltip(&model, &m, m.pos(x, price), metric);
+        let hover = |x, price, metric| resting_liquidity_tooltip(&model, &m, m.pos(x, price), metric, None);
         assert_eq!(
             hover(0.75, 100.21, HeatMetric::Total).as_deref(),
             Some("Resting liquidity @ 100.25\nBid 0   Ask 48")
@@ -3919,6 +4219,56 @@ mod tests {
         assert!(hover(0.75, 100.21, HeatMetric::Bid).is_none());
         assert!(hover(0.25, 100.21, HeatMetric::Total).is_none());
         assert!(hover(1.75, 100.21, HeatMetric::Total).is_none());
+    }
+
+    #[test]
+    fn liquidity_hover_loads_exact_chunked_depth_instead_of_an_overview_average() {
+        use accelerando_core::{DataSource, OrderFlowEvent, Side};
+
+        struct Events(Vec<OrderFlowEvent>);
+        impl DataSource for Events {
+            fn events(self: Box<Self>) -> Box<dyn Iterator<Item = OrderFlowEvent>> {
+                Box::new(self.0.into_iter())
+            }
+        }
+
+        let sec = data::SEC_NS;
+        let level = |ts_ns, size| OrderFlowEvent::SetLevel {
+            ts_ns, price: 100.25, size, side: Side::Buy,
+        };
+        let (_, store) = DepthStore::build_with(Box::new(Events(vec![
+            OrderFlowEvent::Contract { tick_size: 0.25, multiplier: 50.0 },
+            level(sec, 88.0),
+            level(2 * sec + sec / 2, 91.0),
+            level(8 * sec, 90.0),
+        ])), None, 60 * sec, 30 * sec).unwrap();
+        let result = accelerando_core::BacktestResult {
+            metrics: Default::default(), trades: Vec::new(), equity: Vec::new(),
+            footprints: [sec, 8 * sec].map(|ts| accelerando_core::testkit::bar(ts).price(100.25).build()).to_vec(),
+            liquidity_heatmap: Default::default(), series: Vec::new(),
+            counters: Default::default(), tick_size: 0.25, multiplier: 50.0,
+        };
+        let mut model = Model::new(result, &Default::default(), &[], None, store);
+        model.set_axis_mode(AxisMode::Time);
+        let ts = 2 * sec + sec / 4;
+        let x = model.axis.to_x(ts);
+        assert_eq!(model.book_hover_time(x), Some(ts));
+        let overview = model.depth.overview().resting_size_at(100.25, ts).unwrap();
+        assert_ne!(overview.1[0].fract(), 0.0);
+        assert!(model.resting_liquidity_at(x, 100.25, None).is_none());
+
+        let ctx = egui::Context::default();
+        let mut hover = HoverDepth::default();
+        let deadline = Instant::now() + std::time::Duration::from_secs(2);
+        while hover.ready.is_none() && Instant::now() < deadline {
+            hover.request(&ctx, &model.depth, ts);
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        let window = hover.ready.unwrap().1.unwrap();
+        assert_eq!(
+            model.resting_liquidity_at(x, 100.25, Some(&window)),
+            Some((100.25, [88.0, 0.0])),
+        );
     }
 
     #[test]
@@ -3992,5 +4342,26 @@ mod tests {
         assert!(mesh.vertices.iter().any(|vertex| vertex.color.a() == 0));
         let center = mesh.vertices[0].color;
         assert!(mesh.vertices.iter().any(|vertex| vertex.color.a() == center.a() && vertex.color != center));
+    }
+
+    #[test]
+    fn cached_single_color_spheres_match_shaded_vertices_and_indices() {
+        let mut cached = egui::Mesh::default();
+        let mut original = egui::Mesh::default();
+        for palette in [BOOKMAP_BUBBLES, CYAN_VIOLET_BUBBLES] {
+            for side in [0.0, 1.0] {
+                for (center, radius, opacity) in [
+                    (Pos2::ZERO, 3.0, 255),
+                    (pos2(-19.3, 27.8), 12.7, 191),
+                    (pos2(820.62, 360.22), 60.0, 8),
+                    (pos2(23.0, 39.0), 4.2, 0),
+                ] {
+                    add_sphere(&mut cached, center, radius, side, opacity, palette);
+                    add_shaded_sphere(&mut original, center, radius, side, opacity, palette);
+                }
+            }
+        }
+        assert_eq!(cached.vertices, original.vertices);
+        assert_eq!(cached.indices, original.indices);
     }
 }

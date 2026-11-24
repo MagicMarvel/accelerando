@@ -25,11 +25,13 @@ mod market_history;
 mod native_windows;
 mod big_trades;
 mod overlay;
+mod performance;
 pub mod replay;
 mod replay_bubbles;
 mod vp;
 
 use std::sync::{mpsc, Arc};
+use std::time::Instant;
 
 use accelerando_core::{BacktestResult, DepthHistory, DepthStore, DepthWindow, Footprint, LiquidityLevel, PreparedEventData};
 use eframe::egui;
@@ -41,6 +43,7 @@ const POSITIVE_DELTA_COLOR: egui::Color32 = egui::Color32::from_rgb(0x17, 0x3e, 
 const NEGATIVE_DELTA_COLOR: egui::Color32 = egui::Color32::from_rgb(0x8c, 0x30, 0x3a);
 
 use chart::ChartState;
+use performance::{FrameTiming, Performance, Phase, Playback};
 pub use bars::{aggregate, BarKind, BarSpec, Rebar};
 pub use data::{AxisMode, TimeZone};
 use data::{BarAxis, BookGrid, HeatMetric, TimeAxis, XMap, SEC_NS};
@@ -247,6 +250,8 @@ fn install_cjk_font(ctx: &egui::Context) {
 
 /// Views spanning at most this long load exact depth from a chunked [`DepthStore`].
 pub const EXACT_DEPTH_SPAN_NS: i64 = 12 * 3600 * SEC_NS;
+const DEPTH_WINDOW_MAX_CHANGES: usize = 1_000_000;
+const DEPTH_CURSOR_WINDOW_NS: i64 = 60 * SEC_NS;
 
 /// Bar-axis pauses longer than this become an empty spacer (overnight, weekend, lunch break).
 const BAR_GAP_SECS: i64 = 1800;
@@ -279,7 +284,6 @@ pub(crate) struct Model {
     /// Bars visible during a replay; `None` shows everything.
     replay: Option<ReplayBars>,
     /// Strategy bars the overlays were built from (fewer than all during a replay).
-    overlay_bars: usize,
     pub equity_x: Vec<f64>,
     /// `(entry x, exit x)` per trade.
     pub trade_x: Vec<(f64, f64)>,
@@ -292,6 +296,9 @@ pub(crate) struct Model {
     pub depth: DepthStore,
     /// Exact depth of the stretch last viewed closely (chunked stores only).
     pub depth_window: Option<Arc<DepthWindow>>,
+    /// Keep the replay book available when the history viewport has a separate window.
+    replay_depth_window: Option<Arc<DepthWindow>>,
+    depth_limited: Option<(i64, i64)>,
     /// Time zone of every time shown.
     pub tz: TimeZone,
     pub price_decimals: usize,
@@ -397,7 +404,6 @@ impl Model {
             fp_x: Vec::new(),
             fp_x_all: Vec::new(),
             replay: None,
-            overlay_bars: usize::MAX,
             equity_x: Vec::new(),
             trade_x: Vec::new(),
             overlays: Overlays::default(),
@@ -412,6 +418,8 @@ impl Model {
             tape,
             depth,
             depth_window: None,
+            replay_depth_window: None,
+            depth_limited: None,
             tz: TimeZone::from_hours(options.utc_offset_hours),
             price_decimals,
             median_bar_secs: 60.0,
@@ -459,7 +467,8 @@ impl Model {
     }
 
     /// Feed trades into the replay and move its clock to `clock_ns`.
-    pub fn replay_apply(&mut self, ticks: &[replay::Tick], clock_ns: i64) {
+    pub fn replay_apply(&mut self, ticks: &[replay::Tick], clock_ns: i64, timing: Option<&mut FrameTiming>) {
+        let start = timing.as_ref().map(|_| Instant::now());
         let full: &[Footprint] = match &self.display {
             Some((_, bars)) => bars,
             None => &self.result.footprints,
@@ -467,7 +476,14 @@ impl Model {
         let Some(replay) = self.replay.as_mut() else { return };
         replay.apply_ticks(ticks, full);
         replay.set_clock(clock_ns, full);
-        self.sync_replay();
+        if let (Some(timing), Some(start)) = (timing, start) {
+            timing.finish(Phase::ReplayBars, start);
+            let start = Instant::now();
+            self.sync_replay();
+            timing.finish(Phase::ReplayOverlays, start);
+        } else {
+            self.sync_replay();
+        }
     }
 
     /// Replay time, when one is running: nothing later is shown.
@@ -508,13 +524,10 @@ impl Model {
             Some(replay) => fps.partition_point(|f| f.ts_last_ns < replay.clock_ns),
             None => fps.len(),
         };
-        if k != self.overlay_bars {
-            self.overlay_bars = k;
-            let xmap = &self.xmap;
-            self.overlays = Overlays::build(&fps[..k], &self.result.series, &|i| {
-                (xmap.to_x(fps[i].ts_first_ns), xmap.to_x(fps[i].ts_last_ns))
-            });
-        }
+        let xmap = &self.xmap;
+        self.overlays.sync(&fps[..k], &self.result.series, &|i| {
+            (xmap.to_x(fps[i].ts_first_ns), xmap.to_x(fps[i].ts_last_ns))
+        });
     }
 
     /// Show other bars (`None` = the strategy's own) and rebuild every x coordinate.
@@ -572,7 +585,7 @@ impl Model {
         // Strategy overlays are anchored to the strategy's own bars; map them by time so they
         // land in the right place whatever bars are displayed.
         self.fp_x.clear();
-        self.overlay_bars = usize::MAX;
+        self.overlays = Overlays::default();
         self.sync_replay();
     }
 
@@ -596,12 +609,14 @@ impl Model {
     /// Exact depth for `[from, until)` when loaded (or the store is in memory), else the
     /// overview; the second value identifies the window for heatmap caching.
     pub fn depth_at(&self, from: i64, until: i64) -> (&DepthHistory, Option<(i64, i64)>) {
-        match &self.depth_window {
-            Some(window) if window.covers(from, until) => {
-                (&window.history, Some((window.from, window.until)))
-            }
-            _ => (self.depth.overview(), None),
-        }
+        self.exact_depth_window(from, until).map_or((self.depth.overview(), None), |window| {
+            (&window.history, Some((window.from, window.until)))
+        })
+    }
+
+    fn exact_depth_window(&self, from: i64, until: i64) -> Option<&Arc<DepthWindow>> {
+        self.depth_window.as_ref().into_iter().chain(self.replay_depth_window.as_ref())
+            .find(|window| window.covers(from, until))
     }
 
     pub fn has_heatmap(&self) -> bool {
@@ -644,22 +659,35 @@ impl Model {
         (self.has_heatmap() || self.has_trade_quotes) && self.xmap.mode() == AxisMode::Time
     }
 
-    /// Resting size at the hovered tick, within the visible part of the book.
-    fn resting_liquidity_at(&self, x: f64, price: f64) -> Option<(f64, [f64; 2])> {
+    fn book_hover_time(&self, x: f64) -> Option<i64> {
         if !self.book_visible() || !(0.0..self.axis.total()).contains(&x) {
             return None;
         }
         let ts = self.axis.to_ts(x);
-        if self.replay_clock().is_some_and(|clock| ts > clock) {
-            return None;
-        }
+        self.replay_clock().is_none_or(|clock| ts <= clock).then_some(ts)
+    }
+
+    /// Resting size at the hovered tick, using observations available at that time.
+    fn resting_liquidity_at(
+        &self,
+        x: f64,
+        price: f64,
+        hover_window: Option<&DepthWindow>,
+    ) -> Option<(f64, [f64; 2])> {
+        let ts = self.book_hover_time(x)?;
         if !self.depth.is_empty() {
-            return self.depth_at(ts, ts + 1).0.resting_size_at(price, ts);
+            let until = ts.saturating_add(1);
+            let depth = if self.depth.is_exact() {
+                self.depth.overview()
+            } else {
+                let window = self.exact_depth_window(ts, until).map(Arc::as_ref)
+                    .or_else(|| hover_window.filter(|window| window.covers(ts, until)))?;
+                &window.history
+            };
+            return depth.resting_size_at(price, ts);
         }
 
-        let snapshots = &self.result.liquidity_heatmap.snapshots;
-        let i = snapshots.partition_point(|snapshot| snapshot.ts_ns <= ts).checked_sub(1)?;
-        let snapshot = &snapshots[i];
+        let snapshot = self.replay_snapshots(Some(ts)).last()?;
         let segment = self.axis.segments.partition_point(|segment| segment.x0 <= x);
         if snapshot.ts_ns < self.axis.segments[segment - 1].t0_ns {
             return None;
@@ -776,6 +804,7 @@ struct Viewer {
     toolbar_popup: Option<ToolbarPopup>,
     metrics_open: bool,
     trades_open: bool,
+    performance: Performance,
     /// Bars the strategy ran on, and the host's bar builder.
     strategy_spec: Option<BarSpec>,
     rebar: Option<Rebar>,
@@ -791,9 +820,32 @@ struct Viewer {
     replay: Replay,
     ticks: Option<TickSource>,
     /// Background load of exact depth: the requested range and its result.
-    depth_loading: Option<((i64, i64), mpsc::Receiver<Result<DepthWindow, String>>)>,
+    depth_loading: Option<DepthLoad>,
+    depth_cursor_failed: Option<(i64, i64)>,
     market_loading: Option<mpsc::Receiver<Result<LoadedMarket, String>>>,
     market_error: Option<String>,
+}
+
+struct DepthLoad {
+    range: (i64, i64),
+    cursor: bool,
+    rx: mpsc::Receiver<Result<Option<DepthWindow>, String>>,
+}
+
+fn depth_view_range(
+    from: i64,
+    until: i64,
+    replay: Option<i64>,
+    heat_lookback: Option<i64>,
+) -> (i64, i64) {
+    let Some(lookback) = heat_lookback else {
+        return replay.map_or((from, until), |clock| (from.min(clock), until.max(clock.saturating_add(1))));
+    };
+    // The raster can round outwards by one column (at least 16 columns).
+    let margin = until.saturating_sub(from) / 16 + lookback + 1;
+    let start = from.saturating_sub(margin);
+    let end = until.saturating_add(margin);
+    replay.map_or((start, end), |clock| (start.min(clock), end.min(clock.saturating_add(1))))
 }
 
 impl Viewer {
@@ -868,6 +920,7 @@ impl Viewer {
             toolbar_popup: None,
             metrics_open: false,
             trades_open: false,
+            performance: Performance::default(),
             strategy_spec: options.bar_spec,
             rebar: options.rebar.clone(),
             bar_dialog_open: false,
@@ -882,6 +935,7 @@ impl Viewer {
             replay: Replay::default(),
             ticks: options.ticks.clone(),
             depth_loading: None,
+            depth_cursor_failed: None,
             market_loading: None,
             market_error: None,
         }
@@ -969,7 +1023,10 @@ impl Viewer {
         model.tape = data.tape;
         model.depth = data.depth;
         model.depth_window = None;
+        model.replay_depth_window = None;
+        model.depth_limited = None;
         self.depth_loading = None;
+        self.depth_cursor_failed = None;
         self.rebar = options.rebar;
         self.ticks = options.ticks;
         if self.settings.smoothing_secs == options.smoothing_secs {
@@ -1346,6 +1403,8 @@ impl Viewer {
         });
         ui.checkbox(&mut self.metrics_open, "Metrics");
         ui.checkbox(&mut self.trades_open, format!("Trade list ({trade_count})"));
+        ui.checkbox(&mut self.performance.open, "Performance")
+            .on_hover_text("Measure frame times and layer lag while replay is playing.");
 
         ui.separator();
         ui.strong("Chart");
@@ -1424,66 +1483,85 @@ impl Viewer {
         if model.depth.is_exact() {
             return;
         }
-        if let Some((_, rx)) = &self.depth_loading {
-            match rx.try_recv() {
-                Ok(Ok(window)) => {
-                    model.depth_window = Some(Arc::new(window));
-                    self.depth_loading = None;
+        if let Some(load) = &self.depth_loading {
+            match load.rx.try_recv() {
+                Ok(Ok(Some(window))) => {
+                    if load.cursor {
+                        model.replay_depth_window = Some(Arc::new(window));
+                    } else {
+                        model.depth_window = Some(Arc::new(window));
+                    }
                 }
-                Ok(Err(error)) => {
-                    eprintln!("depth: {error}");
-                    self.depth_loading = None;
+                Err(mpsc::TryRecvError::Empty) => return,
+                failure => {
+                    if let Ok(Err(error)) = failure {
+                        eprintln!("depth: {error}");
+                    }
+                    if load.cursor {
+                        self.depth_cursor_failed = Some(load.range);
+                    } else {
+                        model.depth_limited = Some(load.range);
+                    }
                 }
-                Err(mpsc::TryRecvError::Empty) => {}
-                Err(mpsc::TryRecvError::Disconnected) => self.depth_loading = None,
             }
+            self.depth_loading = None;
         }
         let replay = model.replay_clock();
         let total = model.axis.total();
-        let mut from = model.axis.to_ts(self.chart.x0.clamp(0.0, total));
-        let mut until = model.axis.to_ts(self.chart.x1.clamp(0.0, total)).saturating_add(1);
-        if let Some(clock) = replay {
-            // Keep the current book available while the chart is panned near the cursor.
-            from = from.min(clock);
-            until = until.max(clock.saturating_add(1));
-        }
-        let span = until.saturating_sub(from);
+        let visible_from = model.axis.to_ts(self.chart.x0.clamp(0.0, total));
+        let visible_until = model.axis.to_ts(self.chart.x1.clamp(0.0, total)).saturating_add(1);
+        let span = visible_until.saturating_sub(visible_from);
         let time_view = model.xmap.mode() == AxisMode::Time && total > 0.0;
-        let cursor_only = !time_view || span > EXACT_DEPTH_SPAN_NS;
-        if cursor_only {
-            let Some(clock) = replay else {
-                if time_view && span > 2 * EXACT_DEPTH_SPAN_NS {
+        let wide = !time_view || span > EXACT_DEPTH_SPAN_NS;
+        let lookback = if !wide && self.settings.mode == ChartMode::Heatmap && self.settings.show_heat {
+            self.settings.heat_layers_lookback()
+        } else {
+            None
+        };
+        let (from, until) = depth_view_range(visible_from, visible_until, replay, lookback);
+        let covered = |range: (i64, i64)| range.0 <= from && until <= range.1;
+        let cursor_request = replay.and_then(|clock| {
+            let start = clock.div_euclid(DEPTH_CURSOR_WINDOW_NS) * DEPTH_CURSOR_WINDOW_NS;
+            let range = (start, start.saturating_add(DEPTH_CURSOR_WINDOW_NS));
+            (self.depth_cursor_failed != Some(range)
+                && model.exact_depth_window(clock, clock.saturating_add(1)).is_none())
+                .then_some((range, Some(clock)))
+        });
+        let (range, cursor) = if let Some(request) = cursor_request {
+            request
+        } else {
+            if wide || (lookback.is_none() && until.saturating_sub(from) > EXACT_DEPTH_SPAN_NS)
+                || model.depth_limited.is_some_and(covered)
+                || model.depth_window.as_ref().is_some_and(|w| w.covers(from, until))
+            {
+                if wide && replay.is_none() && span > 2 * EXACT_DEPTH_SPAN_NS {
                     model.depth_window = None;
                 }
                 return;
-            };
-            // A wide chart can use the overview while the replay edge still uses exact depth.
-            from = clock;
-            until = clock.saturating_add(1);
-        }
-        if !cursor_only && self.settings.mode == ChartMode::Heatmap && self.settings.show_heat {
-            if let Some(lookback) = self.settings.heat_layers_lookback() {
-                let margin = span / 16;
-                from = from.saturating_sub(margin + lookback);
-                until = until.saturating_add(margin + lookback);
             }
-        }
-        let covered = |range: (i64, i64)| range.0 <= from && until <= range.1;
-        if model.depth_window.as_ref().is_some_and(|w| w.covers(from, until))
-            || self.depth_loading.as_ref().is_some_and(|(range, _)| covered(*range))
-        {
-            return;
-        }
-        // Load some margin so panning does not reload at once.
-        let margin = if cursor_only { 0 } else { span / 2 };
-        let range = (from.saturating_sub(margin), until.saturating_add(margin));
+            let margin = if lookback.is_some() { (span / 16).min(20 * SEC_NS) } else { span / 2 };
+            ((from.saturating_sub(margin), until.saturating_add(margin)), None)
+        };
         let (tx, rx) = mpsc::channel();
         let (store, ctx) = (model.depth.clone(), ctx.clone());
         std::thread::spawn(move || {
-            let _ = tx.send(store.load_window(range.0, range.1));
+            let loaded = (|| {
+                let window = store.load_bounded_window(range.0, range.1, DEPTH_WINDOW_MAX_CHANGES)?;
+                match (window, cursor) {
+                    (None, Some(clock)) => store.load_bounded_window(
+                        clock, clock.saturating_add(1), DEPTH_WINDOW_MAX_CHANGES,
+                    ),
+                    (None, None) if range != (from, until) => {
+                        store.load_bounded_window(from, until, DEPTH_WINDOW_MAX_CHANGES)
+                    }
+                    (window, _) => Ok(window),
+                }
+            })();
+            let _ = tx.send(loaded);
             ctx.request_repaint();
         });
-        self.depth_loading = Some((range, rx));
+        let required_range = if cursor.is_some() { range } else { (from, until) };
+        self.depth_loading = Some(DepthLoad { range: required_range, cursor: cursor.is_some(), rx });
     }
 
     fn sync(&mut self) {
@@ -1596,6 +1674,8 @@ impl eframe::App for Viewer {
         if ui.input(|input| input.viewport().close_requested()) {
             return;
         }
+        let frame_start = (self.performance.open && ui.ctx().current_pass_index() == 0)
+            .then(Instant::now);
         self.poll_market();
         let ctx = ui.ctx().clone();
         self.poll_bars(&ctx);
@@ -1607,19 +1687,37 @@ impl eframe::App for Viewer {
         if self.replay.picking && ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
             self.replay.picking = false;
         }
+        let mut timing = frame_start
+            .filter(|_| self.performance.open)
+            .map(|_| FrameTiming::default());
+        let replay_start = timing.as_ref().map(|_| Instant::now());
+        let mut replaying = false;
         if let Some(source) = self.ticks.clone() {
             self.replay.shortcuts(&ctx, &mut self.model);
+            replaying = self.replay.playing();
             let heatmap = self.settings.mode == ChartMode::Heatmap;
-            self.replay.update(&mut self.model, &source, &ctx, heatmap);
+            let applied = self.replay.update(&mut self.model, &source, &ctx, heatmap, timing.as_mut());
+            if let (Some(timing), Some(start)) = (&mut timing, replay_start) {
+                timing.finish(Phase::Replay, start);
+                timing.ticks_applied = applied;
+                timing.ticks_buffered = self.replay.ticks_buffered();
+                timing.ticks_loading = self.replay.loading();
+            }
         }
+        let depth_start = timing.as_ref().map(|_| Instant::now());
         self.chart.sync_replay(self.model.replay_cut_x());
         self.sync_depth(&ctx);
+        if let (Some(timing), Some(start)) = (&mut timing, depth_start) {
+            timing.finish(Phase::Depth, start);
+            timing.depth_loading = self.depth_loading.is_some();
+        }
         if self.settings.show_equity && !self.model.result.equity.is_empty() {
             egui::Panel::bottom("equity")
                 .resizable(true)
                 .default_size(150.0)
                 .show(ui, |ui| chart::equity_panel(ui, &self.model, &self.chart));
         }
+        let chart_start = timing.as_ref().map(|_| Instant::now());
         let chart = egui::CentralPanel::default()
             .show(ui, |ui| {
                 chart::price_panel(
@@ -1630,9 +1728,13 @@ impl eframe::App for Viewer {
                     self.selected_trade,
                     &mut self.vp,
                     self.replay.picking,
+                    timing.as_mut(),
                 )
             })
             .inner;
+        if let (Some(timing), Some(start)) = (&mut timing, chart_start) {
+            timing.finish(Phase::Chart, start);
+        }
         if chart.response.clicked() && self.toolbar_popup.take().is_some() {
             ctx.request_repaint();
         }
@@ -1641,6 +1743,20 @@ impl eframe::App for Viewer {
             self.replay.start(&mut self.model, index, heatmap);
             self.chart.follow_new_replay();
             ctx.request_repaint();
+        }
+        let playing = self.replay.playing();
+        if let (true, Some(start), Some(mut timing)) = (replaying, frame_start, timing) {
+            timing.finish(Phase::Viewer, start);
+            let playback = Playback { speed: self.replay.speed(), mode: self.settings.mode };
+            self.performance.record(start, timing, playback);
+        }
+        if !playing {
+            self.performance.pause();
+        }
+        if self.performance.open {
+            self.performance.show(&ctx, playing);
+        } else {
+            self.performance.close();
         }
     }
 }
@@ -1686,6 +1802,21 @@ fn metrics_rows(result: &BacktestResult) -> Vec<(String, String)> {
 mod tests {
     use super::*;
     use accelerando_core::{OrderFlowEvent, Side};
+
+    #[test]
+    fn replay_heat_depth_only_requires_history_through_the_cursor() {
+        let from = 100 * SEC_NS;
+        let until = 1_700 * SEC_NS + 1;
+        let clock = 1_500 * SEC_NS;
+        let lookback = Some(5 * SEC_NS);
+        assert_eq!(depth_view_range(from, until, Some(clock), lookback), (-5 * SEC_NS - 1, clock + 1));
+        assert_eq!(depth_view_range(from, until, None, lookback).1, 1_805 * SEC_NS + 2);
+        let clock_before_view = from - 200 * SEC_NS;
+        assert_eq!(
+            depth_view_range(from, until, Some(clock_before_view), lookback),
+            (clock_before_view, clock_before_view + 1),
+        );
+    }
 
     fn sample_result() -> BacktestResult {
         BacktestResult {
@@ -1812,6 +1943,11 @@ mod tests {
 
         click(&mut viewer, "Bar");
         assert!(!viewer.settings.show_bbo && !viewer.settings.show_trade_bubbles);
+
+        click(&mut viewer, "⚙ Settings");
+        click(&mut viewer, "Performance");
+        assert!(viewer.performance.open);
+        click(&mut viewer, "⚙ Settings");
 
         viewer.model.start_replay(0);
         viewer.chart.follow_replay = false;

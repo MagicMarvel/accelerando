@@ -9,7 +9,7 @@ use std::time::Instant;
 use accelerando_core::{Footprint, Level, OrderFlowEvent, Side};
 use eframe::egui;
 
-use crate::{chart::ChartState, Model};
+use crate::{chart::ChartState, performance::FrameTiming, Model};
 
 /// One trade of the replay.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -281,7 +281,19 @@ impl Replay {
         self.pending = None;
     }
 
-    fn loading(&self) -> bool {
+    pub fn playing(&self) -> bool {
+        self.playing
+    }
+
+    pub fn speed(&self) -> f64 {
+        self.speed
+    }
+
+    pub fn ticks_buffered(&self) -> usize {
+        self.ticks.len() - self.next
+    }
+
+    pub fn loading(&self) -> bool {
         self.pending.is_some()
     }
 
@@ -313,7 +325,7 @@ impl Replay {
             self.ticks.drain(..self.next);
             self.next = 0;
         }
-        let low = self.ticks.len() - self.next < CHUNK / 4;
+        let low = self.ticks_buffered() < CHUNK / 4;
         if let (true, None, Some(from)) = (low, &self.pending, self.fetch_from) {
             let (tx, rx) = mpsc::channel();
             let (source, ctx) = (Arc::clone(source), ctx.clone());
@@ -326,21 +338,28 @@ impl Replay {
     }
 
     /// Apply buffered ticks up to `clock_ns` and move the model's clock there.
-    fn advance_to(&mut self, model: &mut Model, mut clock_ns: i64) {
+    fn advance_to(
+        &mut self,
+        model: &mut Model,
+        mut clock_ns: i64,
+        timing: Option<&mut FrameTiming>,
+    ) -> usize {
         // Never run ahead of what has been loaded.
         if let Some(from) = self.fetch_from {
             clock_ns = clock_ns.min(from - 1);
         }
         let end = self.next + self.ticks[self.next..].partition_point(|t| t.ts_ns <= clock_ns);
-        model.replay_apply(&self.ticks[self.next..end], clock_ns);
+        model.replay_apply(&self.ticks[self.next..end], clock_ns, timing);
+        let applied = end - self.next;
         self.next = end;
+        applied
     }
 
     /// Advance exactly one trade.
     pub fn step_tick(&mut self, model: &mut Model) {
         self.set_playing(false);
         let Some(tick) = self.ticks.get(self.next).copied() else { return };
-        model.replay_apply(&[tick], tick.ts_ns);
+        model.replay_apply(&[tick], tick.ts_ns, None);
         self.next += 1;
     }
 
@@ -348,7 +367,7 @@ impl Replay {
     pub fn step_bar(&mut self, model: &mut Model) {
         self.set_playing(false);
         if let Some(end) = model.replay_bar_end() {
-            self.advance_to(model, end + 1);
+            self.advance_to(model, end + 1, None);
         }
     }
 
@@ -359,9 +378,11 @@ impl Replay {
         source: &TickSource,
         ctx: &egui::Context,
         heatmap: bool,
-    ) {
-        let Some(clock) = model.replay_clock() else { return };
+        timing: Option<&mut FrameTiming>,
+    ) -> usize {
+        let Some(clock) = model.replay_clock() else { return 0 };
         self.feed(source, ctx);
+        let mut ticks_applied = 0;
         if self.playing {
             let now = Instant::now();
             let deadline = self.clock.get_or_insert(PlaybackClock { wall: now, market_ns: clock });
@@ -374,7 +395,7 @@ impl Replay {
                     target = next.ts_ns;
                 }
             }
-            self.advance_to(model, target);
+            ticks_applied = self.advance_to(model, target, timing);
             let applied = model.replay_clock().unwrap_or(clock);
             if applied != elapsed_target {
                 // Rebase across skipped gaps and data stalls so they create no catch-up burst.
@@ -388,6 +409,7 @@ impl Replay {
         if self.loading() {
             ctx.request_repaint_after(std::time::Duration::from_millis(50));
         }
+        ticks_applied
     }
 
     /// The transport controls shown in the toolbar while a replay is active.

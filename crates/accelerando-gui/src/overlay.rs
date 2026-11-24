@@ -1,5 +1,4 @@
-//! Strategy / indicator overlays (`Footprint::plots` and `BacktestResult::series`) resolved to
-//! chart coordinates once at startup.
+//! Strategy and indicator overlays resolved to chart coordinates as bars become visible.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -43,6 +42,7 @@ pub(crate) struct OverlayBox {
 
 /// A volume profile drawn over the bars `[x0, x1]` (strategy `VolumeProfile*` plots).
 pub(crate) struct OverlayProfile {
+    id: String,
     pub x0: f64,
     pub x1: f64,
     pub levels: Vec<VpLevel>,
@@ -52,14 +52,16 @@ pub(crate) struct OverlayProfile {
 
 #[derive(Default)]
 pub(crate) struct Overlays {
+    bars: usize,
     pub groups: BTreeSet<String>,
     /// Volume profiles, one per id (the last emission wins), sorted by `x0`.
     pub profiles: Vec<OverlayProfile>,
-    pub lines: Vec<OverlayLine>,
+    plot_lines: BTreeMap<String, OverlayLine>,
+    series_lines: Vec<OverlayLine>,
     /// Sorted by x.
     pub markers: Vec<OverlayMarker>,
     pub segments: Vec<OverlaySegment>,
-    pub boxes: Vec<OverlayBox>,
+    pub boxes: BTreeMap<(Option<String>, String), OverlayBox>,
 }
 
 const PALETTE: [Color32; 6] = [
@@ -74,35 +76,47 @@ const PALETTE: [Color32; 6] = [
 impl Overlays {
     /// `footprints` / `series` are the bars the strategy ran on; `bar_x(i)` gives the display x
     /// of bar `i`'s first and last trade (the chart may show different bars).
-    pub fn build(
+    pub fn sync(
+        &mut self,
         footprints: &[Footprint],
         series: &[Series],
         bar_x: &dyn Fn(usize) -> (f64, f64),
-    ) -> Self {
-        let fp_x: Vec<(f64, f64)> = (0..footprints.len()).map(bar_x).collect();
-        let mid = |i: usize| (fp_x[i].0 + fp_x[i].1) * 0.5;
+    ) {
+        let end = footprints.len();
+        if self.bars > end {
+            *self = Self::default();
+        }
+        let start = self.bars;
+        if start == end {
+            return;
+        }
+        let mid = |i: usize| {
+            let (left, right) = bar_x(i);
+            (left + right) * 0.5
+        };
         let back = |i: usize, bars: usize| i.saturating_sub(bars);
-        let mut out = Self::default();
-        let mut lines: BTreeMap<&str, OverlayLine> = BTreeMap::new();
-        // The same box id is re-emitted while a box grows; only its last emission is drawn.
-        let mut boxes: BTreeMap<(Option<&str>, &str), OverlayBox> = BTreeMap::new();
-        let group_name = |group: &Option<String>| {
-            group
-                .as_deref()
-                .map(str::trim)
-                .filter(|name| !name.is_empty())
-                .map(str::to_owned)
+        let groups = &mut self.groups;
+        let mut group_name = |group: &Option<String>| {
+            let name = group.as_deref()?.trim();
+            if name.is_empty() {
+                return None;
+            }
+            if !groups.contains(name) {
+                groups.insert(name.to_owned());
+            }
+            Some(name.to_owned())
         };
         // Profiles may also grow under one id; anonymous ones get a unique key.
         let mut profiles: BTreeMap<String, OverlayProfile> = BTreeMap::new();
+        let markers_start = self.markers.len();
 
-        for (i, fp) in footprints.iter().enumerate() {
+        for (i, fp) in footprints.iter().enumerate().skip(start) {
             for plot in &fp.plots {
                 match plot {
                     Plot::Line { id, value, color } => {
                         if value.is_finite() {
-                            lines
-                                .entry(id.as_str())
+                            self.plot_lines
+                                .entry(id.clone())
                                 .or_insert_with(|| OverlayLine {
                                     color: parse_color(color).unwrap_or(PALETTE[0]),
                                     points: Vec::new(),
@@ -120,7 +134,7 @@ impl Overlays {
                         dashed,
                         text,
                         group,
-                    } => out.segments.push(OverlaySegment {
+                    } => self.segments.push(OverlaySegment {
                         group: group_name(group),
                         from: (mid(back(i, *from_bars_back)), *from_price),
                         to: (mid(back(i, *to_bars_back)), *to_price),
@@ -139,7 +153,7 @@ impl Overlays {
                         if group.as_deref() == Some("big_trades") {
                             continue;
                         }
-                        out.markers.push(OverlayMarker {
+                        self.markers.push(OverlayMarker {
                             group: group_name(group),
                             x: mid(i),
                             price: *price,
@@ -156,7 +170,7 @@ impl Overlays {
                         text,
                         group,
                         ..
-                    } => out.markers.push(OverlayMarker {
+                    } => self.markers.push(OverlayMarker {
                         group: group_name(group),
                         x: mid(back(i, *bars_back)),
                         price: *price,
@@ -173,12 +187,12 @@ impl Overlays {
                         text,
                         group,
                     } => {
-                        boxes.insert(
-                            (group.as_deref(), id.as_str()),
+                        self.boxes.insert(
+                            (group.clone(), id.clone()),
                             OverlayBox {
                                 group: group_name(group),
-                                x0: fp_x[back(i, *span)].0,
-                                x1: fp_x[i].1,
+                                x0: bar_x(back(i, *span)).0,
+                                x1: bar_x(i).1,
                                 low: *low,
                                 high: *high,
                                 color: parse_color(color).unwrap_or(PALETTE[2]),
@@ -197,12 +211,12 @@ impl Overlays {
                         group,
                     } => {
                         let end = back(i, *bars_back);
-                        boxes.insert(
-                            (group.as_deref(), id.as_str()),
+                        self.boxes.insert(
+                            (group.clone(), id.clone()),
                             OverlayBox {
                                 group: group_name(group),
-                                x0: fp_x[back(end, *span)].0,
-                                x1: fp_x[end].1,
+                                x0: bar_x(back(end, *span)).0,
+                                x1: bar_x(end).1,
                                 low: *low,
                                 high: *high,
                                 color: parse_color(color).unwrap_or(PALETTE[2]),
@@ -218,10 +232,11 @@ impl Overlays {
                         };
                         let start = back(i, span.saturating_sub(1));
                         profiles.insert(
-                            key,
+                            key.clone(),
                             OverlayProfile {
-                                x0: fp_x[start].0,
-                                x1: fp_x[i].1,
+                                id: key,
+                                x0: bar_x(start).0,
+                                x1: bar_x(i).1,
                                 levels: levels.clone(),
                                 color: None,
                                 text: String::new(),
@@ -244,10 +259,11 @@ impl Overlays {
                         let end = back(i, *bars_back);
                         let start = back(end, span.saturating_sub(1));
                         profiles.insert(
-                            key,
+                            key.clone(),
                             OverlayProfile {
-                                x0: fp_x[start].0,
-                                x1: fp_x[end].1,
+                                id: key,
+                                x0: bar_x(start).0,
+                                x1: bar_x(end).1,
                                 levels: levels.clone(),
                                 color: color.as_deref().and_then(parse_color),
                                 text: text.clone(),
@@ -259,37 +275,62 @@ impl Overlays {
                 }
             }
         }
-        out.lines.extend(lines.into_values());
-        out.boxes.extend(boxes.into_values());
-        out.profiles
-            .extend(profiles.into_values().filter(|p| !p.levels.is_empty()));
-        out.profiles.sort_by(|a, b| a.x0.total_cmp(&b.x0));
-
-        for (n, series) in series.iter().enumerate() {
-            let points: Vec<(f64, f64)> = series
-                .points
-                .iter()
-                .filter(|(idx, v)| (*idx as usize) < fp_x.len() && v.is_finite())
-                .map(|(idx, v)| (mid(*idx as usize), *v))
-                .collect();
-            if !points.is_empty() {
-                out.lines.push(OverlayLine {
-                    color: parse_color(&series.color).unwrap_or(PALETTE[n % PALETTE.len()]),
-                    points,
-                });
-            }
+        if !profiles.is_empty() {
+            self.profiles
+                .retain(|profile| !profiles.contains_key(&profile.id));
+            self.profiles.extend(
+                profiles
+                    .into_values()
+                    .filter(|profile| !profile.levels.is_empty()),
+            );
+            self.profiles
+                .sort_by(|a, b| a.x0.total_cmp(&b.x0).then_with(|| a.id.cmp(&b.id)));
         }
-        out.markers.sort_by(|a, b| a.x.total_cmp(&b.x));
-        out.groups.extend(
-            out.boxes
+
+        if start == 0 {
+            self.series_lines = series
                 .iter()
-                .map(|plot| &plot.group)
-                .chain(out.segments.iter().map(|plot| &plot.group))
-                .chain(out.markers.iter().map(|plot| &plot.group))
-                .flatten()
-                .cloned(),
-        );
-        out
+                .enumerate()
+                .map(|(n, line)| OverlayLine {
+                    color: parse_color(&line.color).unwrap_or(PALETTE[n % PALETTE.len()]),
+                    points: Vec::new(),
+                })
+                .collect();
+        }
+        for (line, series) in self.series_lines.iter_mut().zip(series) {
+            let first = series
+                .points
+                .partition_point(|&(idx, _)| (idx as usize) < start);
+            let last =
+                first + series.points[first..].partition_point(|&(idx, _)| (idx as usize) < end);
+            line.points.extend(
+                series.points[first..last]
+                    .iter()
+                    .filter(|(_, value)| value.is_finite())
+                    .map(|&(idx, value)| (mid(idx as usize), value)),
+            );
+        }
+        self.markers[markers_start..].sort_by(|a, b| a.x.total_cmp(&b.x));
+        if markers_start > 0
+            && self.markers.get(markers_start).is_some_and(|first| {
+                self.markers[markers_start - 1]
+                    .x
+                    .total_cmp(&first.x)
+                    .is_gt()
+            })
+        {
+            // A newly confirmed marker can be anchored to an earlier bar.
+            self.markers.sort_by(|a, b| a.x.total_cmp(&b.x));
+        }
+        self.bars = end;
+    }
+
+    pub fn lines(&self) -> impl Iterator<Item = &OverlayLine> {
+        self.plot_lines.values().chain(
+            self.series_lines
+                .iter()
+                .filter(|line| !line.points.is_empty()),
+        )
     }
 }
 
@@ -389,11 +430,86 @@ mod tests {
             text: String::new(),
             group: group.clone(),
         });
-        let overlays = Overlays::build(&[bar], &[], &|_| (0.0, 1.0));
+        let mut overlays = Overlays::default();
+        overlays.sync(&[bar], &[], &|_| (0.0, 1.0));
         assert_eq!(overlays.groups, BTreeSet::from(["POC 回踩".to_owned()]));
-        assert_eq!(overlays.boxes[0].group, group);
+        assert_eq!(overlays.boxes.values().next().unwrap().group, group);
         assert_eq!(overlays.markers[0].group, group);
         assert_eq!(overlays.segments[0].group, group);
+    }
+
+    #[test]
+    fn incremental_replay_updates_only_closed_bars_and_rewinds_replacements() {
+        let mut bars = [
+            Footprint::seed(0, 100.0),
+            Footprint::seed(1, 101.0),
+            Footprint::seed(2, 102.0),
+        ];
+        for (i, bar) in bars.iter_mut().enumerate() {
+            bar.plots.push(Plot::PriceBox {
+                id: "growing".into(),
+                low: 99.0,
+                high: 100.0 + i as f64,
+                span: i,
+                color: "#fff".into(),
+                text: String::new(),
+                group: Some(" group ".into()),
+            });
+            bar.plots.push(Plot::MarkerAt {
+                bars_back: if i == 2 { 2 } else { 0 },
+                price: 100.0 + i as f64,
+                shape: "circle".into(),
+                color: "#fff".into(),
+                text: String::new(),
+                text_dx: None,
+                text_dy: None,
+                group: None,
+            });
+        }
+        bars[0].plots.push(Plot::VolumeProfile {
+            id: "growing".into(),
+            levels: vec![VpLevel {
+                price: 100.0,
+                buy_vol: 1.0,
+                sell_vol: 0.0,
+            }],
+            span: 1,
+        });
+        bars[2].plots.push(Plot::VolumeProfile {
+            id: "growing".into(),
+            levels: Vec::new(),
+            span: 1,
+        });
+        let series = [Series {
+            id: "line".into(),
+            color: "#fff".into(),
+            points: vec![(0, 100.0), (1, f64::NAN), (2, 102.0)],
+        }];
+        let mut overlays = Overlays::default();
+        let bar_x = |i| (i as f64, i as f64 + 1.0);
+        overlays.sync(&bars[..2], &series, &bar_x);
+        assert_eq!(overlays.boxes.values().next().unwrap().x1, 2.0);
+        assert_eq!(overlays.lines().next().unwrap().points, [(0.5, 100.0)]);
+        assert_eq!(overlays.profiles.len(), 1);
+
+        overlays.sync(&bars, &series, &bar_x);
+        assert_eq!(overlays.boxes.values().next().unwrap().x1, 3.0);
+        assert_eq!(
+            overlays.lines().next().unwrap().points,
+            [(0.5, 100.0), (2.5, 102.0)]
+        );
+        assert!(overlays.profiles.is_empty());
+        let prices: Vec<_> = overlays.markers.iter().map(|marker| marker.price).collect();
+        assert_eq!(prices, [100.0, 102.0, 101.0]);
+
+        overlays.sync(&bars[..1], &series, &bar_x);
+        assert_eq!(overlays.boxes.values().next().unwrap().x1, 1.0);
+        assert_eq!(overlays.lines().next().unwrap().points, [(0.5, 100.0)]);
+        assert_eq!(overlays.profiles.len(), 1);
+        assert_eq!(overlays.markers.len(), 1);
+        overlays.sync(&[], &series, &bar_x);
+        assert!(overlays.groups.is_empty());
+        assert!(overlays.lines().next().is_none());
     }
 
     #[test]
