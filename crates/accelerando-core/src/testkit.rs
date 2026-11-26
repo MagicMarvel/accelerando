@@ -314,6 +314,9 @@ pub fn context(visuals_enabled: bool) -> StrategyContext<'static> {
         position_count: 0,
         pending_count: 0,
         open_position: None,
+        long_stop: None,
+        short_stop: None,
+        open_lots: Vec::new(),
     };
     StrategyContext::for_bar(
         BAR.get_or_init(|| Footprint::seed(0, 100.0)),

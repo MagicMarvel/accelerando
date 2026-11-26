@@ -43,7 +43,10 @@ pub mod config;
 mod events;
 mod gui;
 mod market;
+mod report;
+mod session_report;
 pub mod stats;
+mod terminal;
 pub mod validate;
 
 use std::collections::BTreeMap;
@@ -63,6 +66,7 @@ use accelerando_core::{
 use rayon::prelude::*;
 
 pub use config::CONFIG_FILE;
+pub use session_report::SessionReportOptions;
 pub use stats::TradeStats;
 pub use validate::{Candidate, ValidationReport};
 
@@ -104,6 +108,8 @@ pub struct RunOptions {
     pub trades_json: Option<PathBuf>,
     pub result_json: Option<PathBuf>,
     pub gui: bool,
+    /// Initial GUI bar spec, independent of the strategy's calculation bars.
+    pub display_bars: Option<String>,
     /// `--mode NAME`: run a mode registered with [`App::mode`] instead of a backtest.
     pub mode: Option<String>,
     /// `--opt key=value` (repeatable): free-form options for the selected mode.
@@ -141,6 +147,7 @@ impl Default for RunOptions {
             trades_json: None,
             result_json: None,
             gui: false,
+            display_bars: None,
             mode: None,
             opts: Vec::new(),
             config: None,
@@ -186,6 +193,7 @@ output
   --trades-json PATH         all runs' trades
   --result-json PATH         full BacktestResult of the best run
   --gui / --no-gui           open the native viewer on the best run (bar-type switch, tick replay)
+  --display-bars SPEC        initial GUI bars, e.g. time:1 or time:300
   --jobs N                   worker threads (default: all cores)
 
 project
@@ -249,6 +257,7 @@ impl RunOptions {
                 "--result-json" => o.result_json = Some(PathBuf::from(value(arg)?)),
                 "--gui" => o.gui = true,
                 "--no-gui" => o.gui = false,
+                "--display-bars" => o.display_bars = Some(value(arg)?),
                 "--mode" => o.mode = Some(value(arg)?),
                 "--opt" => o.opts.push(value(arg)?),
                 "--config" => o.config = Some(PathBuf::from(value(arg)?)),
@@ -355,6 +364,7 @@ pub struct App {
     registry: Arc<Registry>,
     modes: BTreeMap<String, Mode>,
     base_indicators: Vec<IndicatorRequest>,
+    session_report: Option<SessionReportOptions>,
     /// Strategies registered through [`App::strategy`] (not the built-in examples).
     own_strategies: Vec<String>,
 }
@@ -377,8 +387,15 @@ impl App {
             registry: Arc::new(registry),
             modes: BTreeMap::new(),
             base_indicators: Vec::new(),
+            session_report: None,
             own_strategies: Vec::new(),
         }
+    }
+
+    /// Enable a trading-session report using the host's market hours.
+    pub fn with_session_report(mut self, options: SessionReportOptions) -> Self {
+        self.session_report = Some(options);
+        self
     }
 
     pub fn strategy<T: Strategy + Configurable + 'static>(mut self, name: &str) -> Self {
@@ -547,6 +564,7 @@ impl App {
         }
 
         let started = Instant::now();
+        let colors = terminal::Palette::stdout();
         let mut gui_events = None;
         let outcomes = if event_driven {
             if o.validate {
@@ -568,7 +586,7 @@ impl App {
             let keep = o.gui && candidates.len() == 1;
             let outcomes =
                 self.run_candidates(&prepared.data, strategy, candidates, o.broker(), keep)?;
-            print_table(&outcomes);
+            print_table(&outcomes, colors);
             if o.validate {
                 let report = self.validate(o, &prepared.data, strategy, &outcomes)?;
                 report.print();
@@ -579,10 +597,8 @@ impl App {
             outcomes
         };
         if event_driven {
-            print_table(&outcomes);
+            print_table(&outcomes, colors);
         }
-        println!("elapsed {:.1}s", started.elapsed().as_secs_f64());
-
         let (best_index, best) = outcomes
             .iter()
             .enumerate()
@@ -593,6 +609,11 @@ impl App {
                     .total_cmp(&b.result.metrics.net_pnl)
             })
             .ok_or("no runs produced")?;
+        println!("elapsed {:.1}s", started.elapsed().as_secs_f64());
+        report::print(best, o, colors);
+        if let Some(options) = &self.session_report {
+            session_report::print(&best.result.trades, colors, options);
+        }
         if let Some(path) = &o.trades_json {
             let dump: Vec<_> = outcomes
                 .iter()
@@ -1050,28 +1071,29 @@ fn fmt_params(p: &Params) -> String {
         .join(" ")
 }
 
-fn print_table(outcomes: &[RunOutcome]) {
-    let mut rows: Vec<&RunOutcome> = outcomes.iter().collect();
+fn print_table(outcomes: &[RunOutcome], colors: terminal::Palette) {
+    // Match the selected run: max_by prefers the last outcome when net PnL ties.
+    let mut rows: Vec<&RunOutcome> = outcomes.iter().rev().collect();
     rows.sort_by(|a, b| {
         b.result
             .metrics
             .net_pnl
             .total_cmp(&a.result.metrics.net_pnl)
     });
-    println!(
-        "\n{:<24} {:>11} {:>7} {:>7} {:>6} {:>10} {:>7}",
+    println!("\n{}", colors.heading(format_args!(
+        "{:<24} {:>11} {:>7} {:>7} {:>6} {:>10} {:>7}",
         "run", "net", "trades", "win%", "PF", "maxDD", "sharpe"
-    );
+    )));
     for r in rows.iter().take(20) {
         let m = &r.result.metrics;
         println!(
-            "{:<24} {:>11.2} {:>7} {:>6.1}% {:>6} {:>10.2} {:>7.2}",
+            "{:<24} {} {:>7} {:>6.1}% {:>6} {} {:>7.2}",
             r.label,
-            m.net_pnl,
+            colors.pnl(m.net_pnl, format_args!("{:>11.2}", m.net_pnl)),
             m.trades,
             m.win_rate * 100.0,
             stats::fmt_pf(m.profit_factor),
-            m.max_drawdown.abs(),
+            colors.risk(format_args!("{:>10.2}", m.max_drawdown.abs())),
             m.sharpe
         );
     }

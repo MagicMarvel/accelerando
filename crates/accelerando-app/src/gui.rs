@@ -29,9 +29,13 @@ pub(crate) fn view(
 ) -> Result<(), String> {
     use accelerando_gui::{BarSpec, ViewerOptions};
 
+    let display_bars = o.display_bars.as_deref().map(|spec| {
+        BarSpec::parse(spec).ok_or_else(|| format!("invalid display bar spec `{spec}`"))
+    }).transpose()?;
     let options = ViewerOptions {
         title: format!("Accelerando — {label} — {data_path}"),
         bar_spec: BarSpec::parse(o.agg()),
+        display_bars,
         ..Default::default()
     };
     let run_options = o.clone();

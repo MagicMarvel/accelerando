@@ -839,12 +839,13 @@ pub(crate) fn price_panel(
     let edge_spec = edge.map(|_| {
         RasterSpec::new(m.x0, m.x1, m.rect.width(), m.p0, m.p1, m.rect.height(), model.result.tick_size)
     });
-    let replay_levels = replay_clock.filter(|_| depth_width > 0.0).and_then(|clock| {
+    let replay_book = replay_clock.filter(|_| depth_width > 0.0).and_then(|clock| {
         let (top, bottom) = edge_spec.as_ref().map_or((m.p1, m.p0), RasterSpec::price_range);
         let margin = model.result.tick_size.abs() * DEPTH_NEIGHBOR_TICKS as f64;
         model.replay_depth(clock, bottom.min(m.p0 - margin), top.max(m.p1 + margin))
     });
-    if let (Some((left, cache)), Some(spec), Some(levels)) = (edge, edge_spec, &replay_levels) {
+    let replay_levels = replay_book.as_ref().map(|(_, levels)| levels.as_slice());
+    if let (Some((left, cache)), Some(spec), Some(levels)) = (edge, edge_spec, replay_levels) {
         let sigma_rows = price_sigma_rows(ui.ctx(), settings, &m, model.result.tick_size, spec.row_p);
         let repeat = price_row_repeat(&spec, physical_pixels_per_price(ui.ctx(), &m));
         draw_heat_depth(&painter, &m, left, cache, &spec, levels, repeat, sigma_rows);
@@ -949,7 +950,7 @@ pub(crate) fn price_panel(
     }
     if depth_width > 0.0 {
         let rect = Rect::from_min_max(plot.right_top(), pos2(price_axis_left, outer.bottom()));
-        draw_replay_depth(ui, rect, &m, model, replay_levels.as_deref());
+        draw_replay_depth(ui, rect, &m, model, replay_levels.unwrap_or_default());
     }
     // Choosing the bar a replay starts from: highlight the bar under the pointer.
     let mut picked = None;
@@ -985,7 +986,8 @@ pub(crate) fn price_panel(
     indicator_legend(ui, plot, model, settings);
     if let Some(pos) = hover.filter(|_| !pick_bar && !drawing_vp && !response.dragged()) {
         let liquidity = if edge.is_some_and(|(left, _)| pos.x > left) {
-            replay_levels.as_deref().and_then(|levels| depth_tooltip(model, &m, pos.y, levels))
+            replay_book.as_ref().filter(|(clock, _)| Some(*clock) == replay_clock)
+                .and_then(|(_, levels)| depth_tooltip(model, &m, pos.y, levels))
         } else if !heat_visible || replay_x.is_some_and(|x| m.x_at(pos.x) > x) {
             None
         } else {
@@ -1042,7 +1044,7 @@ fn draw_heat_depth(
     }
 }
 
-fn draw_replay_depth(ui: &egui::Ui, rect: Rect, m: &Mapper, model: &Model, levels: Option<&[LiquidityLevel]>) {
+fn draw_replay_depth(ui: &egui::Ui, rect: Rect, m: &Mapper, model: &Model, levels: &[LiquidityLevel]) {
     let rows = Rect::from_min_max(rect.min, pos2(rect.right(), m.rect.bottom()));
     let painter = ui.painter_at(rows);
     painter.rect_filled(rect, 0.0, BACKGROUND);
@@ -1052,10 +1054,6 @@ fn draw_replay_depth(ui: &egui::Ui, rect: Rect, m: &Mapper, model: &Model, level
     let baseline = pos2(rect.center().x, rows.bottom() + 4.0);
     footer.text(baseline - egui::vec2(5.0, 0.0), Align2::RIGHT_TOP, "Bid", font.clone(), bid_color);
     footer.text(baseline + egui::vec2(5.0, 0.0), Align2::LEFT_TOP, "Ask", font.clone(), ask_color);
-    let Some(levels) = levels else {
-        painter.text(rows.center(), Align2::CENTER_CENTER, "Loading depth…", font, AXIS_TEXT);
-        return;
-    };
     let tick = model.result.tick_size.abs();
     let row_height = (m.sy(m.p0) - m.sy(m.p0 + tick)).max(0.0);
     let visible_levels = levels.iter().enumerate().filter(|(_, level)| (m.p0..=m.p1).contains(&level.price));

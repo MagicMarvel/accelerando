@@ -296,8 +296,10 @@ pub(crate) struct Model {
     pub depth: DepthStore,
     /// Exact depth of the stretch last viewed closely (chunked stores only).
     pub depth_window: Option<Arc<DepthWindow>>,
-    /// Keep the replay book available when the history viewport has a separate window.
-    replay_depth_window: Option<Arc<DepthWindow>>,
+    /// The most recent cursor loads, including the next window when prefetched.
+    replay_depth_windows: [Option<Arc<DepthWindow>>; 2],
+    /// The last exact book shown while the cursor's next window is loading.
+    replay_depth_frame: Option<(i64, Arc<DepthWindow>)>,
     depth_limited: Option<(i64, i64)>,
     /// Time zone of every time shown.
     pub tz: TimeZone,
@@ -418,7 +420,8 @@ impl Model {
             tape,
             depth,
             depth_window: None,
-            replay_depth_window: None,
+            replay_depth_windows: [None, None],
+            replay_depth_frame: None,
             depth_limited: None,
             tz: TimeZone::from_hours(options.utc_offset_hours),
             price_decimals,
@@ -458,11 +461,13 @@ impl Model {
     /// Hide everything from bar `index` (of [`Self::full_bars`]) on and replay from there.
     pub fn start_replay(&mut self, index: usize) {
         self.replay = Some(ReplayBars::new(self.full_bars(), index, self.result.tick_size));
+        self.replay_depth_frame = None;
         self.sync_replay();
     }
 
     pub fn stop_replay(&mut self) {
         self.replay = None;
+        self.replay_depth_frame = None;
         self.sync_replay();
     }
 
@@ -615,7 +620,7 @@ impl Model {
     }
 
     fn exact_depth_window(&self, from: i64, until: i64) -> Option<&Arc<DepthWindow>> {
-        self.depth_window.as_ref().into_iter().chain(self.replay_depth_window.as_ref())
+        self.depth_window.as_ref().into_iter().chain(self.replay_depth_windows.iter().flatten())
             .find(|window| window.covers(from, until))
     }
 
@@ -631,27 +636,31 @@ impl Model {
         &heat.snapshots[..end]
     }
 
-    fn replay_depth(&self, clock: i64, low: f64, high: f64) -> Option<Vec<LiquidityLevel>> {
+    fn replay_depth(&self, clock: i64, low: f64, high: f64) -> Option<(i64, Vec<LiquidityLevel>)> {
         if self.depth.is_empty() {
             let segment = self.axis.segments.partition_point(|s| s.t0_ns <= clock);
             let levels = self.replay_snapshots(Some(clock)).last().filter(|snapshot| {
                 segment > 0 && snapshot.ts_ns >= self.axis.segments[segment - 1].t0_ns
             })
                 .map_or(&[][..], |snapshot| snapshot.levels.as_slice());
-            return Some(levels.iter().copied().filter(|l| (low..=high).contains(&l.price)).collect());
+            return Some((clock, levels.iter().copied().filter(|l| (low..=high).contains(&l.price)).collect()));
         }
 
-        let (depth, window) = self.depth_at(clock, clock.saturating_add(1));
-        // Overview buckets can include updates after the replay clock.
-        if window.is_none() && !self.depth.is_exact() {
-            return None;
-        }
-        Some(depth.levels_between(low, high).filter_map(|(price, level)| {
+        let (clock, depth) = if self.depth.is_exact() {
+            (clock, self.depth.overview())
+        } else if let Some(window) = self.exact_depth_window(clock, clock.saturating_add(1)) {
+            (clock, &window.history)
+        } else {
+            let (previous, window) = self.replay_depth_frame.as_ref()?;
+            (*previous, &window.history)
+        };
+        let levels = depth.levels_between(low, high).filter_map(|(price, level)| {
             let changes = level.changes();
             let index = changes.partition_point(|change| change.0 <= clock).checked_sub(1)?;
             let [bid_size, ask_size] = changes[index].1;
             (bid_size > 0.0 || ask_size > 0.0).then_some(LiquidityLevel { price, bid_size, ask_size })
-        }).collect())
+        }).collect();
+        Some((clock, levels))
     }
 
     /// The heatmap and bid/ask lines live on the per-second grid: time axis only.
@@ -1023,7 +1032,8 @@ impl Viewer {
         model.tape = data.tape;
         model.depth = data.depth;
         model.depth_window = None;
-        model.replay_depth_window = None;
+        model.replay_depth_windows = [None, None];
+        model.replay_depth_frame = None;
         model.depth_limited = None;
         self.depth_loading = None;
         self.depth_cursor_failed = None;
@@ -1181,7 +1191,7 @@ impl Viewer {
                     ui.add(egui::DragValue::new(&mut draft.size).range(1..=1_000_000).speed(1.0));
                     ui.label(draft.kind.unit());
                 });
-                ui.horizontal(|ui| {
+                ui.horizontal_wrapped(|ui| {
                     for &size in draft.kind.presets() {
                         let text = BarSpec::new(draft.kind, size).label();
                         if ui.selectable_label(draft.size == size, text).clicked() {
@@ -1483,16 +1493,18 @@ impl Viewer {
         if model.depth.is_exact() {
             return;
         }
-        if let Some(load) = &self.depth_loading {
+        let replay = model.replay_clock();
+        if let Some(load) = self.depth_loading.take() {
             match load.rx.try_recv() {
                 Ok(Ok(Some(window))) => {
                     if load.cursor {
-                        model.replay_depth_window = Some(Arc::new(window));
+                        model.replay_depth_windows.rotate_right(1);
+                        model.replay_depth_windows[0] = Some(Arc::new(window));
                     } else {
                         model.depth_window = Some(Arc::new(window));
                     }
                 }
-                Err(mpsc::TryRecvError::Empty) => return,
+                Err(mpsc::TryRecvError::Empty) => self.depth_loading = Some(load),
                 failure => {
                     if let Ok(Err(error)) = failure {
                         eprintln!("depth: {error}");
@@ -1504,9 +1516,36 @@ impl Viewer {
                     }
                 }
             }
-            self.depth_loading = None;
         }
-        let replay = model.replay_clock();
+        let current_window = replay.and_then(|clock| model.exact_depth_window(clock, clock.saturating_add(1)));
+        if let Some((clock, window)) = replay.zip(current_window) {
+            model.replay_depth_frame = Some((clock, Arc::clone(window)));
+        }
+        if self.depth_loading.is_some() {
+            return;
+        }
+        let cursor_request = replay.and_then(|clock| {
+            let target = if let Some(window) = model.exact_depth_window(clock, clock.saturating_add(1)) {
+                if !self.replay.playing() {
+                    return None;
+                }
+                // Prefetch up to half a second of wall time ahead, bounded to half a cursor window.
+                let lead = ((0.5 * self.replay.speed() * SEC_NS as f64) as i64).min(DEPTH_CURSOR_WINDOW_NS / 2);
+                let boundary = window.until;
+                if boundary > clock.saturating_add(lead)
+                    || model.full_bars().last().is_none_or(|bar| boundary > bar.ts_last_ns)
+                    || model.exact_depth_window(boundary, boundary.saturating_add(1)).is_some()
+                {
+                    return None;
+                }
+                boundary
+            } else {
+                clock
+            };
+            let start = target.div_euclid(DEPTH_CURSOR_WINDOW_NS) * DEPTH_CURSOR_WINDOW_NS;
+            let range = (start, start.saturating_add(DEPTH_CURSOR_WINDOW_NS));
+            (self.depth_cursor_failed != Some(range)).then_some((range, Some(target)))
+        });
         let total = model.axis.total();
         let visible_from = model.axis.to_ts(self.chart.x0.clamp(0.0, total));
         let visible_until = model.axis.to_ts(self.chart.x1.clamp(0.0, total)).saturating_add(1);
@@ -1514,24 +1553,18 @@ impl Viewer {
         let time_view = model.xmap.mode() == AxisMode::Time && total > 0.0;
         let wide = !time_view || span > EXACT_DEPTH_SPAN_NS;
         let lookback = if !wide && self.settings.mode == ChartMode::Heatmap && self.settings.show_heat {
-            self.settings.heat_layers_lookback()
+            // Even the unfiltered resting layer rounds the raster past the viewport edges.
+            Some(self.settings.heat_layers_lookback().unwrap_or_default())
         } else {
             None
         };
         let (from, until) = depth_view_range(visible_from, visible_until, replay, lookback);
-        let covered = |range: (i64, i64)| range.0 <= from && until <= range.1;
-        let cursor_request = replay.and_then(|clock| {
-            let start = clock.div_euclid(DEPTH_CURSOR_WINDOW_NS) * DEPTH_CURSOR_WINDOW_NS;
-            let range = (start, start.saturating_add(DEPTH_CURSOR_WINDOW_NS));
-            (self.depth_cursor_failed != Some(range)
-                && model.exact_depth_window(clock, clock.saturating_add(1)).is_none())
-                .then_some((range, Some(clock)))
-        });
         let (range, cursor) = if let Some(request) = cursor_request {
             request
         } else {
+            // A smaller window inside a failed range can fit the change budget.
             if wide || (lookback.is_none() && until.saturating_sub(from) > EXACT_DEPTH_SPAN_NS)
-                || model.depth_limited.is_some_and(covered)
+                || model.depth_limited == Some((from, until))
                 || model.depth_window.as_ref().is_some_and(|w| w.covers(from, until))
             {
                 if wide && replay.is_none() && span > 2 * EXACT_DEPTH_SPAN_NS {
@@ -1830,6 +1863,92 @@ mod tests {
             tick_size: 0.25,
             multiplier: 50.0,
         }
+    }
+
+    #[test]
+    fn replay_prefetch_holds_the_last_book_until_the_next_window_is_ready() {
+        struct Events;
+        impl accelerando_core::DataSource for Events {
+            fn events(self: Box<Self>) -> Box<dyn Iterator<Item = OrderFlowEvent>> {
+                Box::new(std::iter::once(OrderFlowEvent::Contract { tick_size: 0.25, multiplier: 50.0 })
+                    .chain([(57, 88.0), (59, 89.0), (61, 91.0), (63, 95.0)].map(|(second, size)| {
+                        OrderFlowEvent::SetLevel { ts_ns: second * SEC_NS, price: 100.25, size, side: Side::Buy }
+                    })))
+            }
+        }
+
+        let (_, store) = DepthStore::build(Box::new(Events), None).unwrap();
+        let mut result = sample_result();
+        result.footprints.push(accelerando_core::testkit::bar(180 * SEC_NS).price(100.25).build());
+        let mut viewer = Viewer::new(result, ViewerOptions::default(), &[], None, store);
+        viewer.replay.start(&mut viewer.model, 0, false);
+        viewer.model.replay_apply(&[], 58 * SEC_NS, None);
+        viewer.model.replay_depth_windows[0] = viewer.model.depth
+            .load_bounded_window(0, 60 * SEC_NS, DEPTH_WINDOW_MAX_CHANGES).unwrap().map(Arc::new);
+
+        let ctx = egui::Context::default();
+        viewer.sync_depth(&ctx);
+        let load = viewer.depth_loading.take().unwrap();
+        assert!(load.cursor);
+        assert_eq!(load.range, (60 * SEC_NS, 120 * SEC_NS));
+
+        // Hold the result back until one frame has advanced beyond the old window.
+        let next_window = load.rx.recv_timeout(std::time::Duration::from_secs(5)).unwrap();
+        let (tx, rx) = mpsc::channel();
+        viewer.depth_loading = Some(DepthLoad { rx, ..load });
+        let clock = 62 * SEC_NS;
+        viewer.model.replay_apply(&[], clock, None);
+        viewer.sync_depth(&ctx);
+        let read_book = |viewer: &Viewer| {
+            viewer.model.replay_depth(clock, 100.0, 101.0)
+                .map(|(ts, levels)| (ts, levels[0].bid_size))
+        };
+        assert_eq!(read_book(&viewer), Some((58 * SEC_NS, 88.0)));
+
+        tx.send(next_window).unwrap();
+        viewer.sync_depth(&ctx);
+        assert_eq!(read_book(&viewer), Some((clock, 91.0)));
+        assert!(viewer.model.exact_depth_window(58 * SEC_NS, 58 * SEC_NS + 1).is_some());
+
+        viewer.model.start_replay(1);
+        let clock = viewer.model.replay_clock().unwrap();
+        assert!(viewer.model.replay_depth(clock, 100.0, 101.0).is_none());
+    }
+
+    #[test]
+    fn resting_heatmap_retries_after_zooming_into_a_limited_depth_range() {
+        struct Events;
+        impl accelerando_core::DataSource for Events {
+            fn events(self: Box<Self>) -> Box<dyn Iterator<Item = OrderFlowEvent>> {
+                Box::new([
+                    OrderFlowEvent::Contract { tick_size: 0.25, multiplier: 50.0 },
+                    OrderFlowEvent::SetLevel {
+                        ts_ns: 10 * SEC_NS, price: 100.25, size: 88.0, side: Side::Buy,
+                    },
+                    OrderFlowEvent::SetLevel {
+                        ts_ns: 20 * SEC_NS, price: 100.25, size: 91.0, side: Side::Buy,
+                    },
+                ].into_iter())
+            }
+        }
+
+        let (_, store) = DepthStore::build(Box::new(Events), None).unwrap();
+        let mut result = sample_result();
+        result.footprints = [0, 30 * SEC_NS].map(|ts| {
+            accelerando_core::testkit::bar(ts).price(100.25).build()
+        }).to_vec();
+        let options = ViewerOptions { axis_mode: Some(AxisMode::Time), ..Default::default() };
+        let mut viewer = Viewer::new(result, options, &[], None, store);
+        viewer.settings.mode = ChartMode::Heatmap;
+        viewer.chart.show_range(10.0, 20.0);
+        viewer.model.depth_limited = Some((0, 30 * SEC_NS));
+
+        viewer.sync_depth(&egui::Context::default());
+        let load = viewer.depth_loading.unwrap();
+        assert!(load.range.0 < 10 * SEC_NS && load.range.1 > 20 * SEC_NS + 1);
+        let window = load.rx.recv_timeout(std::time::Duration::from_secs(5)).unwrap().unwrap().unwrap();
+        assert!(window.covers(load.range.0, load.range.1));
+        assert_eq!(window.history.resting_size_at(100.25, 15 * SEC_NS), Some((100.25, [88.0, 0.0])));
     }
 
     #[test]

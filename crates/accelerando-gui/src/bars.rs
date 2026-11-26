@@ -11,6 +11,9 @@ use accelerando_example_aggregators::{
     RangeAggregator, ReverseAggregator, TimeAggregator, VolumeAggregator,
 };
 
+const DAY_SECS: u32 = 86_400;
+const WEEK_SECS: u32 = 7 * DAY_SECS;
+
 /// How bars are cut.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum BarKind {
@@ -47,7 +50,7 @@ impl BarKind {
     /// Common sizes offered as one-click presets.
     pub fn presets(self) -> &'static [u32] {
         match self {
-            BarKind::Time => &[30, 60, 300, 900, 3600],
+            BarKind::Time => &[30, 60, 300, 900, 3600, 14_400, DAY_SECS, WEEK_SECS],
             BarKind::Range => &[4, 8, 16, 30, 60],
             BarKind::Reverse => &[4, 8, 16, 30, 60],
             BarKind::Volume => &[500, 1000, 2500, 5000, 10_000],
@@ -86,6 +89,8 @@ impl BarSpec {
     /// Short human label: `1m`, `Range 30`, `Reverse 16`, `Vol 1000`.
     pub fn label(&self) -> String {
         match self.kind {
+            BarKind::Time if self.size == WEEK_SECS => "1week".to_string(),
+            BarKind::Time if self.size == DAY_SECS => "1day".to_string(),
             BarKind::Time if self.size % 3600 == 0 => format!("{}h", self.size / 3600),
             BarKind::Time if self.size % 60 == 0 => format!("{}m", self.size / 60),
             BarKind::Time => format!("{}s", self.size),
@@ -147,5 +152,23 @@ mod tests {
         assert_eq!(BarSpec::parse("time:60").map(|s| s.label()), Some("1m".to_string()));
         assert_eq!(BarSpec::parse("volume:500").map(|s| s.label()), Some("Vol 500".to_string()));
         assert_eq!(BarSpec::parse("tick:5"), None);
+    }
+
+    #[test]
+    fn long_time_presets_use_the_selected_duration() {
+        for (seconds, label) in [(14_400, "4h"), (86_400, "1day"), (604_800, "1week")] {
+            let spec = BarSpec::new(BarKind::Time, seconds);
+            assert!(BarKind::Time.presets().contains(&seconds));
+            assert_eq!(spec.label(), label);
+
+            let boundary = i64::from(seconds) * 1_000_000_000;
+            let trades = [0, boundary - 1, boundary].map(|ts_ns| OrderFlowEvent::Trade {
+                ts_ns, price: 100.0, size: 1.0, aggressor: accelerando_core::Side::Buy,
+            });
+            let bars = aggregate(&trades, &spec);
+            assert_eq!(bars.len(), 2);
+            assert_eq!(bars[0].trades, 2);
+            assert_eq!(bars[1].ts_first_ns, boundary);
+        }
     }
 }

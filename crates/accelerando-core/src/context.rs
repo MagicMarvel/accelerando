@@ -106,6 +106,36 @@ impl<'a> StrategyContext<'a> {
     pub fn exit_position(&mut self) {
         self.commands.orders.exit_position();
     }
+    /// Tighten protective stops on open lots after this callback. A looser stop is ignored.
+    pub fn tighten_stop(&mut self, price: f64) {
+        self.commands.orders.tighten_stop(price);
+    }
+    /// Tighten only lots in the given direction. Each existing stop is checked independently.
+    pub fn tighten_stops_for_side(&mut self, side: crate::TradeSide, price: f64) {
+        self.commands.orders.tighten_stops_for_side(side, price);
+    }
+    /// Tighten lots in this direction whose entry predates the reference event.
+    pub fn tighten_stops_for_side_opened_before(
+        &mut self,
+        side: crate::TradeSide,
+        price: f64,
+        before_ns: i64,
+    ) {
+        self.commands
+            .orders
+            .tighten_stops_for_side_opened_before(side, price, before_ns);
+    }
+    /// Tighten one open lot's stop by its snapshot ID. A looser stop is ignored.
+    pub fn tighten_lot_stop(&mut self, lot_id: u64, price: f64) {
+        self.commands.orders.tighten_lot_stop(lot_id, price);
+    }
+    /// Replace pending entries with one pair of opposite stop-market entries.
+    /// The first side reached consumes the pair. A market-data gap can expire it before filling.
+    pub fn replace_stop_pair(&mut self, buy: EntryIntent, sell: EntryIntent, max_gap_ns: i64) {
+        self.commands
+            .orders
+            .replace_stop_pair(buy, sell, max_gap_ns);
+    }
     pub fn plot(&mut self, plot: Plot) {
         self.commands.visuals.push(plot);
     }

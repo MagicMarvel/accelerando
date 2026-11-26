@@ -39,11 +39,13 @@ struct EntryOrder {
     entry_min: Option<f64>,
     entry_max: Option<f64>,
     entry_limit: Option<f64>,
+    entry_trigger: Option<f64>,
     /// Optional wall-clock validity from the signal footprint close to the fill footprint open.
     max_fill_delay_ns: Option<i64>,
     /// Free-form setup tag carried onto the resulting [`Trade`] for later analysis.
     label: Option<String>,
     reward_risk: Option<f64>,
+    add_risk_budget: Option<f64>,
     max_hold_bars: Option<usize>,
 }
 
@@ -56,6 +58,11 @@ enum PendingKind {
     Replace(EntryOrder),
     /// Add a new lot without closing existing lots.
     Add(EntryOrder),
+    StopPair {
+        buy: EntryOrder,
+        sell: EntryOrder,
+        max_gap_ns: i64,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -79,6 +86,7 @@ const LIMIT_ORDER_TTL_BARS: usize = 8;
 
 #[derive(Clone, Debug)]
 struct Position {
+    id: u64,
     dir: i32,
     qty: f64,
     entry_px: f64,
@@ -92,10 +100,23 @@ struct Position {
     /// the fill — counting it would be look-ahead. The adverse extreme is reached after the fill, so
     /// the stop stays active.
     entered_intrabar: bool,
+    stop_entered_intrabar: bool,
     /// Completed bars this lot has been open; its fill bar counts as 1.
     bars_open: usize,
     max_hold_bars: Option<usize>,
     label: Option<String>,
+}
+
+impl Position {
+    fn tighten_stop(&mut self, price: f64) {
+        if price.is_finite()
+            && self
+                .stop
+                .is_none_or(|stop| (price - stop) * self.dir as f64 > 0.0)
+        {
+            self.stop = Some(price);
+        }
+    }
 }
 
 /// A snapshot of the open position visible to a strategy.
@@ -117,6 +138,16 @@ pub struct PositionInfo {
     pub target: Option<f64>,
 }
 
+/// A single open lot and its current protective stop.
+#[derive(Clone, Copy, Debug)]
+pub struct OpenLotInfo {
+    pub id: u64,
+    pub dir: i32,
+    pub entry_px: f64,
+    pub entry_ts_ns: i64,
+    pub stop: Option<f64>,
+}
+
 /// Immutable broker state presented to a strategy for the current completed footprint.
 #[derive(Clone, Debug)]
 pub struct PortfolioSnapshot {
@@ -125,6 +156,9 @@ pub struct PortfolioSnapshot {
     pub position_count: usize,
     pub pending_count: usize,
     pub open_position: Option<PositionInfo>,
+    pub long_stop: Option<f64>,
+    pub short_stop: Option<f64>,
+    pub open_lots: Vec<OpenLotInfo>,
 }
 
 /// Trading direction for an entry intent.
@@ -147,6 +181,9 @@ impl TradeSide {
 #[derive(Clone, Debug, PartialEq)]
 pub enum EntryExecution {
     Market,
+    StopMarket {
+        trigger: f64,
+    },
     Limit {
         price: f64,
         fill_min: Option<f64>,
@@ -161,6 +198,12 @@ pub enum BracketSpec {
     RiskReward {
         stop: f64,
         reward_risk: f64,
+    },
+    /// Size a same-direction add using gross cash risk at its actual fill.
+    RiskSizedAdd {
+        stop: f64,
+        reward_risk: Option<f64>,
+        risk_budget: f64,
     },
     Ticks {
         stop: f64,
@@ -197,6 +240,14 @@ impl EntryIntent {
             tag: None,
             max_fill_delay_ns: None,
             max_hold_bars: None,
+        }
+    }
+
+    /// A stop entry becomes a market order once the trigger is reached.
+    pub fn stop_market(side: TradeSide, qty: f64, trigger: f64) -> Self {
+        Self {
+            execution: EntryExecution::StopMarket { trigger },
+            ..Self::market(side, qty)
         }
     }
 
@@ -237,6 +288,22 @@ impl EntryIntent {
         self
     }
 
+    /// Keep the requested quantity when opening a position, or risk the specified
+    /// cash amount when adding to a same-direction position. Quantity may be fractional.
+    pub fn risk_sized_add_bracket(
+        mut self,
+        stop: f64,
+        reward_risk: Option<f64>,
+        risk_budget: f64,
+    ) -> Self {
+        self.bracket = BracketSpec::RiskSizedAdd {
+            stop,
+            reward_risk,
+            risk_budget,
+        };
+        self
+    }
+
     pub fn tagged(mut self, tag: impl Into<String>) -> Self {
         self.tag = Some(tag.into());
         self
@@ -256,20 +323,28 @@ impl EntryIntent {
     }
 
     fn into_order(self) -> EntryOrder {
-        let (entry_limit, entry_min, entry_max) = match self.execution {
-            EntryExecution::Market => (None, None, None),
+        let (entry_limit, entry_min, entry_max, entry_trigger) = match self.execution {
+            EntryExecution::Market => (None, None, None, None),
+            EntryExecution::StopMarket { trigger } => (None, None, None, Some(trigger)),
             EntryExecution::Limit {
                 price,
                 fill_min,
                 fill_max,
-            } => (Some(price), fill_min, fill_max),
+            } => (Some(price), fill_min, fill_max, None),
         };
-        let reward_risk = match self.bracket {
-            BracketSpec::RiskReward { reward_risk, .. } => Some(reward_risk),
-            _ => None,
+        let (reward_risk, add_risk_budget) = match self.bracket {
+            BracketSpec::RiskReward { reward_risk, .. } => (Some(reward_risk), None),
+            BracketSpec::RiskSizedAdd {
+                reward_risk,
+                risk_budget,
+                ..
+            } => (reward_risk, Some(risk_budget)),
+            _ => (None, None),
         };
         let (stop_ticks, target_ticks, stop_px, target_px) = match self.bracket {
-            BracketSpec::RiskReward { stop, .. } => (0.0, 0.0, Some(stop), None),
+            BracketSpec::RiskReward { stop, .. } | BracketSpec::RiskSizedAdd { stop, .. } => {
+                (0.0, 0.0, Some(stop), None)
+            }
             BracketSpec::Ticks { stop, target } => (stop, target, None, None),
             BracketSpec::Prices { stop, target } => (0.0, 0.0, stop, target),
         };
@@ -283,9 +358,11 @@ impl EntryIntent {
             entry_min,
             entry_max,
             entry_limit,
+            entry_trigger,
             max_fill_delay_ns: self.max_fill_delay_ns,
             label: self.tag,
             reward_risk,
+            add_risk_budget,
             max_hold_bars: self.max_hold_bars,
         }
     }
@@ -297,6 +374,13 @@ enum OrderAction {
     Add(EntryIntent),
     CancelPending,
     ExitPosition,
+    TightenStop(f64, Option<TradeSide>, Option<i64>),
+    TightenLotStop(u64, f64),
+    ReplaceStopPair {
+        buy: EntryIntent,
+        sell: EntryIntent,
+        max_gap_ns: i64,
+    },
 }
 
 /// Typed order command buffer produced by a strategy and applied by the engine afterward.
@@ -320,6 +404,39 @@ impl OrderOutput {
 
     pub fn exit_position(&mut self) {
         self.actions.push(OrderAction::ExitPosition);
+    }
+
+    pub fn tighten_stop(&mut self, price: f64) {
+        self.actions
+            .push(OrderAction::TightenStop(price, None, None));
+    }
+
+    pub fn tighten_stops_for_side(&mut self, side: TradeSide, price: f64) {
+        self.actions
+            .push(OrderAction::TightenStop(price, Some(side), None));
+    }
+
+    pub fn tighten_stops_for_side_opened_before(
+        &mut self,
+        side: TradeSide,
+        price: f64,
+        before_ns: i64,
+    ) {
+        self.actions
+            .push(OrderAction::TightenStop(price, Some(side), Some(before_ns)));
+    }
+
+    pub fn tighten_lot_stop(&mut self, lot_id: u64, price: f64) {
+        self.actions
+            .push(OrderAction::TightenLotStop(lot_id, price));
+    }
+
+    pub fn replace_stop_pair(&mut self, buy: EntryIntent, sell: EntryIntent, max_gap_ns: i64) {
+        self.actions.push(OrderAction::ReplaceStopPair {
+            buy,
+            sell,
+            max_gap_ns,
+        });
     }
 }
 
@@ -392,6 +509,7 @@ pub struct Broker {
     realized: f64,
     peak_equity: f64,
     positions: Vec<Position>,
+    next_lot_id: u64,
     pending: Vec<PendingIntent>,
     last_footprint_ts_ns: Option<i64>,
     pub trades: Vec<Trade>,
@@ -407,6 +525,7 @@ impl Broker {
             realized: 0.0,
             peak_equity: cfg.starting_equity,
             positions: Vec::new(),
+            next_lot_id: 0,
             pending: Vec::new(),
             last_footprint_ts_ns: None,
             trades: Vec::new(),
@@ -502,8 +621,26 @@ impl Broker {
         } else {
             None
         };
-        self.realized -= self.commission(order.qty); // entry-side commission
         let dir = order.dir;
+        let qty = if let Some(budget) = order
+            .add_risk_budget
+            .filter(|_| self.positions.iter().any(|position| position.dir == dir))
+        {
+            let Some(stop) = order.stop_px else {
+                return;
+            };
+            let risk = (px - stop) * f64::from(dir);
+            if !risk.is_finite() || risk + self.tick_size * 1e-9 < self.tick_size {
+                return;
+            }
+            budget / (risk * self.multiplier())
+        } else {
+            order.qty
+        };
+        if !qty.is_finite() || qty <= 0.0 {
+            return;
+        }
+        self.realized -= self.commission(qty); // entry-side commission
         let stop = order.stop_px.or(if order.stop_ticks > 0.0 {
             Some(px - dir as f64 * order.stop_ticks * self.tick_size)
         } else {
@@ -516,9 +653,12 @@ impl Broker {
             } else {
                 None
             });
+        let id = self.next_lot_id;
+        self.next_lot_id += 1;
         self.positions.push(Position {
+            id,
             dir,
-            qty: order.qty,
+            qty,
             entry_px: px,
             entry_ts: ts,
             stop,
@@ -526,6 +666,7 @@ impl Broker {
             max_adverse_excursion: 0.0,
             max_adverse_ticks: 0.0,
             entered_intrabar,
+            stop_entered_intrabar: entered_intrabar && order.entry_trigger.is_some(),
             bars_open: 0,
             max_hold_bars: order.max_hold_bars,
             label: order.label.clone(),
@@ -594,21 +735,51 @@ impl Broker {
                 (true, order)
             }
             PendingKind::Add(order) => (false, order),
+            PendingKind::StopPair {
+                buy,
+                sell,
+                max_gap_ns,
+            } => {
+                if self
+                    .last_footprint_ts_ns
+                    .is_some_and(|last| ts.saturating_sub(last) > max_gap_ns)
+                {
+                    return false;
+                }
+                let (Some(up), Some(down)) = (buy.entry_trigger, sell.entry_trigger) else {
+                    return false;
+                };
+                let order = match stop_pair_trigger(fp, up, down) {
+                    Some(TradeSide::Long) => buy,
+                    Some(TradeSide::Short) => sell,
+                    None => return true,
+                };
+                let raw = stop_market_fill(fp, order.dir, order.entry_trigger.unwrap())
+                    .expect("selected stop was touched");
+                self.open_position(&order, self.slip(raw, order.dir), ts, raw != open);
+                return false;
+            }
         };
         if let (Some(max_delay), Some(submitted)) = (order.max_fill_delay_ns, submitted_ts_ns) {
             if fp.ts_first_ns.saturating_sub(submitted) > max_delay {
                 return false;
             }
         }
-        let Some(fill_px) = next_bar_entry_fill(fp, order.dir, order.entry_limit) else {
-            return order.entry_limit.is_some() && age < LIMIT_ORDER_TTL_BARS;
+        let fill_px = match order.entry_trigger {
+            Some(trigger) => stop_market_fill(fp, order.dir, trigger),
+            None => next_bar_entry_fill(fp, order.dir, order.entry_limit),
+        };
+        let Some(fill_px) = fill_px else {
+            return order.entry_trigger.is_some()
+                || (order.entry_limit.is_some() && age < LIMIT_ORDER_TTL_BARS);
         };
         if !price_in_band(fill_px, order.entry_min, order.entry_max) {
             return false;
         }
         // A limit order that fills at its limit price (rather than at the bar's open) was filled
         // somewhere inside the bar; flag it so the entry bar's target is not credited.
-        let entered_intrabar = order.entry_limit.is_some() && fill_px != open;
+        let entered_intrabar =
+            (order.entry_limit.is_some() || order.entry_trigger.is_some()) && fill_px != open;
         if replace_existing {
             self.close_all_at_open(open, ts, TradeReason::Signal);
         }
@@ -630,6 +801,13 @@ impl Broker {
             // eligible normally.
             let on_entry_bar = pos.entry_ts == fp.ts_first_ns;
             let target_eligible = !(on_entry_bar && pos.entered_intrabar);
+            // An adverse extreme may precede an intrabar stop entry. Only the close is
+            // known to be at or after the trigger, so use it for protection on that bar.
+            let (stop_low, stop_high, stop_open) = if on_entry_bar && pos.stop_entered_intrabar {
+                (fp.close, fp.close, fp.close)
+            } else {
+                (fp.low, fp.high, fp.open)
+            };
             // Conservative ordering: assume the stop is touched before the target within a bar.
             // A bar that OPENS through the stop triggers at that open (gap-through) — a resting
             // stop cannot fill at a price the market never traded. A triggered stop becomes a
@@ -638,8 +816,8 @@ impl Broker {
             // at the target price with no slippage.
             let exit = if pos.dir > 0 {
                 if let Some(stop) = pos.stop {
-                    if fp.low <= stop {
-                        Some((self.slip(fp.open.min(stop), -1), TradeReason::StopLoss))
+                    if stop_low <= stop {
+                        Some((self.slip(stop_open.min(stop), -1), TradeReason::StopLoss))
                     } else {
                         None
                     }
@@ -657,8 +835,8 @@ impl Broker {
                 })
             } else {
                 if let Some(stop) = pos.stop {
-                    if fp.high >= stop {
-                        Some((self.slip(fp.open.max(stop), 1), TradeReason::StopLoss))
+                    if stop_high >= stop {
+                        Some((self.slip(stop_open.max(stop), 1), TradeReason::StopLoss))
                     } else {
                         None
                     }
@@ -683,11 +861,16 @@ impl Broker {
 
     fn update_adverse_excursion(&mut self, fp: &Footprint) {
         for pos in &mut self.positions {
+            let (low, high) = if pos.stop_entered_intrabar && pos.entry_ts == fp.ts_first_ns {
+                (fp.close, fp.close)
+            } else {
+                (fp.low, fp.high)
+            };
             let adverse_px = if pos.dir > 0 {
-                let worst = pos.stop.filter(|stop| fp.low <= *stop).unwrap_or(fp.low);
+                let worst = pos.stop.filter(|stop| low <= *stop).unwrap_or(low);
                 (pos.entry_px - worst).max(0.0)
             } else {
-                let worst = pos.stop.filter(|stop| fp.high >= *stop).unwrap_or(fp.high);
+                let worst = pos.stop.filter(|stop| high >= *stop).unwrap_or(high);
                 (worst - pos.entry_px).max(0.0)
             };
             let adverse_ticks = if self.tick_size > 0.0 {
@@ -787,6 +970,29 @@ impl Broker {
             position_count: self.position_count(),
             pending_count: self.pending_count(),
             open_position: self.open_position_info(),
+            open_lots: self
+                .positions
+                .iter()
+                .map(|p| OpenLotInfo {
+                    id: p.id,
+                    dir: p.dir,
+                    entry_px: p.entry_px,
+                    entry_ts_ns: p.entry_ts,
+                    stop: p.stop,
+                })
+                .collect(),
+            long_stop: self
+                .positions
+                .iter()
+                .filter(|p| p.dir > 0)
+                .filter_map(|p| p.stop)
+                .reduce(f64::min),
+            short_stop: self
+                .positions
+                .iter()
+                .filter(|p| p.dir < 0)
+                .filter_map(|p| p.stop)
+                .reduce(f64::max),
         }
     }
 
@@ -820,9 +1026,42 @@ impl Broker {
                 OrderAction::Add(intent) => self.add_pending(intent.into_order()),
                 OrderAction::CancelPending => self.clear_pending(),
                 OrderAction::ExitPosition => self.set_single_pending(PendingKind::Flat),
+                OrderAction::TightenStop(price, side, before) => {
+                    self.tighten_stop(price, side, before)
+                }
+                OrderAction::TightenLotStop(lot_id, price) => {
+                    if let Some(position) = self.positions.iter_mut().find(|p| p.id == lot_id) {
+                        position.tighten_stop(price);
+                    }
+                }
+                OrderAction::ReplaceStopPair {
+                    buy,
+                    sell,
+                    max_gap_ns,
+                } => {
+                    self.set_single_pending(PendingKind::StopPair {
+                        buy: buy.into_order(),
+                        sell: sell.into_order(),
+                        max_gap_ns,
+                    });
+                }
             }
         }
         (plots, series)
+    }
+
+    fn tighten_stop(&mut self, price: f64, side: Option<TradeSide>, before: Option<i64>) {
+        if !price.is_finite() {
+            return;
+        }
+        for position in &mut self.positions {
+            if side.is_some_and(|side| side.dir() != position.dir)
+                || before.is_some_and(|before| position.entry_ts >= before)
+            {
+                continue;
+            }
+            position.tighten_stop(price);
+        }
     }
 
     fn has_only_position_dir(&self, dir: i32) -> bool {
@@ -903,6 +1142,17 @@ impl Broker {
                 }
                 OrderAction::CancelPending => self.clear_pending(),
                 OrderAction::ExitPosition => self.close_all_at_open(price, ts, TradeReason::Signal),
+                OrderAction::TightenStop(price, side, before) => {
+                    self.tighten_stop(price, side, before)
+                }
+                OrderAction::TightenLotStop(lot_id, price) => {
+                    if let Some(position) = self.positions.iter_mut().find(|p| p.id == lot_id) {
+                        position.tighten_stop(price);
+                    }
+                }
+                OrderAction::ReplaceStopPair { .. } => {
+                    return Err("stop pairs require footprint execution".into());
+                }
             }
         }
         Ok((plots, series))
@@ -921,6 +1171,34 @@ impl Broker {
 
     pub fn starting_equity(&self) -> f64 {
         self.cfg.starting_equity
+    }
+}
+
+/// Resolve the first side of an OCO stop pair from a footprint. If both are inside
+/// the bar and the order of prints is unknown, use the trigger nearest the open.
+pub fn stop_pair_trigger(fp: &Footprint, upper: f64, lower: f64) -> Option<TradeSide> {
+    match (
+        reaches_stop(fp.high, upper, 1),
+        reaches_stop(fp.low, lower, -1),
+    ) {
+        (true, true) if fp.open - lower < upper - fp.open => Some(TradeSide::Short),
+        (true, _) => Some(TradeSide::Long),
+        (_, true) => Some(TradeSide::Short),
+        _ => None,
+    }
+}
+
+fn reaches_stop(price: f64, trigger: f64, dir: i32) -> bool {
+    // Decimal market prices can land a few ULPs off their exact tick after decoding.
+    let tolerance = 4.0 * f64::EPSILON * price.abs().max(trigger.abs());
+    price.is_finite() && trigger.is_finite() && (price - trigger) * dir as f64 >= -tolerance
+}
+
+fn stop_market_fill(fp: &Footprint, dir: i32, trigger: f64) -> Option<f64> {
+    if dir > 0 {
+        reaches_stop(fp.high, trigger, dir).then_some(fp.open.max(trigger))
+    } else {
+        reaches_stop(fp.low, trigger, dir).then_some(fp.open.min(trigger))
     }
 }
 
